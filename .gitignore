@@ -1,0 +1,33 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+build/
+.next/
+*.tsbuildinfo
+
+# test artifacts
+coverage/
+*.log
+
+# editors / OS
+.DS_Store
+.idea/
+.vscode/
+
+# local viberevert state (self-dogfooding)
+.viberevert/
+
+# pnpm
+.pnpm-store/
+
+# env
+.env
+.env.local
+.env.*.local
+
+# local-only planning docs (not for the public repo)
+VibeRevert_CLI_Detailed_Build_Plan.md
+VibeRevert_Project_Roadmap_Licensing.md
+full_beta_plan.md
