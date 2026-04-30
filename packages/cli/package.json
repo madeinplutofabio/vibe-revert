@@ -1,0 +1,45 @@
+{
+  "name": "viberevert",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "author": "Fabio Marcello Salvadori <fabio@madeinpluto.com>",
+  "description": "The safety belt for vibe coding. Visible, reversible, and safer AI coding sessions.",
+  "homepage": "https://github.com/madeinplutofabio/vibe-revert#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/madeinplutofabio/vibe-revert.git",
+    "directory": "packages/cli"
+  },
+  "bugs": {
+    "url": "https://github.com/madeinplutofabio/vibe-revert/issues"
+  },
+  "keywords": [
+    "ai",
+    "coding",
+    "safety",
+    "checkpoint",
+    "rollback",
+    "claude-code",
+    "cursor",
+    "codex"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "viberevert": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  }
+}
