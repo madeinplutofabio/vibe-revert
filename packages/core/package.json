@@ -23,8 +23,14 @@
   "publishConfig": {
     "access": "public"
   },
+  "dependencies": {
+    "@viberevert/session-format": "workspace:*",
+    "yaml": "2.8.3",
+    "zod": "4.4.1"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
   }
 }
