@@ -6,6 +6,10 @@
 //
 // Scalar string schemas are pure validators (no silent trimming). Trimming
 // happens only in producer-side helpers like normalizeStringArray.
+//
+// Naming convention: <Thing>Schema is the runtime zod value; <Thing> is the
+// inferred TypeScript type. This avoids value/type same-name ambiguity at the
+// public-API barrel and at every call site.
 
 import { z } from "zod";
 import { SCHEMA_VERSION } from "./version.js";
@@ -128,20 +132,20 @@ const sortedUniqueStringArray = z
 // Enum atoms
 // =============================================================================
 
-export const RiskLevel = z.enum(["low", "medium", "high", "critical"]);
-export type RiskLevel = z.infer<typeof RiskLevel>;
+export const RiskLevelSchema = z.enum(["low", "medium", "high", "critical"]);
+export type RiskLevel = z.infer<typeof RiskLevelSchema>;
 
-export const Confidence = z.enum(["low", "medium", "high"]);
-export type Confidence = z.infer<typeof Confidence>;
+export const ConfidenceSchema = z.enum(["low", "medium", "high"]);
+export type Confidence = z.infer<typeof ConfidenceSchema>;
 
-export const ChangedFileStatus = z.enum([
+export const ChangedFileStatusSchema = z.enum([
   "added",
   "modified",
   "deleted",
   "renamed",
   "type_changed",
 ]);
-export type ChangedFileStatus = z.infer<typeof ChangedFileStatus>;
+export type ChangedFileStatus = z.infer<typeof ChangedFileStatusSchema>;
 
 // =============================================================================
 // Evidence (strict)
@@ -149,7 +153,7 @@ export type ChangedFileStatus = z.infer<typeof ChangedFileStatus>;
 // Refinement: if `line` is present, `file` must also be present.
 // =============================================================================
 
-export const Evidence = z
+export const EvidenceSchema = z
   .strictObject({
     detail: nonBlankString,
     file: safeStoredRelativePath.optional(),
@@ -160,7 +164,7 @@ export const Evidence = z
     message: "file is required when line is present",
     path: ["file"],
   });
-export type Evidence = z.infer<typeof Evidence>;
+export type Evidence = z.infer<typeof EvidenceSchema>;
 
 // =============================================================================
 // ChangedFile (strict)
@@ -171,13 +175,13 @@ export type Evidence = z.infer<typeof Evidence>;
 //   - previous_path (when present) must differ from path
 // =============================================================================
 
-export const ChangedFile = z
+export const ChangedFileSchema = z
   .strictObject({
     path: safeStoredRelativePath,
     previous_path: safeStoredRelativePath.optional(),
-    status: ChangedFileStatus,
+    status: ChangedFileStatusSchema,
     risk_tags: sortedUniqueStringArray,
-    risk_level: RiskLevel,
+    risk_level: RiskLevelSchema,
   })
   .refine(
     (f) => f.status !== "renamed" || typeof f.previous_path === "string",
@@ -194,7 +198,7 @@ export const ChangedFile = z
     message: "previous_path must differ from path",
     path: ["previous_path"],
   });
-export type ChangedFile = z.infer<typeof ChangedFile>;
+export type ChangedFile = z.infer<typeof ChangedFileSchema>;
 
 // =============================================================================
 // CheckResult (strict)
@@ -204,15 +208,15 @@ export type ChangedFile = z.infer<typeof ChangedFile>;
 //   - high/critical findings must include a recommendation
 // =============================================================================
 
-export const CheckResult = z
+export const CheckResultSchema = z
   .strictObject({
     id: nonBlankString,
     title: nonBlankString,
-    level: RiskLevel,
-    confidence: Confidence,
+    level: RiskLevelSchema,
+    confidence: ConfidenceSchema,
     category: nonBlankString,
     message: nonBlankString,
-    evidence: z.array(Evidence).min(1),
+    evidence: z.array(EvidenceSchema).min(1),
     recommendation: nonBlankString.optional(),
   })
   .refine(
@@ -224,7 +228,7 @@ export const CheckResult = z
       path: ["recommendation"],
     },
   );
-export type CheckResult = z.infer<typeof CheckResult>;
+export type CheckResult = z.infer<typeof CheckResultSchema>;
 
 // =============================================================================
 // Manifest (strict; rollback contract)
@@ -237,7 +241,7 @@ export type CheckResult = z.infer<typeof CheckResult>;
 
 const FileHashMap = z.record(safeStoredRelativePath, z.hash("sha256"));
 
-export const Manifest = z.strictObject({
+export const ManifestSchema = z.strictObject({
   schema_version: z.literal(SCHEMA_VERSION),
   session_id: nonBlankString,
   captured_at: z.iso.datetime({ offset: true, precision: 0 }),
@@ -260,13 +264,13 @@ export const Manifest = z.strictObject({
   }),
   rollback_target_description: nonBlankString,
 });
-export type Manifest = z.infer<typeof Manifest>;
+export type Manifest = z.infer<typeof ManifestSchema>;
 
 // =============================================================================
 // SessionReport (strict; top-level session.json artifact)
 // =============================================================================
 
-export const SessionReport = z.strictObject({
+export const SessionReportSchema = z.strictObject({
   schema_version: z.literal(SCHEMA_VERSION),
   session_id: nonBlankString,
   started_at: z.iso.datetime({ offset: true, precision: 0 }),
@@ -275,10 +279,10 @@ export const SessionReport = z.strictObject({
   detected_frameworks: sortedUniqueStringArray,
   task: nonBlankString.optional(),
   checkpoint_id: nonBlankString.optional(),
-  risk_level: RiskLevel,
-  changed_files: z.array(ChangedFile),
-  results: z.array(CheckResult),
+  risk_level: RiskLevelSchema,
+  changed_files: z.array(ChangedFileSchema),
+  results: z.array(CheckResultSchema),
   rollback_available: z.boolean(),
   summary: nonBlankString.optional(),
 });
-export type SessionReport = z.infer<typeof SessionReport>;
+export type SessionReport = z.infer<typeof SessionReportSchema>;

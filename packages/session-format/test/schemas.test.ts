@@ -3,17 +3,17 @@
 
 import { describe, expect, it } from "vitest";
 import {
-  ChangedFile,
   ChangedFileJsonSchema,
-  CheckResult,
+  ChangedFileSchema,
   CheckResultJsonSchema,
-  Evidence,
+  CheckResultSchema,
   EvidenceJsonSchema,
-  Manifest,
+  EvidenceSchema,
   ManifestJsonSchema,
+  ManifestSchema,
   SCHEMA_VERSION,
-  SessionReport,
   SessionReportJsonSchema,
+  SessionReportSchema,
   isSafeStoredRelativePath,
   isSortedUniqueStringArray,
   normalizeRelativePath,
@@ -105,28 +105,28 @@ describe("normalizeStringArray", () => {
   });
 });
 
-describe("Evidence", () => {
+describe("EvidenceSchema", () => {
   it("accepts minimal valid", () => {
-    expect(Evidence.parse({ detail: "missing test" })).toEqual({
+    expect(EvidenceSchema.parse({ detail: "missing test" })).toEqual({
       detail: "missing test",
     });
   });
 
   it("accepts with file and line", () => {
     const v = { detail: "x", file: "app/foo.ts", line: 12 };
-    expect(Evidence.parse(v)).toEqual(v);
+    expect(EvidenceSchema.parse(v)).toEqual(v);
   });
 
   it("rejects line without file", () => {
-    expect(() => Evidence.parse({ detail: "x", line: 12 })).toThrow();
+    expect(() => EvidenceSchema.parse({ detail: "x", line: 12 })).toThrow();
   });
 
   it("rejects unknown fields (strict)", () => {
-    expect(() => Evidence.parse({ detail: "x", extra: 1 })).toThrow();
+    expect(() => EvidenceSchema.parse({ detail: "x", extra: 1 })).toThrow();
   });
 });
 
-describe("ChangedFile", () => {
+describe("ChangedFileSchema", () => {
   const baseAdded = {
     path: "src/foo.ts",
     status: "added" as const,
@@ -135,7 +135,7 @@ describe("ChangedFile", () => {
   };
 
   it("accepts valid added", () => {
-    expect(ChangedFile.parse(baseAdded)).toEqual(baseAdded);
+    expect(ChangedFileSchema.parse(baseAdded)).toEqual(baseAdded);
   });
 
   it("accepts renamed with previous_path", () => {
@@ -145,24 +145,24 @@ describe("ChangedFile", () => {
       previous_path: "src/old.ts",
       path: "src/new.ts",
     };
-    expect(ChangedFile.parse(v)).toEqual(v);
+    expect(ChangedFileSchema.parse(v)).toEqual(v);
   });
 
   it("rejects renamed without previous_path", () => {
     expect(() =>
-      ChangedFile.parse({ ...baseAdded, status: "renamed" }),
+      ChangedFileSchema.parse({ ...baseAdded, status: "renamed" }),
     ).toThrow();
   });
 
   it("rejects added with previous_path", () => {
     expect(() =>
-      ChangedFile.parse({ ...baseAdded, previous_path: "src/old.ts" }),
+      ChangedFileSchema.parse({ ...baseAdded, previous_path: "src/old.ts" }),
     ).toThrow();
   });
 
   it("rejects renamed with previous_path === path", () => {
     expect(() =>
-      ChangedFile.parse({
+      ChangedFileSchema.parse({
         ...baseAdded,
         status: "renamed",
         previous_path: baseAdded.path,
@@ -172,30 +172,33 @@ describe("ChangedFile", () => {
 
   it("rejects unsorted risk_tags", () => {
     expect(() =>
-      ChangedFile.parse({ ...baseAdded, risk_tags: ["payments", "auth"] }),
+      ChangedFileSchema.parse({
+        ...baseAdded,
+        risk_tags: ["payments", "auth"],
+      }),
     ).toThrow();
   });
 
   it("rejects duplicate risk_tags", () => {
     expect(() =>
-      ChangedFile.parse({ ...baseAdded, risk_tags: ["auth", "auth"] }),
+      ChangedFileSchema.parse({ ...baseAdded, risk_tags: ["auth", "auth"] }),
     ).toThrow();
   });
 
   it("rejects empty-string risk_tags", () => {
     expect(() =>
-      ChangedFile.parse({ ...baseAdded, risk_tags: [""] }),
+      ChangedFileSchema.parse({ ...baseAdded, risk_tags: [""] }),
     ).toThrow();
   });
 
   it("rejects whitespace-only risk_tags", () => {
     expect(() =>
-      ChangedFile.parse({ ...baseAdded, risk_tags: ["   "] }),
+      ChangedFileSchema.parse({ ...baseAdded, risk_tags: ["   "] }),
     ).toThrow();
   });
 });
 
-describe("CheckResult", () => {
+describe("CheckResultSchema", () => {
   const baseLow = {
     id: "test-1",
     title: "Title",
@@ -207,19 +210,19 @@ describe("CheckResult", () => {
   };
 
   it("accepts low without recommendation", () => {
-    expect(CheckResult.parse(baseLow)).toEqual(baseLow);
+    expect(CheckResultSchema.parse(baseLow)).toEqual(baseLow);
   });
 
   it("accepts medium without recommendation", () => {
     const v = { ...baseLow, level: "medium" as const };
-    expect(CheckResult.parse(v)).toEqual(v);
+    expect(CheckResultSchema.parse(v)).toEqual(v);
   });
 
   // Locks the contract-wide rule that nonBlankString rejects whitespace-only
   // scalar strings. Protects against a future "simplification" back to .min(1).
   it("rejects whitespace-only scalar strings via nonBlankString", () => {
     expect(() =>
-      CheckResult.parse({
+      CheckResultSchema.parse({
         ...baseLow,
         id: "   ",
       }),
@@ -227,13 +230,15 @@ describe("CheckResult", () => {
   });
 
   it("rejects empty evidence array", () => {
-    expect(() => CheckResult.parse({ ...baseLow, evidence: [] })).toThrow();
+    expect(() =>
+      CheckResultSchema.parse({ ...baseLow, evidence: [] }),
+    ).toThrow();
   });
 
   it.each(["high", "critical"] as const)(
     "rejects %s without recommendation",
     (level) => {
-      expect(() => CheckResult.parse({ ...baseLow, level })).toThrow();
+      expect(() => CheckResultSchema.parse({ ...baseLow, level })).toThrow();
     },
   );
 
@@ -241,12 +246,12 @@ describe("CheckResult", () => {
     "accepts %s with recommendation",
     (level) => {
       const v = { ...baseLow, level, recommendation: "fix it" };
-      expect(CheckResult.parse(v)).toEqual(v);
+      expect(CheckResultSchema.parse(v)).toEqual(v);
     },
   );
 });
 
-describe("Manifest", () => {
+describe("ManifestSchema", () => {
   const validManifest = {
     schema_version: "1.0" as const,
     session_id: "session-1",
@@ -275,24 +280,27 @@ describe("Manifest", () => {
   };
 
   it("accepts a valid manifest", () => {
-    expect(Manifest.parse(validManifest)).toEqual(validManifest);
+    expect(ManifestSchema.parse(validManifest)).toEqual(validManifest);
   });
 
   it("rejects wrong schema_version", () => {
     expect(() =>
-      Manifest.parse({ ...validManifest, schema_version: "2.0" }),
+      ManifestSchema.parse({ ...validManifest, schema_version: "2.0" }),
     ).toThrow();
   });
 
   it("rejects timestamp without offset", () => {
     expect(() =>
-      Manifest.parse({ ...validManifest, captured_at: "2026-04-30T18:00:00" }),
+      ManifestSchema.parse({
+        ...validManifest,
+        captured_at: "2026-04-30T18:00:00",
+      }),
     ).toThrow();
   });
 
   it("rejects timestamp with fractional seconds", () => {
     expect(() =>
-      Manifest.parse({
+      ManifestSchema.parse({
         ...validManifest,
         captured_at: "2026-04-30T18:00:00.123Z",
       }),
@@ -301,7 +309,7 @@ describe("Manifest", () => {
 
   it("rejects non-canonical path in diffs", () => {
     expect(() =>
-      Manifest.parse({
+      ManifestSchema.parse({
         ...validManifest,
         diffs: {
           ...validManifest.diffs,
@@ -313,7 +321,7 @@ describe("Manifest", () => {
 
   it("rejects non-sha256 hash value", () => {
     expect(() =>
-      Manifest.parse({
+      ManifestSchema.parse({
         ...validManifest,
         snapshots: {
           ...validManifest.snapshots,
@@ -325,12 +333,12 @@ describe("Manifest", () => {
 
   it("rejects unknown top-level field (strict)", () => {
     expect(() =>
-      Manifest.parse({ ...validManifest, extra_field: "nope" }),
+      ManifestSchema.parse({ ...validManifest, extra_field: "nope" }),
     ).toThrow();
   });
 });
 
-describe("SessionReport", () => {
+describe("SessionReportSchema", () => {
   it("accepts a valid full round-trip", () => {
     const report = {
       schema_version: "1.0" as const,
@@ -369,12 +377,12 @@ describe("SessionReport", () => {
       rollback_available: true,
       summary: "Modified billing controller",
     };
-    expect(SessionReport.parse(report)).toEqual(report);
+    expect(SessionReportSchema.parse(report)).toEqual(report);
   });
 
   it("rejects detected_frameworks not sorted-unique", () => {
     expect(() =>
-      SessionReport.parse({
+      SessionReportSchema.parse({
         schema_version: "1.0",
         session_id: "session-1",
         started_at: "2026-04-30T18:00:00Z",
@@ -389,7 +397,7 @@ describe("SessionReport", () => {
 
   it("rejects whitespace-only detected_frameworks entries", () => {
     expect(() =>
-      SessionReport.parse({
+      SessionReportSchema.parse({
         schema_version: "1.0",
         session_id: "session-1",
         started_at: "2026-04-30T18:00:00Z",

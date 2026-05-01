@@ -18,26 +18,32 @@
 
 import { z } from "zod";
 import {
-  ChangedFile,
-  CheckResult,
-  Evidence,
-  Manifest,
-  SessionReport,
+  ChangedFileSchema,
+  CheckResultSchema,
+  EvidenceSchema,
+  ManifestSchema,
+  SessionReportSchema,
 } from "./schemas.js";
 
 const JSON_SCHEMA_OPTIONS = { target: "draft-2020-12" as const };
 
-export const EvidenceJsonSchema = z.toJSONSchema(Evidence, JSON_SCHEMA_OPTIONS);
+export const EvidenceJsonSchema = z.toJSONSchema(
+  EvidenceSchema,
+  JSON_SCHEMA_OPTIONS,
+);
 export const ChangedFileJsonSchema = z.toJSONSchema(
-  ChangedFile,
+  ChangedFileSchema,
   JSON_SCHEMA_OPTIONS,
 );
 export const CheckResultJsonSchema = z.toJSONSchema(
-  CheckResult,
+  CheckResultSchema,
   JSON_SCHEMA_OPTIONS,
 );
-export const ManifestJsonSchema = z.toJSONSchema(Manifest, JSON_SCHEMA_OPTIONS);
+export const ManifestJsonSchema = z.toJSONSchema(
+  ManifestSchema,
+  JSON_SCHEMA_OPTIONS,
+);
 export const SessionReportJsonSchema = z.toJSONSchema(
-  SessionReport,
+  SessionReportSchema,
   JSON_SCHEMA_OPTIONS,
 );
