@@ -27,6 +27,9 @@ coverage/
 .env.local
 .env.*.local
 
+# packed tarballs (smoke-test, M H release prep)
+*.tgz
+
 # local-only planning docs (not for the public repo)
 VibeRevert_CLI_Detailed_Build_Plan.md
 VibeRevert_Project_Roadmap_Licensing.md
