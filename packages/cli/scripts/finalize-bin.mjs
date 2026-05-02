@@ -32,9 +32,7 @@ async function main() {
   try {
     binStat = await stat(BIN_PATH);
   } catch {
-    console.error(
-      `finalize-bin: ${BIN_PATH} not found. Run \`tsc -p tsconfig.build.json\` first.`,
-    );
+    console.error(`finalize-bin: ${BIN_PATH} not found. Run \`tsc -p tsconfig.build.json\` first.`);
     process.exitCode = 1;
     return;
   }

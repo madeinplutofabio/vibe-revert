@@ -130,9 +130,7 @@ export class ConfigValidationError extends Error {
   readonly issues: z.ZodError["issues"];
 
   constructor(configPath: string, zodError: z.ZodError) {
-    const summary = zodError.issues
-      .map((i) => `${i.path.join(".")}: ${i.message}`)
-      .join("; ");
+    const summary = zodError.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ");
     super(`Config validation failed in ${configPath}: ${summary}`, {
       cause: zodError,
     });

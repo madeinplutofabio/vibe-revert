@@ -11,13 +11,8 @@
 //   - <Thing>Schema is the runtime zod value.
 //   - <Thing> is the inferred TypeScript type.
 
-// Path helpers + repo-root resolution.
-export {
-  RepoRootNotFoundError,
-  ensureViberevertDirs,
-  resolveRepoRoot,
-  viberevertDir,
-} from "./paths.js";
+// Inferred TypeScript types from the schema.
+export type { Config } from "./config.js";
 
 // Config schema, loader, and error subclasses.
 export {
@@ -27,9 +22,13 @@ export {
   ConfigValidationError,
   loadConfig,
 } from "./config.js";
-
-// Inferred TypeScript types from the schema.
-export type { Config } from "./config.js";
+// Path helpers + repo-root resolution.
+export {
+  ensureViberevertDirs,
+  RepoRootNotFoundError,
+  resolveRepoRoot,
+  viberevertDir,
+} from "./paths.js";
 
 // Redaction (stub for v0.7.0-beta; reserved for future cloud-sync seam).
-export { SECRET_PATTERN_COUNT, redact } from "./redact.js";
+export { redact, SECRET_PATTERN_COUNT } from "./redact.js";

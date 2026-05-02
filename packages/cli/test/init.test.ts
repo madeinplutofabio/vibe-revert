@@ -72,18 +72,14 @@ async function runInit(
 
   const stdoutStub = new Writable({
     write(chunk, _encoding, callback) {
-      stdoutChunks.push(
-        typeof chunk === "string" ? chunk : Buffer.from(chunk).toString(),
-      );
+      stdoutChunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString());
       callback();
     },
   });
 
   const stderrStub = new Writable({
     write(chunk, _encoding, callback) {
-      stderrChunks.push(
-        typeof chunk === "string" ? chunk : Buffer.from(chunk).toString(),
-      );
+      stderrChunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString());
       callback();
     },
   });
@@ -116,30 +112,25 @@ describe("init — golden output per fixture", () => {
     ["laravel-init-target"],
     ["nextjs-init-target"],
     ["generic-init-target"],
-  ])(
-    "%s produces the expected .viberevert.yml and scaffolds .viberevert/",
-    async (fixture) => {
-      const workDir = await setupFixture(fixture);
+  ])("%s produces the expected .viberevert.yml and scaffolds .viberevert/", async (fixture) => {
+    const workDir = await setupFixture(fixture);
 
-      const result = await runInit([]);
-      expect(result.exitCode).toBe(0);
-      expect(result.stdout).toContain("Wrote");
-      expect(result.stdout).toContain("Done.");
+    const result = await runInit([]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("Wrote");
+    expect(result.stdout).toContain("Done.");
 
-      // Golden YAML matches.
-      const actual = await readNormalized(join(workDir, ".viberevert.yml"));
-      const expected = await readNormalized(
-        join(workDir, "expected", ".viberevert.yml"),
-      );
-      expect(actual).toBe(expected);
+    // Golden YAML matches.
+    const actual = await readNormalized(join(workDir, ".viberevert.yml"));
+    const expected = await readNormalized(join(workDir, "expected", ".viberevert.yml"));
+    expect(actual).toBe(expected);
 
-      // .viberevert/ subdirs were actually created.
-      for (const sub of ["sessions", "checkpoints", "reports"]) {
-        const s = await stat(join(workDir, ".viberevert", sub));
-        expect(s.isDirectory()).toBe(true);
-      }
-    },
-  );
+    // .viberevert/ subdirs were actually created.
+    for (const sub of ["sessions", "checkpoints", "reports"]) {
+      const s = await stat(join(workDir, ".viberevert", sub));
+      expect(s.isDirectory()).toBe(true);
+    }
+  });
 });
 
 describe("init — overwrite guard", () => {

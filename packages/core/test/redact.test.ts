@@ -2,7 +2,7 @@
 // Copyright 2026 Fabio Marcello Salvadori
 
 import { describe, expect, it } from "vitest";
-import { SECRET_PATTERN_COUNT, redact } from "../src/index.js";
+import { redact, SECRET_PATTERN_COUNT } from "../src/index.js";
 
 describe("SECRET_PATTERN_COUNT", () => {
   it("matches the documented pattern set size", () => {
@@ -40,8 +40,7 @@ describe("redact", () => {
   });
 
   it("redacts a PEM-armored EC private key (matches generic [A-Z ]* prefix)", () => {
-    const pem =
-      "-----BEGIN EC PRIVATE KEY-----\ndata\n-----END EC PRIVATE KEY-----";
+    const pem = "-----BEGIN EC PRIVATE KEY-----\ndata\n-----END EC PRIVATE KEY-----";
     expect(redact(pem)).toBe("[REDACTED]");
   });
 
@@ -56,8 +55,7 @@ describe("redact", () => {
   });
 
   it("redacts mixed patterns in one string", () => {
-    const input =
-      "GitHub: ghp_1234567890123456789012345678901234567890 AWS: AKIAIOSFODNN7EXAMPLE";
+    const input = "GitHub: ghp_1234567890123456789012345678901234567890 AWS: AKIAIOSFODNN7EXAMPLE";
     expect(redact(input)).toBe("GitHub: [REDACTED] AWS: [REDACTED]");
   });
 
@@ -76,8 +74,7 @@ describe("redact", () => {
   });
 
   it("is stable across repeated calls with reused global patterns", () => {
-    const input =
-      "sk_live_abc123XYZ and ghp_1234567890123456789012345678901234567890";
+    const input = "sk_live_abc123XYZ and ghp_1234567890123456789012345678901234567890";
     expect(redact(input)).toBe("[REDACTED] and [REDACTED]");
     expect(redact(input)).toBe("[REDACTED] and [REDACTED]");
   });

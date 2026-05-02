@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Fabio Marcello Salvadori
 
-import { mkdtemp, mkdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
-  RepoRootNotFoundError,
   ensureViberevertDirs,
+  RepoRootNotFoundError,
   resolveRepoRoot,
   viberevertDir,
 } from "../src/index.js";
@@ -30,9 +30,7 @@ describe("viberevertDir", () => {
 
   it("does not check existence", () => {
     // Pure path join; works on a path that doesn't exist.
-    expect(viberevertDir("/no/such/path")).toBe(
-      join("/no/such/path", ".viberevert"),
-    );
+    expect(viberevertDir("/no/such/path")).toBe(join("/no/such/path", ".viberevert"));
   });
 });
 

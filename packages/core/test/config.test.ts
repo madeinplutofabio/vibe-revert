@@ -104,9 +104,7 @@ describe("ConfigSchema (parse-only, no I/O)", () => {
   });
 
   it("rejects llm.enabled = true (locked false-only for v0.7.0)", () => {
-    expect(() =>
-      ConfigSchema.parse({ version: 1, llm: { enabled: true } }),
-    ).toThrow();
+    expect(() => ConfigSchema.parse({ version: 1, llm: { enabled: true } })).toThrow();
   });
 
   it("accepts llm.enabled = false explicitly", () => {
@@ -115,9 +113,7 @@ describe("ConfigSchema (parse-only, no I/O)", () => {
   });
 
   it("rejects unknown top-level fields (strict)", () => {
-    expect(() =>
-      ConfigSchema.parse({ version: 1, unknown_field: "nope" }),
-    ).toThrow();
+    expect(() => ConfigSchema.parse({ version: 1, unknown_field: "nope" })).toThrow();
   });
 
   it("rejects unknown nested fields (strict)", () => {
@@ -130,15 +126,11 @@ describe("ConfigSchema (parse-only, no I/O)", () => {
   });
 
   it("rejects blank profile string", () => {
-    expect(() =>
-      ConfigSchema.parse({ version: 1, profile: "   " }),
-    ).toThrow();
+    expect(() => ConfigSchema.parse({ version: 1, profile: "   " })).toThrow();
   });
 
   it("rejects blank project.name", () => {
-    expect(() =>
-      ConfigSchema.parse({ version: 1, project: { name: "" } }),
-    ).toThrow();
+    expect(() => ConfigSchema.parse({ version: 1, project: { name: "" } })).toThrow();
   });
 
   it("rejects blank entries inside string arrays", () => {
@@ -195,9 +187,7 @@ llm:
   });
 
   it("throws ConfigNotFoundError when .viberevert.yml is missing", async () => {
-    await expect(loadConfig(tmpRoot)).rejects.toBeInstanceOf(
-      ConfigNotFoundError,
-    );
+    await expect(loadConfig(tmpRoot)).rejects.toBeInstanceOf(ConfigNotFoundError);
   });
 
   it("throws ConfigParseError on malformed YAML", async () => {
@@ -207,9 +197,7 @@ llm:
 
   it("throws ConfigValidationError on schema violation", async () => {
     await writeConfig("version: 99\n");
-    await expect(loadConfig(tmpRoot)).rejects.toBeInstanceOf(
-      ConfigValidationError,
-    );
+    await expect(loadConfig(tmpRoot)).rejects.toBeInstanceOf(ConfigValidationError);
   });
 
   it("ConfigValidationError exposes structured zod issues", async () => {
@@ -240,16 +228,12 @@ llm:
 
   it("error class names are stable", () => {
     expect(new ConfigNotFoundError("/x").name).toBe("ConfigNotFoundError");
-    expect(new ConfigParseError("/x", new Error("y")).name).toBe(
-      "ConfigParseError",
-    );
+    expect(new ConfigParseError("/x", new Error("y")).name).toBe("ConfigParseError");
 
     const parsed = ConfigSchema.safeParse({ version: 99 });
     if (parsed.success) {
       throw new Error("expected schema parse to fail");
     }
-    expect(new ConfigValidationError("/x", parsed.error).name).toBe(
-      "ConfigValidationError",
-    );
+    expect(new ConfigValidationError("/x", parsed.error).name).toBe("ConfigValidationError");
   });
 });

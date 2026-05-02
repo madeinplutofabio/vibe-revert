@@ -27,23 +27,8 @@ import {
 
 const JSON_SCHEMA_OPTIONS = { target: "draft-2020-12" as const };
 
-export const EvidenceJsonSchema = z.toJSONSchema(
-  EvidenceSchema,
-  JSON_SCHEMA_OPTIONS,
-);
-export const ChangedFileJsonSchema = z.toJSONSchema(
-  ChangedFileSchema,
-  JSON_SCHEMA_OPTIONS,
-);
-export const CheckResultJsonSchema = z.toJSONSchema(
-  CheckResultSchema,
-  JSON_SCHEMA_OPTIONS,
-);
-export const ManifestJsonSchema = z.toJSONSchema(
-  ManifestSchema,
-  JSON_SCHEMA_OPTIONS,
-);
-export const SessionReportJsonSchema = z.toJSONSchema(
-  SessionReportSchema,
-  JSON_SCHEMA_OPTIONS,
-);
+export const EvidenceJsonSchema = z.toJSONSchema(EvidenceSchema, JSON_SCHEMA_OPTIONS);
+export const ChangedFileJsonSchema = z.toJSONSchema(ChangedFileSchema, JSON_SCHEMA_OPTIONS);
+export const CheckResultJsonSchema = z.toJSONSchema(CheckResultSchema, JSON_SCHEMA_OPTIONS);
+export const ManifestJsonSchema = z.toJSONSchema(ManifestSchema, JSON_SCHEMA_OPTIONS);
+export const SessionReportJsonSchema = z.toJSONSchema(SessionReportSchema, JSON_SCHEMA_OPTIONS);

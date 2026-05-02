@@ -15,25 +15,14 @@
 //   - <Thing>JsonSchema is the derived JSON Schema object (use for tooling /
 //     external publication).
 
-export { SCHEMA_VERSION } from "./version.js";
-export type { SchemaVersion } from "./version.js";
-
-// Runtime zod schema values + helpers.
+// JSON Schema exports.
 export {
-  ChangedFileSchema,
-  ChangedFileStatusSchema,
-  CheckResultSchema,
-  ConfidenceSchema,
-  EvidenceSchema,
-  ManifestSchema,
-  RiskLevelSchema,
-  SessionReportSchema,
-  isSafeStoredRelativePath,
-  isSortedUniqueStringArray,
-  normalizeRelativePath,
-  normalizeStringArray,
-} from "./schemas.js";
-
+  ChangedFileJsonSchema,
+  CheckResultJsonSchema,
+  EvidenceJsonSchema,
+  ManifestJsonSchema,
+  SessionReportJsonSchema,
+} from "./json-schema.js";
 // Inferred TypeScript types.
 export type {
   ChangedFile,
@@ -46,11 +35,20 @@ export type {
   SessionReport,
 } from "./schemas.js";
 
-// JSON Schema exports.
+// Runtime zod schema values + helpers.
 export {
-  ChangedFileJsonSchema,
-  CheckResultJsonSchema,
-  EvidenceJsonSchema,
-  ManifestJsonSchema,
-  SessionReportJsonSchema,
-} from "./json-schema.js";
+  ChangedFileSchema,
+  ChangedFileStatusSchema,
+  CheckResultSchema,
+  ConfidenceSchema,
+  EvidenceSchema,
+  isSafeStoredRelativePath,
+  isSortedUniqueStringArray,
+  ManifestSchema,
+  normalizeRelativePath,
+  normalizeStringArray,
+  RiskLevelSchema,
+  SessionReportSchema,
+} from "./schemas.js";
+export type { SchemaVersion } from "./version.js";
+export { SCHEMA_VERSION } from "./version.js";

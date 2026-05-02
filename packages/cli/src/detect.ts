@@ -9,12 +9,7 @@ import { join } from "node:path";
  * (provided by future plugins, or chosen by the user via --profile) are not
  * detectable but are still accepted as values elsewhere in the CLI.
  */
-export type KnownProfile =
-  | "laravel"
-  | "nextjs"
-  | "python"
-  | "rails"
-  | "lovable";
+export type KnownProfile = "laravel" | "nextjs" | "python" | "rails" | "lovable";
 
 /**
  * Resolution outcome of detectFramework.
@@ -100,9 +95,7 @@ function detectPython(root: string): boolean {
 
 /** Rails: requires Gemfile AND config/routes.rb (both regular files). */
 function detectRails(root: string): boolean {
-  return (
-    isFile(join(root, "Gemfile")) && isFile(join(root, "config/routes.rb"))
-  );
+  return isFile(join(root, "Gemfile")) && isFile(join(root, "config/routes.rb"));
 }
 
 /**

@@ -5,19 +5,15 @@ import { existsSync, statSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { createInterface } from "node:readline/promises";
+import { ensureViberevertDirs, RepoRootNotFoundError, resolveRepoRoot } from "@viberevert/core";
 import { Command, Option } from "clipanion";
-import {
-  RepoRootNotFoundError,
-  ensureViberevertDirs,
-  resolveRepoRoot,
-} from "@viberevert/core";
+import { type DetectionResult, detectFramework } from "../detect.js";
 import {
   BUILTIN_PROFILES,
   type Generator,
   generateGenericProfile,
   getProfileGenerator,
 } from "../profiles/index.js";
-import { type DetectionResult, detectFramework } from "../detect.js";
 
 /**
  * Initializes a VibeRevert config and scaffold in the current repo.
@@ -95,9 +91,7 @@ export class InitCommand extends Command {
       try {
         isFile = statSync(configPath).isFile();
       } catch {
-        this.context.stderr.write(
-          `Cannot stat existing path at ${configPath}\n`,
-        );
+        this.context.stderr.write(`Cannot stat existing path at ${configPath}\n`);
         return 1;
       }
 
@@ -152,9 +146,7 @@ export class InitCommand extends Command {
    * Returns the chosen profile name, or undefined if resolution failed (an
    * error message was already written to stderr).
    */
-  private async resolveProfileName(
-    repoRoot: string,
-  ): Promise<string | undefined> {
+  private async resolveProfileName(repoRoot: string): Promise<string | undefined> {
     // --profile wins over detection. Any non-blank string accepted.
     if (this.profile !== undefined) {
       const trimmed = this.profile.trim();
@@ -181,9 +173,7 @@ export class InitCommand extends Command {
    * only) restricted to the set of detected matches, otherwise demand
    * --profile non-interactively.
    */
-  private async resolveAmbiguous(
-    detection: DetectionResult,
-  ): Promise<string | undefined> {
+  private async resolveAmbiguous(detection: DetectionResult): Promise<string | undefined> {
     const prettyMatches = detection.matches.join(", ");
 
     if (!this.isInteractive()) {
@@ -197,9 +187,7 @@ export class InitCommand extends Command {
     const recommended = detection.recommended ?? detection.matches[0];
     if (recommended === undefined) {
       // By construction, ambiguous resolution implies matches.length >= 2.
-      throw new Error(
-        "internal invariant broken: ambiguous detection with empty matches",
-      );
+      throw new Error("internal invariant broken: ambiguous detection with empty matches");
     }
 
     const validChoices = new Set<string>(detection.matches);
@@ -210,8 +198,7 @@ export class InitCommand extends Command {
     let answer: string;
     try {
       answer = await rl.question(
-        `Multiple frameworks detected: ${prettyMatches}\n` +
-          `Which profile? [${recommended}]: `,
+        `Multiple frameworks detected: ${prettyMatches}\n` + `Which profile? [${recommended}]: `,
       );
     } finally {
       rl.close();
@@ -247,11 +234,6 @@ export class InitCommand extends Command {
  * NodeJS.ReadableStream / NodeJS.WritableStream), but the actual instances
  * passed in at runtime are typically process.stdin/stdout which do have it.
  */
-function streamIsTTY(
-  stream: NodeJS.ReadableStream | NodeJS.WritableStream,
-): boolean {
-  return (
-    "isTTY" in stream &&
-    Boolean((stream as { readonly isTTY?: boolean }).isTTY)
-  );
+function streamIsTTY(stream: NodeJS.ReadableStream | NodeJS.WritableStream): boolean {
+  return "isTTY" in stream && Boolean((stream as { readonly isTTY?: boolean }).isTTY);
 }

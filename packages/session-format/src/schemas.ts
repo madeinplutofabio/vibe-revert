@@ -68,12 +68,10 @@ export function normalizeRelativePath(input: string): string {
   return p;
 }
 
-const safeStoredRelativePath = z
-  .string()
-  .refine(isSafeStoredRelativePath, {
-    message:
-      "must be a canonical relative path: forward slashes only, no leading/trailing slash, no '.' or '..' segments, not absolute",
-  });
+const safeStoredRelativePath = z.string().refine(isSafeStoredRelativePath, {
+  message:
+    "must be a canonical relative path: forward slashes only, no leading/trailing slash, no '.' or '..' segments, not absolute",
+});
 
 // =============================================================================
 // String atom and string-array helpers
@@ -116,17 +114,12 @@ export function isSortedUniqueStringArray(input: readonly string[]): boolean {
  * any string array; never throws.
  */
 export function normalizeStringArray(input: readonly string[]): string[] {
-  return Array.from(
-    new Set(input.map((s) => s.trim()).filter((s) => s.length > 0)),
-  ).sort();
+  return Array.from(new Set(input.map((s) => s.trim()).filter((s) => s.length > 0))).sort();
 }
 
-const sortedUniqueStringArray = z
-  .array(nonBlankString)
-  .refine(isSortedUniqueStringArray, {
-    message:
-      "must be sorted ascending, contain no duplicates, and contain no blank strings",
-  });
+const sortedUniqueStringArray = z.array(nonBlankString).refine(isSortedUniqueStringArray, {
+  message: "must be sorted ascending, contain no duplicates, and contain no blank strings",
+});
 
 // =============================================================================
 // Enum atoms
@@ -183,13 +176,10 @@ export const ChangedFileSchema = z
     risk_tags: sortedUniqueStringArray,
     risk_level: RiskLevelSchema,
   })
-  .refine(
-    (f) => f.status !== "renamed" || typeof f.previous_path === "string",
-    {
-      message: "previous_path is required when status is 'renamed'",
-      path: ["previous_path"],
-    },
-  )
+  .refine((f) => f.status !== "renamed" || typeof f.previous_path === "string", {
+    message: "previous_path is required when status is 'renamed'",
+    path: ["previous_path"],
+  })
   .refine((f) => f.status === "renamed" || f.previous_path === undefined, {
     message: "previous_path must be absent when status is not 'renamed'",
     path: ["previous_path"],
@@ -220,9 +210,7 @@ export const CheckResultSchema = z
     recommendation: nonBlankString.optional(),
   })
   .refine(
-    (r) =>
-      (r.level !== "high" && r.level !== "critical") ||
-      typeof r.recommendation === "string",
+    (r) => (r.level !== "high" && r.level !== "critical") || typeof r.recommendation === "string",
     {
       message: "recommendation is required when level is 'high' or 'critical'",
       path: ["recommendation"],

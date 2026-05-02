@@ -3,17 +3,17 @@
 
 import { spawnSync } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
-import { Command } from "clipanion";
 import {
   ConfigNotFoundError,
   ConfigParseError,
   ConfigValidationError,
-  RepoRootNotFoundError,
-  SECRET_PATTERN_COUNT,
   loadConfig,
+  RepoRootNotFoundError,
   resolveRepoRoot,
+  SECRET_PATTERN_COUNT,
   viberevertDir,
 } from "@viberevert/core";
+import { Command } from "clipanion";
 import { detectFramework } from "../detect.js";
 
 /**
@@ -30,8 +30,7 @@ export class DoctorCommand extends Command {
   static override paths = [["doctor"]];
 
   static override usage = Command.Usage({
-    description:
-      "Report VibeRevert environment status (node, pnpm, git, repo, config)",
+    description: "Report VibeRevert environment status (node, pnpm, git, repo, config)",
   });
 
   override async execute(): Promise<number> {
@@ -60,10 +59,7 @@ export class DoctorCommand extends Command {
     // Framework detection (depends on repo root)
     if (repoRoot !== undefined) {
       const detection = detectFramework(repoRoot);
-      const matches =
-        detection.matches.length > 0
-          ? detection.matches.join(", ")
-          : "(none)";
+      const matches = detection.matches.length > 0 ? detection.matches.join(", ") : "(none)";
       lines.push(["Framework", `${matches} [${detection.resolution}]`]);
     } else {
       lines.push(["Framework", "skipped (no repo root)"]);
@@ -79,17 +75,10 @@ export class DoctorCommand extends Command {
           lines.push(["Config", "not found (run `viberevert init`)"]);
         } else if (err instanceof ConfigParseError) {
           lines.push(["Config", "INVALID YAML"]);
-          this.context.stderr.write(
-            `\nConfig YAML error:\n  ${err.message}\n\n`,
-          );
+          this.context.stderr.write(`\nConfig YAML error:\n  ${err.message}\n\n`);
         } else if (err instanceof ConfigValidationError) {
-          lines.push([
-            "Config",
-            `INVALID schema (${err.issues.length} issue(s))`,
-          ]);
-          this.context.stderr.write(
-            `\nConfig schema error:\n  ${err.message}\n\n`,
-          );
+          lines.push(["Config", `INVALID schema (${err.issues.length} issue(s))`]);
+          this.context.stderr.write(`\nConfig schema error:\n  ${err.message}\n\n`);
         } else {
           throw err;
         }
@@ -136,9 +125,7 @@ function probeVersion(cmd: string): string {
       return "not found";
     }
     const firstLine = result.stdout.trim().split("\n")[0];
-    return firstLine !== undefined && firstLine.length > 0
-      ? firstLine
-      : "(no output)";
+    return firstLine !== undefined && firstLine.length > 0 ? firstLine : "(no output)";
   } catch {
     return "not found";
   }
@@ -153,11 +140,7 @@ function safeIsDir(path: string): boolean {
 }
 
 /** Renders [label, value] pairs as `label: value` lines, padded to align. */
-function formatLines(
-  lines: ReadonlyArray<readonly [string, string]>,
-): string {
+function formatLines(lines: ReadonlyArray<readonly [string, string]>): string {
   const labelWidth = Math.max(...lines.map(([label]) => label.length)) + 2;
-  return lines
-    .map(([label, value]) => `${`${label}:`.padEnd(labelWidth)} ${value}`)
-    .join("\n");
+  return lines.map(([label, value]) => `${`${label}:`.padEnd(labelWidth)} ${value}`).join("\n");
 }

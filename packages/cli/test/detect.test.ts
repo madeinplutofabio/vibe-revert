@@ -47,14 +47,11 @@ describe("detectFramework — laravel", () => {
 });
 
 describe("detectFramework — nextjs", () => {
-  it.each(["js", "ts", "mjs", "cjs"])(
-    "detects with next.config.%s",
-    async (ext) => {
-      await writeFile(join(tmpRoot, `next.config.${ext}`), "module.exports={}");
-      const result = detectFramework(tmpRoot);
-      expect(result.matches).toEqual(["nextjs"]);
-    },
-  );
+  it.each(["js", "ts", "mjs", "cjs"])("detects with next.config.%s", async (ext) => {
+    await writeFile(join(tmpRoot, `next.config.${ext}`), "module.exports={}");
+    const result = detectFramework(tmpRoot);
+    expect(result.matches).toEqual(["nextjs"]);
+  });
 
   it("does NOT detect with package.json alone (no next.config.*)", async () => {
     await writeFile(join(tmpRoot, "package.json"), "{}");

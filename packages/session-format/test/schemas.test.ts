@@ -9,15 +9,15 @@ import {
   CheckResultSchema,
   EvidenceJsonSchema,
   EvidenceSchema,
+  isSafeStoredRelativePath,
+  isSortedUniqueStringArray,
   ManifestJsonSchema,
   ManifestSchema,
+  normalizeRelativePath,
+  normalizeStringArray,
   SCHEMA_VERSION,
   SessionReportJsonSchema,
   SessionReportSchema,
-  isSafeStoredRelativePath,
-  isSortedUniqueStringArray,
-  normalizeRelativePath,
-  normalizeStringArray,
 } from "../src/index.js";
 
 describe("SCHEMA_VERSION", () => {
@@ -69,28 +69,28 @@ describe("normalizeRelativePath", () => {
     expect(normalizeRelativePath(input)).toBe(expected);
   });
 
-  it.each(["", "/abs", "C:/abs", "foo/../bar", "../foo", "./", ".", ".."])(
-    "throws on %s",
-    (input) => {
-      expect(() => normalizeRelativePath(input)).toThrow();
-    },
-  );
+  it.each([
+    "",
+    "/abs",
+    "C:/abs",
+    "foo/../bar",
+    "../foo",
+    "./",
+    ".",
+    "..",
+  ])("throws on %s", (input) => {
+    expect(() => normalizeRelativePath(input)).toThrow();
+  });
 });
 
 describe("isSortedUniqueStringArray", () => {
-  it.each([[[]], [["a"]], [["a", "b"]], [["auth", "payments"]]])(
-    "accepts %j",
-    (input) => {
-      expect(isSortedUniqueStringArray(input)).toBe(true);
-    },
-  );
+  it.each([[[]], [["a"]], [["a", "b"]], [["auth", "payments"]]])("accepts %j", (input) => {
+    expect(isSortedUniqueStringArray(input)).toBe(true);
+  });
 
-  it.each([[["b", "a"]], [["a", "a"]], [["b", "a", "c"]]])(
-    "rejects %j",
-    (input) => {
-      expect(isSortedUniqueStringArray(input)).toBe(false);
-    },
-  );
+  it.each([[["b", "a"]], [["a", "a"]], [["b", "a", "c"]]])("rejects %j", (input) => {
+    expect(isSortedUniqueStringArray(input)).toBe(false);
+  });
 });
 
 describe("normalizeStringArray", () => {
@@ -99,9 +99,10 @@ describe("normalizeStringArray", () => {
   });
 
   it("trims, dedupes, drops empties and whitespace-only entries, sorts", () => {
-    expect(
-      normalizeStringArray(["payments", "  auth  ", "auth", "", "  "]),
-    ).toEqual(["auth", "payments"]);
+    expect(normalizeStringArray(["payments", "  auth  ", "auth", "", "  "])).toEqual([
+      "auth",
+      "payments",
+    ]);
   });
 });
 
@@ -149,15 +150,11 @@ describe("ChangedFileSchema", () => {
   });
 
   it("rejects renamed without previous_path", () => {
-    expect(() =>
-      ChangedFileSchema.parse({ ...baseAdded, status: "renamed" }),
-    ).toThrow();
+    expect(() => ChangedFileSchema.parse({ ...baseAdded, status: "renamed" })).toThrow();
   });
 
   it("rejects added with previous_path", () => {
-    expect(() =>
-      ChangedFileSchema.parse({ ...baseAdded, previous_path: "src/old.ts" }),
-    ).toThrow();
+    expect(() => ChangedFileSchema.parse({ ...baseAdded, previous_path: "src/old.ts" })).toThrow();
   });
 
   it("rejects renamed with previous_path === path", () => {
@@ -180,21 +177,15 @@ describe("ChangedFileSchema", () => {
   });
 
   it("rejects duplicate risk_tags", () => {
-    expect(() =>
-      ChangedFileSchema.parse({ ...baseAdded, risk_tags: ["auth", "auth"] }),
-    ).toThrow();
+    expect(() => ChangedFileSchema.parse({ ...baseAdded, risk_tags: ["auth", "auth"] })).toThrow();
   });
 
   it("rejects empty-string risk_tags", () => {
-    expect(() =>
-      ChangedFileSchema.parse({ ...baseAdded, risk_tags: [""] }),
-    ).toThrow();
+    expect(() => ChangedFileSchema.parse({ ...baseAdded, risk_tags: [""] })).toThrow();
   });
 
   it("rejects whitespace-only risk_tags", () => {
-    expect(() =>
-      ChangedFileSchema.parse({ ...baseAdded, risk_tags: ["   "] }),
-    ).toThrow();
+    expect(() => ChangedFileSchema.parse({ ...baseAdded, risk_tags: ["   "] })).toThrow();
   });
 });
 
@@ -230,25 +221,17 @@ describe("CheckResultSchema", () => {
   });
 
   it("rejects empty evidence array", () => {
-    expect(() =>
-      CheckResultSchema.parse({ ...baseLow, evidence: [] }),
-    ).toThrow();
+    expect(() => CheckResultSchema.parse({ ...baseLow, evidence: [] })).toThrow();
   });
 
-  it.each(["high", "critical"] as const)(
-    "rejects %s without recommendation",
-    (level) => {
-      expect(() => CheckResultSchema.parse({ ...baseLow, level })).toThrow();
-    },
-  );
+  it.each(["high", "critical"] as const)("rejects %s without recommendation", (level) => {
+    expect(() => CheckResultSchema.parse({ ...baseLow, level })).toThrow();
+  });
 
-  it.each(["high", "critical"] as const)(
-    "accepts %s with recommendation",
-    (level) => {
-      const v = { ...baseLow, level, recommendation: "fix it" };
-      expect(CheckResultSchema.parse(v)).toEqual(v);
-    },
-  );
+  it.each(["high", "critical"] as const)("accepts %s with recommendation", (level) => {
+    const v = { ...baseLow, level, recommendation: "fix it" };
+    expect(CheckResultSchema.parse(v)).toEqual(v);
+  });
 });
 
 describe("ManifestSchema", () => {
@@ -268,8 +251,7 @@ describe("ManifestSchema", () => {
     snapshots: {
       tracked_dirty_archive_path: "rollback/tracked-dirty.tar.gz",
       file_hashes: {
-        "src/foo.ts":
-          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "src/foo.ts": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       },
     },
     untracked: {
@@ -284,9 +266,7 @@ describe("ManifestSchema", () => {
   });
 
   it("rejects wrong schema_version", () => {
-    expect(() =>
-      ManifestSchema.parse({ ...validManifest, schema_version: "2.0" }),
-    ).toThrow();
+    expect(() => ManifestSchema.parse({ ...validManifest, schema_version: "2.0" })).toThrow();
   });
 
   it("rejects timestamp without offset", () => {
@@ -332,9 +312,7 @@ describe("ManifestSchema", () => {
   });
 
   it("rejects unknown top-level field (strict)", () => {
-    expect(() =>
-      ManifestSchema.parse({ ...validManifest, extra_field: "nope" }),
-    ).toThrow();
+    expect(() => ManifestSchema.parse({ ...validManifest, extra_field: "nope" })).toThrow();
   });
 });
 
@@ -361,16 +339,12 @@ describe("SessionReportSchema", () => {
       results: [
         {
           id: "stripe-webhook-test-gap",
-          title:
-            "Stripe webhook handler changed without signature verification test",
+          title: "Stripe webhook handler changed without signature verification test",
           level: "high" as const,
           confidence: "medium" as const,
           category: "payments",
-          message:
-            "Webhook handler modified, no signature verification test detected",
-          evidence: [
-            { detail: "Modified app/Billing.php", file: "app/Billing.php" },
-          ],
+          message: "Webhook handler modified, no signature verification test detected",
+          evidence: [{ detail: "Modified app/Billing.php", file: "app/Billing.php" }],
           recommendation: "Add a webhook signature verification test",
         },
       ],
