@@ -1,0 +1,12 @@
+version: 1
+profile: "generic"
+project:
+  name: "generic-init-target"
+
+risk:
+  block_on: critical
+  warn_on: medium
+
+checks:
+  secrets: true
+  dependencies: true

@@ -38,8 +38,13 @@
   "publishConfig": {
     "access": "public"
   },
+  "dependencies": {
+    "@viberevert/core": "workspace:*",
+    "clipanion": "3.2.1"
+  },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "build": "tsc -p tsconfig.build.json && node scripts/finalize-bin.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
   }
 }

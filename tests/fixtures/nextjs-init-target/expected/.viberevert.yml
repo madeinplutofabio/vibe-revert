@@ -1,0 +1,48 @@
+version: 1
+profile: nextjs
+project:
+  name: "nextjs-init-target"
+  type: web-app
+
+risk:
+  block_on: critical
+  warn_on: medium
+
+frameworks:
+  - nextjs
+
+checks:
+  secrets: true
+  dependencies: true
+  migrations: true
+  auth: true
+  payments: true
+  infra: true
+  tests: true
+  scope_expansion: false
+
+policies:
+  - basic/web-app
+  - basic/secrets
+  - basic/payments
+  - basic/database
+
+rollback:
+  enabled: true
+  include_untracked: true
+  exclude:
+    - node_modules/**
+    - .next/**
+    - dist/**
+    - build/**
+
+commands:
+  guard:
+    - "rm -rf /"
+  require_confirm:
+    - "prisma migrate deploy"
+    - "prisma db push"
+    - "drizzle-kit push"
+
+llm:
+  enabled: false
