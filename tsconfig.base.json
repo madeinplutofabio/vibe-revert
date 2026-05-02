@@ -20,6 +20,11 @@
     "declarationMap": true,
     "sourceMap": true,
     "removeComments": false,
-    "incremental": true
+    "incremental": true,
+    "baseUrl": ".",
+    "paths": {
+      "@viberevert/session-format": ["packages/session-format/src/index.ts"],
+      "@viberevert/core": ["packages/core/src/index.ts"]
+    }
   }
 }

@@ -1,9 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Fabio Marcello Salvadori
 
+import { fileURLToPath } from "node:url";
 import { defineProject } from "vitest/config";
 
 export default defineProject({
+  resolve: {
+    alias: {
+      "@viberevert/core": fileURLToPath(new URL("../core/src/index.ts", import.meta.url)),
+      "@viberevert/session-format": fileURLToPath(
+        new URL("../session-format/src/index.ts", import.meta.url),
+      ),
+    },
+  },
   test: {
     environment: "node",
     globals: false,
