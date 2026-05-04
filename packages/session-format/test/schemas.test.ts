@@ -3,6 +3,8 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  ActiveSessionLockJsonSchema,
+  ActiveSessionLockSchema,
   ChangedFileJsonSchema,
   ChangedFileSchema,
   CheckResultJsonSchema,
@@ -16,13 +18,30 @@ import {
   normalizeRelativePath,
   normalizeStringArray,
   SCHEMA_VERSION,
+  SESSION_STATE_SCHEMA_VERSION,
   SessionReportJsonSchema,
   SessionReportSchema,
+  SessionStateJsonSchema,
+  SessionStateSchema,
+  type SessionStateSchemaVersion,
 } from "../src/index.js";
+
+// Type-level assertion: locks that SessionStateSchemaVersion is exported and
+// equal to the literal "1.0". If the type alias is removed from the barrel or
+// changes value, this fails to compile (caught by `pnpm typecheck`, not just
+// runtime tests).
+const _SCHEMA_VERSION_TYPE_CHECK: SessionStateSchemaVersion = "1.0";
+void _SCHEMA_VERSION_TYPE_CHECK;
 
 describe("SCHEMA_VERSION", () => {
   it("is the string '1.0'", () => {
     expect(SCHEMA_VERSION).toBe("1.0");
+  });
+});
+
+describe("SESSION_STATE_SCHEMA_VERSION", () => {
+  it("is the string '1.0'", () => {
+    expect(SESSION_STATE_SCHEMA_VERSION).toBe("1.0");
   });
 });
 
@@ -314,6 +333,28 @@ describe("ManifestSchema", () => {
   it("rejects unknown top-level field (strict)", () => {
     expect(() => ManifestSchema.parse({ ...validManifest, extra_field: "nope" })).toThrow();
   });
+
+  // D15: optional `name` field added in M B.
+  describe("name field (D15)", () => {
+    it("accepts manifest WITHOUT name (backward-compatible)", () => {
+      // The base validManifest has no name; round-trip equality already proves
+      // the optional field is truly optional.
+      expect(ManifestSchema.parse(validManifest)).toEqual(validManifest);
+    });
+
+    it("accepts manifest WITH name and round-trips it", () => {
+      const v = { ...validManifest, name: "release-ready" };
+      expect(ManifestSchema.parse(v)).toEqual(v);
+    });
+
+    it("rejects empty-string name", () => {
+      expect(() => ManifestSchema.parse({ ...validManifest, name: "" })).toThrow();
+    });
+
+    it("rejects whitespace-only name", () => {
+      expect(() => ManifestSchema.parse({ ...validManifest, name: "   " })).toThrow();
+    });
+  });
 });
 
 describe("SessionReportSchema", () => {
@@ -385,6 +426,228 @@ describe("SessionReportSchema", () => {
   });
 });
 
+// =============================================================================
+// SessionStateSchema (D14) — M B `session.json` artifact.
+//
+// Path fields are repo-relative POSIX paths (e.g.,
+// `.viberevert/sessions/sess_<ULID>/before-status.txt`).
+// =============================================================================
+
+describe("SessionStateSchema (D14)", () => {
+  const validInFlight = {
+    schema_version: "1.0" as const,
+    session_id: "sess_01JV8Z0N6E9QABCDEFGHIJKLMN",
+    checkpoint_id: "cp_01JV8Z0N6FP3ABCDEFGHIJKLMN",
+    started_at: "2026-05-04T10:30:11Z",
+    before_status_path:
+      ".viberevert/sessions/sess_01JV8Z0N6E9QABCDEFGHIJKLMN/before-status.txt",
+    commands_log_path:
+      ".viberevert/sessions/sess_01JV8Z0N6E9QABCDEFGHIJKLMN/commands.log",
+  };
+
+  const validEnded = {
+    ...validInFlight,
+    ended_at: "2026-05-04T11:15:42Z",
+    after_status_path:
+      ".viberevert/sessions/sess_01JV8Z0N6E9QABCDEFGHIJKLMN/after-status.txt",
+    task: "Add yearly billing",
+    agent_command: "claude",
+  };
+
+  it("accepts a minimal valid in-flight session (no ended_at, no after_status_path)", () => {
+    expect(SessionStateSchema.parse(validInFlight)).toEqual(validInFlight);
+  });
+
+  it("accepts a fully populated ended session (ended_at + after_status_path + optional fields)", () => {
+    expect(SessionStateSchema.parse(validEnded)).toEqual(validEnded);
+  });
+
+  it("accepts in-flight session WITH task and agent_command (still no ended_at/after_status_path)", () => {
+    const v = { ...validInFlight, task: "Add yearly billing", agent_command: "claude" };
+    expect(SessionStateSchema.parse(v)).toEqual(v);
+  });
+
+  it("rejects ended_at WITHOUT after_status_path (refine: must be tied)", () => {
+    expect(() =>
+      SessionStateSchema.parse({ ...validInFlight, ended_at: "2026-05-04T11:15:42Z" }),
+    ).toThrow();
+  });
+
+  it("rejects after_status_path WITHOUT ended_at (refine: must be tied)", () => {
+    expect(() =>
+      SessionStateSchema.parse({
+        ...validInFlight,
+        after_status_path:
+          ".viberevert/sessions/sess_01JV8Z0N6E9QABCDEFGHIJKLMN/after-status.txt",
+      }),
+    ).toThrow();
+  });
+
+  it("rejects wrong schema_version literal", () => {
+    expect(() => SessionStateSchema.parse({ ...validInFlight, schema_version: "2.0" })).toThrow();
+  });
+
+  it("rejects unknown top-level field (strict)", () => {
+    expect(() => SessionStateSchema.parse({ ...validInFlight, extra_field: "nope" })).toThrow();
+  });
+
+  it("rejects whitespace-only session_id", () => {
+    expect(() => SessionStateSchema.parse({ ...validInFlight, session_id: "   " })).toThrow();
+  });
+
+  it("rejects whitespace-only checkpoint_id", () => {
+    expect(() => SessionStateSchema.parse({ ...validInFlight, checkpoint_id: "   " })).toThrow();
+  });
+
+  it("rejects whitespace-only optional task when supplied", () => {
+    expect(() => SessionStateSchema.parse({ ...validInFlight, task: "   " })).toThrow();
+  });
+
+  it("rejects whitespace-only optional agent_command when supplied", () => {
+    expect(() => SessionStateSchema.parse({ ...validInFlight, agent_command: "   " })).toThrow();
+  });
+
+  it("rejects timestamp without offset on started_at", () => {
+    expect(() =>
+      SessionStateSchema.parse({ ...validInFlight, started_at: "2026-05-04T10:30:11" }),
+    ).toThrow();
+  });
+
+  it("rejects timestamp with fractional seconds on started_at", () => {
+    expect(() =>
+      SessionStateSchema.parse({ ...validInFlight, started_at: "2026-05-04T10:30:11.500Z" }),
+    ).toThrow();
+  });
+
+  it("rejects non-canonical before_status_path (absolute)", () => {
+    expect(() =>
+      SessionStateSchema.parse({
+        ...validInFlight,
+        before_status_path: "/abs/before-status.txt",
+      }),
+    ).toThrow();
+  });
+
+  it("rejects non-canonical commands_log_path (parent traversal)", () => {
+    expect(() =>
+      SessionStateSchema.parse({ ...validInFlight, commands_log_path: "../commands.log" }),
+    ).toThrow();
+  });
+
+  it("rejects non-canonical after_status_path (Windows backslash) when ended", () => {
+    expect(() =>
+      SessionStateSchema.parse({
+        ...validInFlight,
+        ended_at: "2026-05-04T11:15:42Z",
+        after_status_path: ".viberevert\\sessions\\sess_xyz\\after-status.txt",
+      }),
+    ).toThrow();
+  });
+});
+
+// =============================================================================
+// ActiveSessionLockSchema (D14) — M B `active-session.json` artifact.
+//
+// Strict subset of SessionStateSchema (no ended_at, no path fields).
+// =============================================================================
+
+describe("ActiveSessionLockSchema (D14)", () => {
+  const validLock = {
+    schema_version: "1.0" as const,
+    session_id: "sess_01JV8Z0N6E9QABCDEFGHIJKLMN",
+    checkpoint_id: "cp_01JV8Z0N6FP3ABCDEFGHIJKLMN",
+    started_at: "2026-05-04T10:30:11Z",
+  };
+
+  it("accepts a minimal valid lock (no task)", () => {
+    expect(ActiveSessionLockSchema.parse(validLock)).toEqual(validLock);
+  });
+
+  it("accepts a lock with optional task", () => {
+    const v = { ...validLock, task: "Add yearly billing" };
+    expect(ActiveSessionLockSchema.parse(v)).toEqual(v);
+  });
+
+  it("rejects wrong schema_version literal", () => {
+    expect(() => ActiveSessionLockSchema.parse({ ...validLock, schema_version: "2.0" })).toThrow();
+  });
+
+  it("rejects whitespace-only session_id", () => {
+    expect(() => ActiveSessionLockSchema.parse({ ...validLock, session_id: "   " })).toThrow();
+  });
+
+  it("rejects whitespace-only checkpoint_id", () => {
+    expect(() => ActiveSessionLockSchema.parse({ ...validLock, checkpoint_id: "   " })).toThrow();
+  });
+
+  it("rejects whitespace-only task when supplied", () => {
+    expect(() => ActiveSessionLockSchema.parse({ ...validLock, task: "   " })).toThrow();
+  });
+
+  it("rejects timestamp without offset on started_at", () => {
+    expect(() =>
+      ActiveSessionLockSchema.parse({ ...validLock, started_at: "2026-05-04T10:30:11" }),
+    ).toThrow();
+  });
+
+  // Strict-subset rules: rejects fields that belong only to SessionStateSchema,
+  // not to the active-lock subset. Confirms .pick() preserved strictObject's
+  // unknown-field rejection.
+  it("rejects ended_at (not part of the lock subset)", () => {
+    expect(() =>
+      ActiveSessionLockSchema.parse({ ...validLock, ended_at: "2026-05-04T11:15:42Z" }),
+    ).toThrow();
+  });
+
+  it("rejects before_status_path (not part of the lock subset)", () => {
+    expect(() =>
+      ActiveSessionLockSchema.parse({
+        ...validLock,
+        before_status_path: ".viberevert/sessions/sess_xyz/before-status.txt",
+      }),
+    ).toThrow();
+  });
+
+  it("rejects after_status_path (not part of the lock subset)", () => {
+    expect(() =>
+      ActiveSessionLockSchema.parse({
+        ...validLock,
+        after_status_path: ".viberevert/sessions/sess_xyz/after-status.txt",
+      }),
+    ).toThrow();
+  });
+
+  it("rejects commands_log_path (not part of the lock subset)", () => {
+    expect(() =>
+      ActiveSessionLockSchema.parse({
+        ...validLock,
+        commands_log_path: ".viberevert/sessions/sess_xyz/commands.log",
+      }),
+    ).toThrow();
+  });
+
+  it("rejects agent_command (not part of the lock subset)", () => {
+    expect(() =>
+      ActiveSessionLockSchema.parse({ ...validLock, agent_command: "claude" }),
+    ).toThrow();
+  });
+
+  it("rejects unknown top-level field (strict)", () => {
+    expect(() =>
+      ActiveSessionLockSchema.parse({ ...validLock, extra_field: "nope" }),
+    ).toThrow();
+  });
+});
+
+// =============================================================================
+// JSON Schema exports (D21).
+//
+// Covers shape only — refined-coupling rules (e.g., SessionState's ended_at
+// <-> after_status_path, CheckResult's recommendation requirement) are NOT
+// expressible in JSON Schema and are NOT asserted here. Those are enforced
+// only at the zod level.
+// =============================================================================
+
 describe("JSON Schema exports", () => {
   it.each([
     ["EvidenceJsonSchema", EvidenceJsonSchema],
@@ -392,10 +655,111 @@ describe("JSON Schema exports", () => {
     ["CheckResultJsonSchema", CheckResultJsonSchema],
     ["ManifestJsonSchema", ManifestJsonSchema],
     ["SessionReportJsonSchema", SessionReportJsonSchema],
-  ])("%s is an object with type=object and properties", (_, schema) => {
+    ["SessionStateJsonSchema", SessionStateJsonSchema],
+    ["ActiveSessionLockJsonSchema", ActiveSessionLockJsonSchema],
+  ])("%s is an object with type=object and properties", (_name, schema) => {
     expect(schema).toBeTypeOf("object");
     expect(schema).not.toBeNull();
     expect((schema as { type: string }).type).toBe("object");
     expect((schema as { properties: object }).properties).toBeTypeOf("object");
+  });
+
+  it("ManifestJsonSchema includes the optional `name` property (D15 refresh)", () => {
+    const props = (ManifestJsonSchema as { properties: Record<string, unknown> }).properties;
+    expect(props).toHaveProperty("name");
+  });
+
+  it("ManifestJsonSchema does NOT list `name` in required (D15: optional)", () => {
+    const required = (ManifestJsonSchema as { required?: readonly string[] }).required ?? [];
+    expect(required).not.toContain("name");
+  });
+
+  it("SessionStateJsonSchema describes all expected properties", () => {
+    const props = (SessionStateJsonSchema as { properties: Record<string, unknown> }).properties;
+    for (const k of [
+      "schema_version",
+      "session_id",
+      "checkpoint_id",
+      "started_at",
+      "ended_at",
+      "task",
+      "agent_command",
+      "before_status_path",
+      "after_status_path",
+      "commands_log_path",
+    ]) {
+      expect(props).toHaveProperty(k);
+    }
+  });
+
+  it("SessionStateJsonSchema lists exactly the non-optional fields as required", () => {
+    const required = (SessionStateJsonSchema as { required: readonly string[] }).required;
+    expect([...required].sort()).toEqual(
+      [
+        "before_status_path",
+        "checkpoint_id",
+        "commands_log_path",
+        "schema_version",
+        "session_id",
+        "started_at",
+      ].sort(),
+    );
+  });
+
+  it("ActiveSessionLockJsonSchema lists exactly the non-optional subset fields as required", () => {
+    const required = (ActiveSessionLockJsonSchema as { required: readonly string[] }).required;
+    expect([...required].sort()).toEqual(
+      ["checkpoint_id", "schema_version", "session_id", "started_at"].sort(),
+    );
+  });
+
+  it("ActiveSessionLockJsonSchema does NOT include path fields (subset of SessionState)", () => {
+    const props = (ActiveSessionLockJsonSchema as { properties: Record<string, unknown> })
+      .properties;
+    for (const k of [
+      "before_status_path",
+      "after_status_path",
+      "commands_log_path",
+      "ended_at",
+      "agent_command",
+    ]) {
+      expect(props).not.toHaveProperty(k);
+    }
+  });
+});
+
+// =============================================================================
+// Barrel surface — locks the public API.
+//
+// Importing from `../src/index.js` (NOT internal paths) and asserting each new
+// M B symbol is defined + has the expected runtime shape. Removing any of
+// these from index.ts breaks this test.
+// =============================================================================
+
+describe("Barrel surface (M B additions)", () => {
+  it("exports SessionStateSchema as a zod schema", () => {
+    expect(SessionStateSchema).toBeDefined();
+    expect(SessionStateSchema).toHaveProperty("parse");
+    expect(typeof (SessionStateSchema as { parse: unknown }).parse).toBe("function");
+  });
+
+  it("exports ActiveSessionLockSchema as a zod schema", () => {
+    expect(ActiveSessionLockSchema).toBeDefined();
+    expect(ActiveSessionLockSchema).toHaveProperty("parse");
+    expect(typeof (ActiveSessionLockSchema as { parse: unknown }).parse).toBe("function");
+  });
+
+  it("exports SessionStateJsonSchema as a JSON Schema object", () => {
+    expect(SessionStateJsonSchema).toBeDefined();
+    expect((SessionStateJsonSchema as { type: string }).type).toBe("object");
+  });
+
+  it("exports ActiveSessionLockJsonSchema as a JSON Schema object", () => {
+    expect(ActiveSessionLockJsonSchema).toBeDefined();
+    expect((ActiveSessionLockJsonSchema as { type: string }).type).toBe("object");
+  });
+
+  it("exports SESSION_STATE_SCHEMA_VERSION as the literal '1.0'", () => {
+    expect(SESSION_STATE_SCHEMA_VERSION).toBe("1.0");
   });
 });

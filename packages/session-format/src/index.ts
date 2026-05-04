@@ -17,14 +17,17 @@
 
 // JSON Schema exports.
 export {
+  ActiveSessionLockJsonSchema,
   ChangedFileJsonSchema,
   CheckResultJsonSchema,
   EvidenceJsonSchema,
   ManifestJsonSchema,
   SessionReportJsonSchema,
+  SessionStateJsonSchema,
 } from "./json-schema.js";
 // Inferred TypeScript types.
 export type {
+  ActiveSessionLock,
   ChangedFile,
   ChangedFileStatus,
   CheckResult,
@@ -33,10 +36,13 @@ export type {
   Manifest,
   RiskLevel,
   SessionReport,
+  SessionState,
+  SessionStateSchemaVersion,
 } from "./schemas.js";
 
 // Runtime zod schema values + helpers.
 export {
+  ActiveSessionLockSchema,
   ChangedFileSchema,
   ChangedFileStatusSchema,
   CheckResultSchema,
@@ -48,7 +54,9 @@ export {
   normalizeRelativePath,
   normalizeStringArray,
   RiskLevelSchema,
+  SESSION_STATE_SCHEMA_VERSION,
   SessionReportSchema,
+  SessionStateSchema,
 } from "./schemas.js";
 export type { SchemaVersion } from "./version.js";
 export { SCHEMA_VERSION } from "./version.js";

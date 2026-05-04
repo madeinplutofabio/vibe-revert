@@ -13,16 +13,22 @@
 //
 // Use the zod schemas (./schemas.ts) directly when validating values inside
 // TypeScript code. toJSONSchema cannot always express custom .refine() rules
-// (e.g., the noise-budget recommendation requirement on CheckResult); those
-// stay enforced only at the zod level.
+// (e.g., the noise-budget recommendation requirement on CheckResult, the
+// ended_at <-> after_status_path coupling on SessionState); those stay
+// enforced only at the zod level.
+//
+// D21 invariant: every persisted-artifact zod schema in ./schemas.ts MUST have
+// a corresponding *JsonSchema export here, re-exported from ./index.ts.
 
 import { z } from "zod";
 import {
+  ActiveSessionLockSchema,
   ChangedFileSchema,
   CheckResultSchema,
   EvidenceSchema,
   ManifestSchema,
   SessionReportSchema,
+  SessionStateSchema,
 } from "./schemas.js";
 
 const JSON_SCHEMA_OPTIONS = { target: "draft-2020-12" as const };
@@ -32,3 +38,8 @@ export const ChangedFileJsonSchema = z.toJSONSchema(ChangedFileSchema, JSON_SCHE
 export const CheckResultJsonSchema = z.toJSONSchema(CheckResultSchema, JSON_SCHEMA_OPTIONS);
 export const ManifestJsonSchema = z.toJSONSchema(ManifestSchema, JSON_SCHEMA_OPTIONS);
 export const SessionReportJsonSchema = z.toJSONSchema(SessionReportSchema, JSON_SCHEMA_OPTIONS);
+export const SessionStateJsonSchema = z.toJSONSchema(SessionStateSchema, JSON_SCHEMA_OPTIONS);
+export const ActiveSessionLockJsonSchema = z.toJSONSchema(
+  ActiveSessionLockSchema,
+  JSON_SCHEMA_OPTIONS,
+);

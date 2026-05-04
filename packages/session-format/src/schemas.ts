@@ -225,6 +225,15 @@ export type CheckResult = z.infer<typeof CheckResultSchema>;
 // (.viberevert/sessions/<id>/). All hash values are SHA-256 (64-char hex).
 // All timestamps are ISO 8601 with second precision and explicit offset.
 // `git.porcelain_v1` may legitimately be the empty string (clean tree).
+//
+// `name` is an optional human-supplied label from `viberevert checkpoint --name`
+// (D15 in the M B plan). Storage paths are always ID-based (cp_<ULID>) per D6;
+// `name` is metadata only, looked up by scanning manifests, never used as a
+// filesystem path component.
+//
+// `session_id` semantics (D6): the parent record's ID. For checkpoints
+// belonging to a session, this is the owning session's `sess_<ULID>`. For
+// standalone checkpoints, it is the checkpoint's own `cp_<ULID>`.
 // =============================================================================
 
 const FileHashMap = z.record(safeStoredRelativePath, z.hash("sha256"));
@@ -233,6 +242,7 @@ export const ManifestSchema = z.strictObject({
   schema_version: z.literal(SCHEMA_VERSION),
   session_id: nonBlankString,
   captured_at: z.iso.datetime({ offset: true, precision: 0 }),
+  name: nonBlankString.optional(),
   git: z.strictObject({
     head_sha: nonBlankString,
     branch: nonBlankString,
@@ -255,7 +265,7 @@ export const ManifestSchema = z.strictObject({
 export type Manifest = z.infer<typeof ManifestSchema>;
 
 // =============================================================================
-// SessionReport (strict; top-level session.json artifact)
+// SessionReport (strict; M C `viberevert check` output artifact)
 // =============================================================================
 
 export const SessionReportSchema = z.strictObject({
@@ -274,3 +284,82 @@ export const SessionReportSchema = z.strictObject({
   summary: nonBlankString.optional(),
 });
 export type SessionReport = z.infer<typeof SessionReportSchema>;
+
+// =============================================================================
+// SessionState (strict; M B `session.json` artifact) and ActiveSessionLock
+// (strict; M B `active-session.json` artifact).
+//
+// SessionState describes a single session's lifecycle metadata + paths to its
+// associated status files. ActiveSessionLock is the in-flight subset persisted
+// to `.viberevert/active-session.json` by `viberevert start` and removed by
+// `viberevert end` — it represents "exactly one session is active in this repo
+// right now" (per D11).
+//
+// Versioned independently of Manifest/SessionReport (see SESSION_STATE_SCHEMA_VERSION
+// below) so SessionState can evolve without breaking Manifest readers and vice
+// versa. They share the value "1.0" today; future migrations of either are
+// independent.
+//
+// Path fields (`before_status_path`, `after_status_path`, `commands_log_path`)
+// are repo-relative POSIX paths (forward slashes only, no '.' or '..' segments)
+// per the canonical-path rule already used by Manifest.
+//
+// Refinement: `ended_at` and `after_status_path` are tied — both present iff
+// the session has been ended. Validated below via `.refine()`.
+// =============================================================================
+
+/**
+ * Independent schema version for the session.json artifact. Distinct from
+ * SCHEMA_VERSION (which versions Manifest + SessionReport): SessionState may
+ * evolve independently. Bumping this requires a documented migration in
+ * MIGRATIONS.md (when that file exists) and corresponding zod schema changes
+ * here.
+ */
+export const SESSION_STATE_SCHEMA_VERSION = "1.0" as const;
+
+export type SessionStateSchemaVersion = typeof SESSION_STATE_SCHEMA_VERSION;
+
+/**
+ * Internal base object for SessionStateSchema and ActiveSessionLockSchema.
+ *
+ * Defined as a plain `strictObject` (not yet wrapped in `.refine()`) so that
+ * `ActiveSessionLockSchema` can use `.pick()` to derive its subset — which is
+ * not available on the `ZodEffects` wrapper produced by `.refine()`.
+ */
+const SessionStateBaseSchema = z.strictObject({
+  schema_version: z.literal(SESSION_STATE_SCHEMA_VERSION),
+  session_id: nonBlankString,
+  checkpoint_id: nonBlankString,
+  started_at: z.iso.datetime({ offset: true, precision: 0 }),
+  ended_at: z.iso.datetime({ offset: true, precision: 0 }).optional(),
+  task: nonBlankString.optional(),
+  agent_command: nonBlankString.optional(),
+  before_status_path: safeStoredRelativePath,
+  after_status_path: safeStoredRelativePath.optional(),
+  commands_log_path: safeStoredRelativePath,
+});
+
+export const SessionStateSchema = SessionStateBaseSchema.refine(
+  (s) => (s.ended_at === undefined) === (s.after_status_path === undefined),
+  {
+    message:
+      "ended_at and after_status_path must both be present (session ended) or both absent (session in-flight)",
+    path: ["after_status_path"],
+  },
+);
+export type SessionState = z.infer<typeof SessionStateSchema>;
+
+/**
+ * In-flight subset of SessionState persisted to .viberevert/active-session.json.
+ * Strict subset (`.pick()` on a `strictObject` returns a `strictObject`), so
+ * unknown fields are rejected here too. No `ended_at` (an active session has
+ * not ended), no path fields (those live in `session.json`).
+ */
+export const ActiveSessionLockSchema = SessionStateBaseSchema.pick({
+  schema_version: true,
+  session_id: true,
+  checkpoint_id: true,
+  started_at: true,
+  task: true,
+});
+export type ActiveSessionLock = z.infer<typeof ActiveSessionLockSchema>;
