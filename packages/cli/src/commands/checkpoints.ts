@@ -42,14 +42,11 @@
 //    No header, no boxes, no extra blank lines. JSON mode emits `[]`
 //    (NOT the empty-state text).
 
+import { RepoRootNotFoundError, resolveRepoRoot } from "@viberevert/core";
 import {
-  RepoRootNotFoundError,
-  resolveRepoRoot,
-} from "@viberevert/core";
-import {
-  type CheckpointSummary,
   CheckpointCorruptError,
   CheckpointNotFoundError,
+  type CheckpointSummary,
   listCheckpoints,
 } from "@viberevert/git";
 import { Command, Option } from "clipanion";
@@ -75,9 +72,7 @@ export class CheckpointsCommand extends Command {
         this.context.stderr.write(
           "No git repository or VibeRevert project found (walked up from cwd looking for .git or .viberevert.yml).\n",
         );
-        this.context.stderr.write(
-          "Run `viberevert init` to create a project here.\n",
-        );
+        this.context.stderr.write("Run `viberevert init` to create a project here.\n");
         return 1;
       }
       throw err;
@@ -91,10 +86,7 @@ export class CheckpointsCommand extends Command {
       // violation, manifest schema failure, missing referenced
       // artifact, etc.). Surface the error message cleanly rather
       // than leaking the JS stack to the user.
-      if (
-        err instanceof CheckpointCorruptError ||
-        err instanceof CheckpointNotFoundError
-      ) {
+      if (err instanceof CheckpointCorruptError || err instanceof CheckpointNotFoundError) {
         this.context.stderr.write(`Error reading checkpoints: ${err.message}\n`);
         return 1;
       }
@@ -142,10 +134,7 @@ export class CheckpointsCommand extends Command {
  * D17c). If a third listing command appears, this would justify
  * extraction to `../format.ts`.
  */
-function renderTable(
-  headers: readonly string[],
-  rows: readonly (readonly string[])[],
-): string {
+function renderTable(headers: readonly string[], rows: readonly (readonly string[])[]): string {
   const widths = headers.map((header, colIdx) => {
     let w = header.length;
     for (const row of rows) {

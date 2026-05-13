@@ -55,7 +55,8 @@
 // `core.listSessions` for now; `git.listCheckpoints` does not need it yet
 // per the plan's locked text. Future M C/M D may extend.
 
-import { lstat, mkdir, readFile, readdir } from "node:fs/promises";
+import type { Stats } from "node:fs";
+import { lstat, mkdir, readdir, readFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import {
   type Manifest,
@@ -342,7 +343,7 @@ export async function loadCheckpoint(checkpointDir: string): Promise<Manifest> {
   // Pre-check: manifest.json must exist as a regular file. Without this,
   // readFile would happily follow a symlinked manifest, opening the door
   // to silent tampering. Symlink/dir/socket/etc. → CheckpointCorruptError.
-  let manifestStat;
+  let manifestStat: Stats;
   try {
     manifestStat = await lstat(manifestPath);
   } catch (err) {
@@ -401,7 +402,7 @@ export async function loadCheckpoint(checkpointDir: string): Promise<Manifest> {
   await Promise.all(
     artifactPaths.map(async (rel) => {
       const abs = join(checkpointDir, rel);
-      let st;
+      let st: Stats;
       try {
         st = await lstat(abs);
       } catch (err) {

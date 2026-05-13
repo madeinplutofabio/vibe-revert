@@ -80,20 +80,17 @@
 
 // Inferred TypeScript types.
 export type { CheckpointSummary } from "./checkpoint.js";
-export type {
-  RestoreExtractionConflict,
-  RestoreHashMismatch,
-  RestoreTrackedDirtyParityIssue,
-} from "./errors.js";
-export type { StatusEntry } from "./git-cli.js";
-
 // Runtime values: checkpoint primitives.
 export {
   createCheckpoint,
   listCheckpoints,
   loadCheckpoint,
 } from "./checkpoint.js";
-
+export type {
+  RestoreExtractionConflict,
+  RestoreHashMismatch,
+  RestoreTrackedDirtyParityIssue,
+} from "./errors.js";
 // Runtime values: error classes.
 export {
   CheckpointCorruptError,
@@ -105,6 +102,7 @@ export {
   RestoreTrackedDirtyParityError,
   RestoreVerificationError,
 } from "./errors.js";
+export type { StatusEntry } from "./git-cli.js";
 
 // Runtime values: git subprocess wrappers (D17c single owner).
 export {

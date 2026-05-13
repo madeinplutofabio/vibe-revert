@@ -84,12 +84,7 @@ async function writeCheckpointFixture(opts: {
   capturedAt: string;
   headSha: string;
 }): Promise<void> {
-  const checkpointDir = join(
-    tmpRoot,
-    ".viberevert",
-    "checkpoints",
-    opts.checkpointId,
-  );
+  const checkpointDir = join(tmpRoot, ".viberevert", "checkpoints", opts.checkpointId);
   const rollbackDir = join(checkpointDir, "rollback");
   await mkdir(rollbackDir, { recursive: true });
 
@@ -129,10 +124,7 @@ async function writeCheckpointFixture(opts: {
     ...(opts.name !== undefined ? { name: opts.name } : {}),
   };
 
-  await writeFile(
-    join(checkpointDir, "manifest.json"),
-    JSON.stringify(manifest, null, 2),
-  );
+  await writeFile(join(checkpointDir, "manifest.json"), JSON.stringify(manifest, null, 2));
 }
 
 async function writeSessionFixture(opts: {
@@ -142,12 +134,7 @@ async function writeSessionFixture(opts: {
   endedAt?: string;
   task?: string;
 }): Promise<void> {
-  const sessionDir = join(
-    tmpRoot,
-    ".viberevert",
-    "sessions",
-    opts.sessionId,
-  );
+  const sessionDir = join(tmpRoot, ".viberevert", "sessions", opts.sessionId);
   await mkdir(join(sessionDir, "checkpoint"), { recursive: true });
 
   const sessionState: SessionState = {
@@ -166,10 +153,7 @@ async function writeSessionFixture(opts: {
     commands_log_path: `.viberevert/sessions/${opts.sessionId}/commands.log`,
   };
 
-  await writeFile(
-    join(sessionDir, "session.json"),
-    JSON.stringify(sessionState, null, 2),
-  );
+  await writeFile(join(sessionDir, "session.json"), JSON.stringify(sessionState, null, 2));
   await writeFile(join(sessionDir, "before-status.txt"), "");
   await writeFile(join(sessionDir, "commands.log"), "");
   if (opts.endedAt !== undefined) {
@@ -239,10 +223,8 @@ async function runCommand(
   };
 }
 
-const runCheckpoints = (args: string[]) =>
-  runCommand(CheckpointsCommand, "checkpoints", args);
-const runSessions = (args: string[]) =>
-  runCommand(SessionsCommand, "sessions", args);
+const runCheckpoints = (args: string[]) => runCommand(CheckpointsCommand, "checkpoints", args);
+const runSessions = (args: string[]) => runCommand(SessionsCommand, "sessions", args);
 
 // =============================================================================
 // checkpoints --json

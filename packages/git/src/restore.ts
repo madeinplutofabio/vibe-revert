@@ -182,22 +182,22 @@ import { join } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import {
-  type Manifest,
   isSafeStoredRelativePath,
+  type Manifest,
   normalizeStringArray,
 } from "@viberevert/session-format";
 import picomatch from "picomatch";
 import * as tar from "tar";
 import { loadCheckpoint } from "./checkpoint.js";
 import {
-  type RestoreExtractionConflict,
-  type RestoreHashMismatch,
-  type RestoreTrackedDirtyParityIssue,
   CheckpointCorruptError,
   RestoreExcludeDriftError,
+  type RestoreExtractionConflict,
   RestoreExtractionConflictError,
+  type RestoreHashMismatch,
   RestoreHeadMismatchError,
   RestoreTrackedDirtyParityError,
+  type RestoreTrackedDirtyParityIssue,
   RestoreVerificationError,
 } from "./errors.js";
 import {
@@ -381,9 +381,7 @@ export async function restoreCheckpoint(
   //    (tightening = patterns added since checkpoint, loosening =
   //    patterns removed) plus a path-vs-matcher arm that populates
   //    tighteningPaths when drift would immediately damage this manifest.
-  const normalizedExcludePatterns = normalizeStringArray([
-    ...opts.rollbackExcludePatterns,
-  ]);
+  const normalizedExcludePatterns = normalizeStringArray([...opts.rollbackExcludePatterns]);
   const isExcluded = compileExcludeMatcher(normalizedExcludePatterns);
   const expectedUntrackedSet = Object.keys(manifest.untracked.file_hashes);
   assertNoExcludeDrift(
@@ -423,11 +421,7 @@ export async function restoreCheckpoint(
   //    untracked-not-excluded paths NOT in the captured set and remove
   //    them. Files in the manifest are left alone — `extractUntrackedTarball`
   //    will overwrite them with the captured bytes after path cleanup.
-  await deleteUncapturedUntracked(
-    opts.repoRoot,
-    new Set(expectedUntrackedSet),
-    isExcluded,
-  );
+  await deleteUncapturedUntracked(opts.repoRoot, new Set(expectedUntrackedSet), isExcluded);
 
   // 8. Extraction-path cleanup. AFTER the delete pass: some blockers that
   //    looked unresolvable pre-mutation are now safely cleanable (e.g., a

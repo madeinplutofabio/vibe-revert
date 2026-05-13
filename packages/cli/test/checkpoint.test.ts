@@ -26,16 +26,12 @@
 //     coverage.
 
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import { promisify } from "node:util";
-import {
-  type Manifest,
-  ManifestSchema,
-  SCHEMA_VERSION,
-} from "@viberevert/session-format";
+import { type Manifest, ManifestSchema, SCHEMA_VERSION } from "@viberevert/session-format";
 import { Cli } from "clipanion";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -120,12 +116,7 @@ async function writeCheckpointFixture(opts: {
   capturedAt: string;
   headSha: string;
 }): Promise<void> {
-  const checkpointDir = join(
-    tmpRoot,
-    ".viberevert",
-    "checkpoints",
-    opts.checkpointId,
-  );
+  const checkpointDir = join(tmpRoot, ".viberevert", "checkpoints", opts.checkpointId);
   const rollbackDir = join(checkpointDir, "rollback");
   await mkdir(rollbackDir, { recursive: true });
 
@@ -165,10 +156,7 @@ async function writeCheckpointFixture(opts: {
     ...(opts.name !== undefined ? { name: opts.name } : {}),
   };
 
-  await writeFile(
-    join(checkpointDir, "manifest.json"),
-    JSON.stringify(manifest, null, 2),
-  );
+  await writeFile(join(checkpointDir, "manifest.json"), JSON.stringify(manifest, null, 2));
 }
 
 /**
@@ -243,8 +231,7 @@ async function runCommand(
   };
 }
 
-const runCheckpoint = (args: string[]) =>
-  runCommand(CheckpointCommand, "checkpoint", args);
+const runCheckpoint = (args: string[]) => runCommand(CheckpointCommand, "checkpoint", args);
 
 // =============================================================================
 // Tests
@@ -321,20 +308,14 @@ describe("checkpoint command", () => {
     const result = await runCheckpoint(["--name", "release-ready"]);
     expect(result.exitCode).toBe(1);
     // D5b locked refusal copy
-    expect(result.stderr).toContain(
-      "Checkpoint name already exists: release-ready",
-    );
-    expect(result.stderr).toContain(
-      "Use a different name, or list existing checkpoints with:",
-    );
+    expect(result.stderr).toContain("Checkpoint name already exists: release-ready");
+    expect(result.stderr).toContain("Use a different name, or list existing checkpoints with:");
     expect(result.stderr).toContain("viberevert checkpoints");
 
     // No new checkpoint created — the only entry should still be the fixture.
     const dir = join(tmpRoot, ".viberevert", "checkpoints");
     const entries = await readdir(dir);
-    const cpEntries = entries.filter((e) =>
-      /^cp_[0-9A-HJKMNP-TV-Z]{26}$/.test(e),
-    );
+    const cpEntries = entries.filter((e) => /^cp_[0-9A-HJKMNP-TV-Z]{26}$/.test(e));
     expect(cpEntries).toEqual([FIXTURE_CHECKPOINT_ID]);
   });
 
@@ -344,8 +325,6 @@ describe("checkpoint command", () => {
     // any other state.
     const result = await runCheckpoint(["--name", "   "]);
     expect(result.exitCode).toBe(1);
-    expect(result.stderr).toContain(
-      "--name must not be empty or whitespace-only",
-    );
+    expect(result.stderr).toContain("--name must not be empty or whitespace-only");
   });
 });

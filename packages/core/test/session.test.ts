@@ -61,15 +61,15 @@
 // session from the listing and causing tests to pass for the wrong
 // reason or fail with misleading assertions.
 
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   type ActiveSessionLock,
   ActiveSessionLockSchema,
+  SESSION_STATE_SCHEMA_VERSION,
   type SessionState,
   SessionStateSchema,
-  SESSION_STATE_SCHEMA_VERSION,
 } from "@viberevert/session-format";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -134,10 +134,7 @@ async function makeTmpSessionDir(sessionId: string): Promise<string> {
  * Useful for setting up listSessions/loadSession scenarios that don't
  * exercise the start/end code path.
  */
-async function writeSessionFixture(
-  sessionId: string,
-  state: SessionState,
-): Promise<void> {
+async function writeSessionFixture(sessionId: string, state: SessionState): Promise<void> {
   const sessionDir = join(repoRoot, ".viberevert", "sessions", sessionId);
   await mkdir(sessionDir, { recursive: true });
   await writeFile(join(sessionDir, "session.json"), JSON.stringify(state, null, 2));
@@ -197,12 +194,8 @@ describe("startSession", () => {
     expect(session.ended_at).toBeUndefined();
     expect(session.task).toBeUndefined();
     expect(session.agent_command).toBeUndefined();
-    expect(session.before_status_path).toBe(
-      `.viberevert/sessions/${NEWER_ID}/before-status.txt`,
-    );
-    expect(session.commands_log_path).toBe(
-      `.viberevert/sessions/${NEWER_ID}/commands.log`,
-    );
+    expect(session.before_status_path).toBe(`.viberevert/sessions/${NEWER_ID}/before-status.txt`);
+    expect(session.commands_log_path).toBe(`.viberevert/sessions/${NEWER_ID}/commands.log`);
 
     // Status file written verbatim
     expect(await readFile(join(finalDir, "before-status.txt"), "utf8")).toBe(
@@ -214,15 +207,12 @@ describe("startSession", () => {
 
     // The fake checkpoint subdir written by makeTmpSessionDir came along
     // for the ride (rename moves the whole tree)
-    expect(
-      await readFile(join(finalDir, "checkpoint", "manifest.json"), "utf8"),
-    ).toBe('{"v":"1.0"}');
+    expect(await readFile(join(finalDir, "checkpoint", "manifest.json"), "utf8")).toBe(
+      '{"v":"1.0"}',
+    );
 
     // Active lock validates and matches
-    const lockRaw = await readFile(
-      join(repoRoot, ".viberevert", "active-session.json"),
-      "utf8",
-    );
+    const lockRaw = await readFile(join(repoRoot, ".viberevert", "active-session.json"), "utf8");
     const lock = ActiveSessionLockSchema.parse(JSON.parse(lockRaw));
     expect(lock.session_id).toBe(NEWER_ID);
     expect(lock.checkpoint_id).toBe(CHECKPOINT_ID);
@@ -246,24 +236,18 @@ describe("startSession", () => {
 
     const session = SessionStateSchema.parse(
       JSON.parse(
-        await readFile(
-          join(repoRoot, ".viberevert", "sessions", NEWER_ID, "session.json"),
-          "utf8",
-        ),
+        await readFile(join(repoRoot, ".viberevert", "sessions", NEWER_ID, "session.json"), "utf8"),
       ),
     );
     expect(session.task).toBe("Add yearly billing");
     expect(session.agent_command).toBe("claude --dangerous");
 
-    const lockRaw = await readFile(
-      join(repoRoot, ".viberevert", "active-session.json"),
-      "utf8",
-    );
-    const lockParsed = JSON.parse(lockRaw) as Record<string, unknown>;
-    expect(lockParsed["task"]).toBe("Add yearly billing");
+    const lockRaw = await readFile(join(repoRoot, ".viberevert", "active-session.json"), "utf8");
+    const lockParsed = JSON.parse(lockRaw) as { task?: unknown; agent_command?: unknown };
+    expect(lockParsed.task).toBe("Add yearly billing");
     // agent_command must NOT appear in the active lock (picked schema
     // excludes it; strictObject would reject it on parse).
-    expect(lockParsed["agent_command"]).toBeUndefined();
+    expect(lockParsed.agent_command).toBeUndefined();
     // And re-validation against the strict picked schema must succeed.
     expect(() => ActiveSessionLockSchema.parse(lockParsed)).not.toThrow();
   });
@@ -301,9 +285,7 @@ describe("startSession", () => {
     // tmp dir untouched (no rename happened)
     expect((await stat(tmpDir)).isDirectory()).toBe(true);
     // No new session dir created
-    const sessionsListing = await readdir(
-      join(repoRoot, ".viberevert", "sessions"),
-    );
+    const sessionsListing = await readdir(join(repoRoot, ".viberevert", "sessions"));
     expect(sessionsListing).toEqual([`.tmp-${NEWER_ID}`]);
   });
 });
@@ -341,17 +323,13 @@ describe("endSession", () => {
       JSON.parse(await readFile(join(finalDir, "session.json"), "utf8")),
     );
     expect(session.ended_at).toBe(ENDED_TS);
-    expect(session.after_status_path).toBe(
-      `.viberevert/sessions/${NEWER_ID}/after-status.txt`,
-    );
+    expect(session.after_status_path).toBe(`.viberevert/sessions/${NEWER_ID}/after-status.txt`);
     // Pre-existing fields preserved
     expect(session.session_id).toBe(NEWER_ID);
     expect(session.started_at).toBe(NEWER_TS);
 
     // Active lock deleted
-    await expect(
-      stat(join(repoRoot, ".viberevert", "active-session.json")),
-    ).rejects.toThrow();
+    await expect(stat(join(repoRoot, ".viberevert", "active-session.json"))).rejects.toThrow();
   });
 
   it("throws NoActiveSessionError when no active-session.json exists", async () => {
@@ -373,14 +351,8 @@ describe("endSession", () => {
     });
 
     const finalDir = join(repoRoot, ".viberevert", "sessions", NEWER_ID);
-    const sessionJsonBefore = await readFile(
-      join(finalDir, "session.json"),
-      "utf8",
-    );
-    const lockBefore = await readFile(
-      join(repoRoot, ".viberevert", "active-session.json"),
-      "utf8",
-    );
+    const sessionJsonBefore = await readFile(join(finalDir, "session.json"), "utf8");
+    const lockBefore = await readFile(join(repoRoot, ".viberevert", "active-session.json"), "utf8");
 
     await expect(
       endSession({
@@ -393,16 +365,11 @@ describe("endSession", () => {
     // No after-status.txt written
     await expect(stat(join(finalDir, "after-status.txt"))).rejects.toThrow();
     // session.json byte-untouched
-    expect(await readFile(join(finalDir, "session.json"), "utf8")).toBe(
-      sessionJsonBefore,
-    );
+    expect(await readFile(join(finalDir, "session.json"), "utf8")).toBe(sessionJsonBefore);
     // Active lock byte-untouched
-    expect(
-      await readFile(
-        join(repoRoot, ".viberevert", "active-session.json"),
-        "utf8",
-      ),
-    ).toBe(lockBefore);
+    expect(await readFile(join(repoRoot, ".viberevert", "active-session.json"), "utf8")).toBe(
+      lockBefore,
+    );
   });
 });
 
@@ -422,9 +389,7 @@ describe("loadSession", () => {
   });
 
   it("throws SessionNotFoundError when session.json missing", async () => {
-    await expect(loadSession(NEWER_ID, repoRoot)).rejects.toBeInstanceOf(
-      SessionNotFoundError,
-    );
+    await expect(loadSession(NEWER_ID, repoRoot)).rejects.toBeInstanceOf(SessionNotFoundError);
   });
 
   it("throws SessionNotFoundError when sessionId starts with '.tmp-' (D13/D23)", async () => {
@@ -433,9 +398,7 @@ describe("loadSession", () => {
     const state = buildState({ session_id: NEWER_ID });
     await writeSessionFixture(`.tmp-${NEWER_ID}`, state);
 
-    await expect(
-      loadSession(`.tmp-${NEWER_ID}`, repoRoot),
-    ).rejects.toMatchObject({
+    await expect(loadSession(`.tmp-${NEWER_ID}`, repoRoot)).rejects.toMatchObject({
       name: "SessionNotFoundError",
       sessionId: `.tmp-${NEWER_ID}`,
     });
@@ -452,9 +415,7 @@ describe("loadSession", () => {
     });
     await writeSessionFixture(NEWER_ID, state);
 
-    await expect(loadSession(NEWER_ID, repoRoot)).rejects.toThrow(
-      /session_id .* does not match/,
-    );
+    await expect(loadSession(NEWER_ID, repoRoot)).rejects.toThrow(/session_id .* does not match/);
   });
 });
 
@@ -527,10 +488,7 @@ describe("listSessions", () => {
 
   it("emits crash_interrupted warning for orphan (no ended_at, no active-lock reference) and omits from sessions", async () => {
     // Orphan: no ended_at, and no active-session.json references it.
-    await writeSessionFixture(
-      NEWER_ID,
-      buildState({ session_id: NEWER_ID }),
-    );
+    await writeSessionFixture(NEWER_ID, buildState({ session_id: NEWER_ID }));
 
     const { sessions, warnings } = await listSessions(repoRoot);
     expect(sessions).toEqual([]);
@@ -544,10 +502,7 @@ describe("listSessions", () => {
   });
 
   it("returns active session in sessions array (status: 'active') when active-session.json references it", async () => {
-    await writeSessionFixture(
-      NEWER_ID,
-      buildState({ session_id: NEWER_ID }),
-    );
+    await writeSessionFixture(NEWER_ID, buildState({ session_id: NEWER_ID }));
     await writeActiveLock({
       schema_version: SESSION_STATE_SCHEMA_VERSION,
       session_id: NEWER_ID,
@@ -589,9 +544,7 @@ describe("listSessions", () => {
     if (warning === undefined) throw new Error("test bug: missing warning");
     expect(warning.kind).toBe("schema_invalid");
     expect(warning.sessionId).toBe(NEWER_ID);
-    expect(warning.path).toBe(
-      `.viberevert/sessions/${NEWER_ID}/session.json`,
-    );
+    expect(warning.path).toBe(`.viberevert/sessions/${NEWER_ID}/session.json`);
     if (warning.kind === "schema_invalid") {
       expect(warning.reason).toMatch(/does not match dir name/);
     }
@@ -627,12 +580,7 @@ describe("loadActiveSessionLock", () => {
   });
 
   it("throws on invalid JSON in active-session.json", async () => {
-    await writeFile(
-      join(repoRoot, ".viberevert", "active-session.json"),
-      "this is not json",
-    );
-    await expect(loadActiveSessionLock(repoRoot)).rejects.toThrow(
-      /not valid JSON/,
-    );
+    await writeFile(join(repoRoot, ".viberevert", "active-session.json"), "this is not json");
+    await expect(loadActiveSessionLock(repoRoot)).rejects.toThrow(/not valid JSON/);
   });
 });

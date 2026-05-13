@@ -92,12 +92,7 @@ async function writeCheckpointFixture(opts: {
   capturedAt: string;
   headSha: string;
 }): Promise<void> {
-  const checkpointDir = join(
-    tmpRoot,
-    ".viberevert",
-    "checkpoints",
-    opts.checkpointId,
-  );
+  const checkpointDir = join(tmpRoot, ".viberevert", "checkpoints", opts.checkpointId);
   const rollbackDir = join(checkpointDir, "rollback");
   await mkdir(rollbackDir, { recursive: true });
 
@@ -137,10 +132,7 @@ async function writeCheckpointFixture(opts: {
     ...(opts.name !== undefined ? { name: opts.name } : {}),
   };
 
-  await writeFile(
-    join(checkpointDir, "manifest.json"),
-    JSON.stringify(manifest, null, 2),
-  );
+  await writeFile(join(checkpointDir, "manifest.json"), JSON.stringify(manifest, null, 2));
 }
 
 /**
@@ -154,12 +146,7 @@ async function writeSessionFixture(opts: {
   endedAt?: string;
   task?: string;
 }): Promise<void> {
-  const sessionDir = join(
-    tmpRoot,
-    ".viberevert",
-    "sessions",
-    opts.sessionId,
-  );
+  const sessionDir = join(tmpRoot, ".viberevert", "sessions", opts.sessionId);
   await mkdir(join(sessionDir, "checkpoint"), { recursive: true });
 
   const sessionState: SessionState = {
@@ -178,10 +165,7 @@ async function writeSessionFixture(opts: {
     commands_log_path: `.viberevert/sessions/${opts.sessionId}/commands.log`,
   };
 
-  await writeFile(
-    join(sessionDir, "session.json"),
-    JSON.stringify(sessionState, null, 2),
-  );
+  await writeFile(join(sessionDir, "session.json"), JSON.stringify(sessionState, null, 2));
   await writeFile(join(sessionDir, "before-status.txt"), "");
   await writeFile(join(sessionDir, "commands.log"), "");
   if (opts.endedAt !== undefined) {
@@ -266,10 +250,8 @@ async function runCommand(
   };
 }
 
-const runCheckpoints = (args: string[]) =>
-  runCommand(CheckpointsCommand, "checkpoints", args);
-const runSessions = (args: string[]) =>
-  runCommand(SessionsCommand, "sessions", args);
+const runCheckpoints = (args: string[]) => runCommand(CheckpointsCommand, "checkpoints", args);
+const runSessions = (args: string[]) => runCommand(SessionsCommand, "sessions", args);
 
 // =============================================================================
 // checkpoints command — human format
@@ -346,12 +328,7 @@ describe("checkpoints command — human format", () => {
     // Trigger the D6 standalone-invariant violation: dir name says
     // CHECKPOINT_ID_NEW but the manifest's session_id says
     // CHECKPOINT_ID_OLD. listCheckpoints throws CheckpointCorruptError.
-    const checkpointDir = join(
-      tmpRoot,
-      ".viberevert",
-      "checkpoints",
-      CHECKPOINT_ID_NEW,
-    );
+    const checkpointDir = join(tmpRoot, ".viberevert", "checkpoints", CHECKPOINT_ID_NEW);
     const rollbackDir = join(checkpointDir, "rollback");
     await mkdir(rollbackDir, { recursive: true });
     for (const f of [
@@ -383,10 +360,7 @@ describe("checkpoints command — human format", () => {
       },
       rollback_target_description: "Test fixture",
     };
-    await writeFile(
-      join(checkpointDir, "manifest.json"),
-      JSON.stringify(corrupt, null, 2),
-    );
+    await writeFile(join(checkpointDir, "manifest.json"), JSON.stringify(corrupt, null, 2));
 
     const result = await runCheckpoints([]);
     expect(result.exitCode).toBe(1);
@@ -518,12 +492,7 @@ describe("sessions command — human format", () => {
   it("forwards schema_invalid warning to stderr and omits the invalid record from sessions list", async () => {
     // Invalid: session.json has session_id mismatching dir name.
     // core.listSessions classifies as schema_invalid (per session.ts).
-    const sessionDir = join(
-      tmpRoot,
-      ".viberevert",
-      "sessions",
-      SESSION_ID_NEW,
-    );
+    const sessionDir = join(tmpRoot, ".viberevert", "sessions", SESSION_ID_NEW);
     await mkdir(sessionDir, { recursive: true });
     const mismatchState: SessionState = {
       schema_version: SESSION_STATE_SCHEMA_VERSION,
@@ -535,10 +504,7 @@ describe("sessions command — human format", () => {
       before_status_path: `.viberevert/sessions/${SESSION_ID_NEW}/before-status.txt`,
       commands_log_path: `.viberevert/sessions/${SESSION_ID_NEW}/commands.log`,
     };
-    await writeFile(
-      join(sessionDir, "session.json"),
-      JSON.stringify(mismatchState, null, 2),
-    );
+    await writeFile(join(sessionDir, "session.json"), JSON.stringify(mismatchState, null, 2));
 
     const result = await runSessions([]);
     expect(result.exitCode).toBe(0);

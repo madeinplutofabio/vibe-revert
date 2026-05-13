@@ -66,8 +66,7 @@ export class EndCommand extends Command {
   static override paths = [["end"]];
 
   static override usage = Command.Usage({
-    description:
-      "End the active session, capturing post-session git status",
+    description: "End the active session, capturing post-session git status",
   });
 
   override async execute(): Promise<number> {

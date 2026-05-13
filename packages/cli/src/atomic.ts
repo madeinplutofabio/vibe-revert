@@ -78,10 +78,7 @@ import { lstat, rename } from "node:fs/promises";
  * lives at the repo root, so all temp-and-final paths are siblings on
  * the same mount).
  */
-export async function renameDirAtomic(
-  tmpDir: string,
-  finalDir: string,
-): Promise<void> {
+export async function renameDirAtomic(tmpDir: string, finalDir: string): Promise<void> {
   let destExists = false;
   try {
     await lstat(finalDir);
@@ -92,9 +89,7 @@ export async function renameDirAtomic(
     }
   }
   if (destExists) {
-    throw new Error(
-      `renameDirAtomic: destination already exists: ${finalDir}`,
-    );
+    throw new Error(`renameDirAtomic: destination already exists: ${finalDir}`);
   }
   await rename(tmpDir, finalDir);
 }

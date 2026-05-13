@@ -115,12 +115,8 @@ async function runGit(
  * pass them via `additionalGitignore`; they're committed as part of the
  * same initial commit so they don't appear as a modification.
  */
-async function setupRepo(
-  opts: { additionalGitignore?: string } = {},
-): Promise<RepoFixture> {
-  const parentDir = await mkdtemp(
-    join(tmpdir(), "viberevert-restore-matrix-"),
-  );
+async function setupRepo(opts: { additionalGitignore?: string } = {}): Promise<RepoFixture> {
+  const parentDir = await mkdtemp(join(tmpdir(), "viberevert-restore-matrix-"));
   const repoRoot = join(parentDir, "repo");
   await mkdir(repoRoot, { recursive: true });
 
@@ -189,10 +185,7 @@ async function snapshotPaths(
  * comparison is sound for the simple ASCII paths used in this file.
  */
 async function getPorcelain(repoRoot: string): Promise<string> {
-  const { stdout } = await runGit(repoRoot, [
-    "status",
-    "--porcelain=v1",
-  ]);
+  const { stdout } = await runGit(repoRoot, ["status", "--porcelain=v1"]);
   return stdout;
 }
 
@@ -498,19 +491,11 @@ describe("rollback test matrix — filesystem/git-specific rows (6c)", () => {
     // matrix row — cached diff must contain the staged rename, while
     // working-tree diff must contain an unstaged edit on the new path.
     await runGit(repo.repoRoot, ["mv", "oldname.txt", "newname.txt"]);
-    await writeFile(
-      join(repo.repoRoot, "newname.txt"),
-      "rename test content modified\n",
-    );
+    await writeFile(join(repo.repoRoot, "newname.txt"), "rename test content modified\n");
 
-    const expectedSnapshot = await snapshotPaths(repo.repoRoot, [
-      "oldname.txt",
-      "newname.txt",
-    ]);
+    const expectedSnapshot = await snapshotPaths(repo.repoRoot, ["oldname.txt", "newname.txt"]);
     expect(expectedSnapshot.get("oldname.txt")).toBeNull();
-    expect(expectedSnapshot.get("newname.txt")?.toString()).toBe(
-      "rename test content modified\n",
-    );
+    expect(expectedSnapshot.get("newname.txt")?.toString()).toBe("rename test content modified\n");
 
     const expectedPorcelain = await getPorcelain(repo.repoRoot);
 
@@ -518,29 +503,19 @@ describe("rollback test matrix — filesystem/git-specific rows (6c)", () => {
     // rename plus an unstaged content edit on the renamed path, not
     // merely "some dirty state" that happens to round-trip.
     const expectedCachedNameStatus = (
-      await runGit(repo.repoRoot, [
-        "diff",
-        "--cached",
-        "--name-status",
-        "-M",
-      ])
+      await runGit(repo.repoRoot, ["diff", "--cached", "--name-status", "-M"])
     ).stdout;
     expect(expectedCachedNameStatus).toContain("oldname.txt");
     expect(expectedCachedNameStatus).toContain("newname.txt");
     expect(expectedCachedNameStatus).toMatch(/^R\d+\s+oldname\.txt\s+newname\.txt/m);
 
-    const expectedUnstagedNames = (
-      await runGit(repo.repoRoot, ["diff", "--name-only"])
-    ).stdout;
+    const expectedUnstagedNames = (await runGit(repo.repoRoot, ["diff", "--name-only"])).stdout;
     expect(expectedUnstagedNames).toBe("newname.txt\n");
 
     const checkpointDir = await takeCheckpoint(repo);
 
     // During session: further modification to the new path
-    await writeFile(
-      join(repo.repoRoot, "newname.txt"),
-      "during session content\n",
-    );
+    await writeFile(join(repo.repoRoot, "newname.txt"), "during session content\n");
 
     await restoreCheckpoint(checkpointDir, {
       repoRoot: repo.repoRoot,
@@ -553,18 +528,11 @@ describe("rollback test matrix — filesystem/git-specific rows (6c)", () => {
     // Strong post-restore assertions: staged rename and unstaged edit
     // shape must be reconstructed, not just byte content.
     const actualCachedNameStatus = (
-      await runGit(repo.repoRoot, [
-        "diff",
-        "--cached",
-        "--name-status",
-        "-M",
-      ])
+      await runGit(repo.repoRoot, ["diff", "--cached", "--name-status", "-M"])
     ).stdout;
     expect(actualCachedNameStatus).toBe(expectedCachedNameStatus);
 
-    const actualUnstagedNames = (
-      await runGit(repo.repoRoot, ["diff", "--name-only"])
-    ).stdout;
+    const actualUnstagedNames = (await runGit(repo.repoRoot, ["diff", "--name-only"])).stdout;
     expect(actualUnstagedNames).toBe(expectedUnstagedNames);
   });
 
@@ -572,10 +540,7 @@ describe("rollback test matrix — filesystem/git-specific rows (6c)", () => {
     // Setup: commit script.sh with mode 0644 (git's default for new
     // files on most platforms; on Windows files have no real unix mode
     // but git tracks them as 0644 by convention).
-    await writeFile(
-      join(repo.repoRoot, "script.sh"),
-      "#!/bin/sh\necho hello\n",
-    );
+    await writeFile(join(repo.repoRoot, "script.sh"), "#!/bin/sh\necho hello\n");
     await commit(repo.repoRoot, "add script");
 
     // Disable core.fileMode for this test to make it deterministic
@@ -593,11 +558,7 @@ describe("rollback test matrix — filesystem/git-specific rows (6c)", () => {
     // Pre-session: change mode via `git update-index --chmod=+x` rather
     // than filesystem chmod. Modifies git's index entry directly with
     // no dependency on filesystem mode support.
-    await runGit(repo.repoRoot, [
-      "update-index",
-      "--chmod=+x",
-      "script.sh",
-    ]);
+    await runGit(repo.repoRoot, ["update-index", "--chmod=+x", "script.sh"]);
 
     const expectedSnapshot = await snapshotPaths(repo.repoRoot, ["script.sh"]);
     const expectedPorcelain = await getPorcelain(repo.repoRoot);
@@ -611,9 +572,8 @@ describe("rollback test matrix — filesystem/git-specific rows (6c)", () => {
     // MODE-ONLY change, not a content change masquerading as one.
     // ls-files --stage shows the index entry as `<mode> <sha> <stage>\t<path>`.
     // After chmod=+x, mode must be 100755 (executable).
-    const expectedLsStage = (
-      await runGit(repo.repoRoot, ["ls-files", "--stage", "script.sh"])
-    ).stdout;
+    const expectedLsStage = (await runGit(repo.repoRoot, ["ls-files", "--stage", "script.sh"]))
+      .stdout;
     expect(expectedLsStage).toMatch(/^100755 [0-9a-f]{40} 0\tscript\.sh$/m);
 
     // Strong setup assertion #3: numstat of cached diff is 0 added /
@@ -621,12 +581,7 @@ describe("rollback test matrix — filesystem/git-specific rows (6c)", () => {
     // show non-zero counts and would mean this test is exercising the
     // wrong scenario.
     const expectedCachedNumstat = (
-      await runGit(repo.repoRoot, [
-        "diff",
-        "--cached",
-        "--numstat",
-        "script.sh",
-      ])
+      await runGit(repo.repoRoot, ["diff", "--cached", "--numstat", "script.sh"])
     ).stdout;
     expect(expectedCachedNumstat).toBe("0\t0\tscript.sh\n");
 
@@ -634,10 +589,7 @@ describe("rollback test matrix — filesystem/git-specific rows (6c)", () => {
 
     // During session: modify content (mixes content change with the
     // pre-existing staged mode-only change)
-    await writeFile(
-      join(repo.repoRoot, "script.sh"),
-      "#!/bin/sh\necho different\n",
-    );
+    await writeFile(join(repo.repoRoot, "script.sh"), "#!/bin/sh\necho different\n");
 
     await restoreCheckpoint(checkpointDir, {
       repoRoot: repo.repoRoot,
@@ -649,18 +601,12 @@ describe("rollback test matrix — filesystem/git-specific rows (6c)", () => {
 
     // Strong post-restore assertions: staged mode 100755 + zero
     // content delta must be reconstructed, not just file content.
-    const actualLsStage = (
-      await runGit(repo.repoRoot, ["ls-files", "--stage", "script.sh"])
-    ).stdout;
+    const actualLsStage = (await runGit(repo.repoRoot, ["ls-files", "--stage", "script.sh"]))
+      .stdout;
     expect(actualLsStage).toBe(expectedLsStage);
 
     const actualCachedNumstat = (
-      await runGit(repo.repoRoot, [
-        "diff",
-        "--cached",
-        "--numstat",
-        "script.sh",
-      ])
+      await runGit(repo.repoRoot, ["diff", "--cached", "--numstat", "script.sh"])
     ).stdout;
     expect(actualCachedNumstat).toBe(expectedCachedNumstat);
   });
@@ -703,9 +649,7 @@ describe("rollback test matrix — rollback.exclude symmetry rows (6d)", () => {
     // empty before the during-session creation. Without this, a stray
     // file pre-existing in excluded-dir/ would silently make the test
     // pass for the wrong reason.
-    const preSnapshot = await snapshotPaths(repo.repoRoot, [
-      "excluded-dir/new.txt",
-    ]);
+    const preSnapshot = await snapshotPaths(repo.repoRoot, ["excluded-dir/new.txt"]);
     expect(preSnapshot.get("excluded-dir/new.txt")).toBeNull();
     expect(await getPorcelain(repo.repoRoot)).toBe("");
 
@@ -721,20 +665,13 @@ describe("rollback test matrix — rollback.exclude symmetry rows (6d)", () => {
     // rollback.exclude code path specifically (rather than gitignore,
     // which is git's own filter).
     await mkdir(join(repo.repoRoot, "excluded-dir"), { recursive: true });
-    await writeFile(
-      join(repo.repoRoot, "excluded-dir", "new.txt"),
-      "session content\n",
-    );
+    await writeFile(join(repo.repoRoot, "excluded-dir", "new.txt"), "session content\n");
 
     // Snapshot the during-session state — D3 says THIS is what must
     // persist post-restore (NOT the pre-session state, since restore
     // doesn't touch excluded paths).
-    const expectedSnapshot = await snapshotPaths(repo.repoRoot, [
-      "excluded-dir/new.txt",
-    ]);
-    expect(expectedSnapshot.get("excluded-dir/new.txt")?.toString()).toBe(
-      "session content\n",
-    );
+    const expectedSnapshot = await snapshotPaths(repo.repoRoot, ["excluded-dir/new.txt"]);
+    expect(expectedSnapshot.get("excluded-dir/new.txt")?.toString()).toBe("session content\n");
     const expectedPorcelain = await getPorcelain(repo.repoRoot);
     // git's default --untracked-files=normal collapses untracked dir
     // contents into a single `?? excluded-dir/` entry. The byte
@@ -764,9 +701,7 @@ describe("rollback test matrix — rollback.exclude symmetry rows (6d)", () => {
     await mkdir(join(repo.repoRoot, "excluded-dir"), { recursive: true });
     await writeFile(join(repo.repoRoot, "excluded-dir", "lib.txt"), "v0\n");
 
-    const preSnapshot = await snapshotPaths(repo.repoRoot, [
-      "excluded-dir/lib.txt",
-    ]);
+    const preSnapshot = await snapshotPaths(repo.repoRoot, ["excluded-dir/lib.txt"]);
     expect(preSnapshot.get("excluded-dir/lib.txt")?.toString()).toBe("v0\n");
 
     const checkpointDir = await takeCheckpoint({
@@ -780,12 +715,8 @@ describe("rollback test matrix — rollback.exclude symmetry rows (6d)", () => {
 
     // Snapshot the during-session state — D3 says THIS ("v1") is what
     // must persist post-restore, NOT the pre-session state ("v0").
-    const expectedSnapshot = await snapshotPaths(repo.repoRoot, [
-      "excluded-dir/lib.txt",
-    ]);
-    expect(expectedSnapshot.get("excluded-dir/lib.txt")?.toString()).toBe(
-      "v1\n",
-    );
+    const expectedSnapshot = await snapshotPaths(repo.repoRoot, ["excluded-dir/lib.txt"]);
+    expect(expectedSnapshot.get("excluded-dir/lib.txt")?.toString()).toBe("v1\n");
     const expectedPorcelain = await getPorcelain(repo.repoRoot);
     // git collapses untracked dir contents (`--untracked-files=normal`)
     // into `?? excluded-dir/`. Both pre-session and during-session

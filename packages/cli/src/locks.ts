@@ -177,10 +177,7 @@ export async function withExclusiveLock<T>(
   }
 
   // Step 3: best-effort metadata write (advisory; not load-bearing).
-  await writeFile(
-    join(lockDir, LOCK_INFO_FILENAME),
-    JSON.stringify(info),
-  ).catch(() => {
+  await writeFile(join(lockDir, LOCK_INFO_FILENAME), JSON.stringify(info)).catch(() => {
     // Lock is the dir, not the file. Metadata write failure is OK.
   });
 
@@ -237,11 +234,16 @@ async function tryReadLockInfo(lockDir: string): Promise<LockInfo | null> {
     return null;
   }
 
-  const record = parsed as Record<string, unknown>;
-  const pid = record["pid"];
-  const command = record["command"];
-  const started_at = record["started_at"];
-  const host = record["host"];
+  const record = parsed as {
+    pid?: unknown;
+    command?: unknown;
+    started_at?: unknown;
+    host?: unknown;
+  };
+  const pid = record.pid;
+  const command = record.command;
+  const started_at = record.started_at;
+  const host = record.host;
 
   if (
     typeof pid !== "number" ||

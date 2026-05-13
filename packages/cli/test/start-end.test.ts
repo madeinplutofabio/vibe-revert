@@ -11,15 +11,15 @@
 // + the `setupActiveSession` helper unchanged.
 
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import { promisify } from "node:util";
 import {
   type ActiveSessionLock,
-  type SessionState,
   SESSION_STATE_SCHEMA_VERSION,
+  type SessionState,
   SessionStateSchema,
 } from "@viberevert/session-format";
 import { Cli } from "clipanion";
@@ -105,10 +105,7 @@ async function setupActiveSession(opts: {
     before_status_path: `.viberevert/sessions/${opts.sessionId}/before-status.txt`,
     commands_log_path: `.viberevert/sessions/${opts.sessionId}/commands.log`,
   };
-  await writeFile(
-    join(sessionDir, "session.json"),
-    JSON.stringify(sessionState, null, 2),
-  );
+  await writeFile(join(sessionDir, "session.json"), JSON.stringify(sessionState, null, 2));
   await writeFile(join(sessionDir, "before-status.txt"), "");
   await writeFile(join(sessionDir, "commands.log"), "");
 
@@ -249,9 +246,7 @@ describe("end command", () => {
     expect(result.stdout).toMatch(/Ended: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z/);
 
     // Active lock deleted
-    await expect(
-      stat(join(tmpRoot, ".viberevert", "active-session.json")),
-    ).rejects.toThrow();
+    await expect(stat(join(tmpRoot, ".viberevert", "active-session.json"))).rejects.toThrow();
 
     // session.json mutated and re-validates against schema
     const session = SessionStateSchema.parse(
@@ -263,9 +258,7 @@ describe("end command", () => {
       ),
     );
     expect(session.ended_at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
-    expect(session.after_status_path).toBe(
-      `.viberevert/sessions/${SESSION_ID}/after-status.txt`,
-    );
+    expect(session.after_status_path).toBe(`.viberevert/sessions/${SESSION_ID}/after-status.txt`);
     // Pre-existing fields preserved
     expect(session.session_id).toBe(SESSION_ID);
     expect(session.started_at).toBe(STARTED_AT);
@@ -341,10 +334,7 @@ describe("start command", () => {
     expect(result.stdout).not.toContain("Task:");
 
     // active-session.json exists and validates as ActiveSessionLock
-    const lockRaw = await readFile(
-      join(tmpRoot, ".viberevert", "active-session.json"),
-      "utf8",
-    );
+    const lockRaw = await readFile(join(tmpRoot, ".viberevert", "active-session.json"), "utf8");
     const lock: ActiveSessionLock = JSON.parse(lockRaw);
     expect(lock.session_id).toMatch(/^sess_[0-9A-HJKMNP-TV-Z]{26}$/);
     expect(lock.checkpoint_id).toMatch(/^cp_[0-9A-HJKMNP-TV-Z]{26}$/);
@@ -352,9 +342,7 @@ describe("start command", () => {
     // Session dir exists with valid session.json (in-flight: no ended_at)
     const sessionsDir = join(tmpRoot, ".viberevert", "sessions");
     const entries = await readdir(sessionsDir);
-    const sessionDirs = entries.filter((e) =>
-      /^sess_[0-9A-HJKMNP-TV-Z]{26}$/.test(e),
-    );
+    const sessionDirs = entries.filter((e) => /^sess_[0-9A-HJKMNP-TV-Z]{26}$/.test(e));
     expect(sessionDirs).toHaveLength(1);
     const sessionId = sessionDirs[0];
     if (sessionId === undefined) {
@@ -363,12 +351,7 @@ describe("start command", () => {
     expect(sessionId).toBe(lock.session_id);
 
     const session = SessionStateSchema.parse(
-      JSON.parse(
-        await readFile(
-          join(sessionsDir, sessionId, "session.json"),
-          "utf8",
-        ),
-      ),
+      JSON.parse(await readFile(join(sessionsDir, sessionId, "session.json"), "utf8")),
     );
     expect(session.session_id).toBe(sessionId);
     expect(session.checkpoint_id).toBe(lock.checkpoint_id);
@@ -388,10 +371,7 @@ describe("start command", () => {
     expect(result.stdout).toContain("Task: Add yearly billing");
 
     const lock: ActiveSessionLock = JSON.parse(
-      await readFile(
-        join(tmpRoot, ".viberevert", "active-session.json"),
-        "utf8",
-      ),
+      await readFile(join(tmpRoot, ".viberevert", "active-session.json"), "utf8"),
     );
     expect(lock.task).toBe("Add yearly billing");
 
@@ -404,12 +384,7 @@ describe("start command", () => {
       throw new Error("test bug: no session dir");
     }
     const session = SessionStateSchema.parse(
-      JSON.parse(
-        await readFile(
-          join(sessionsDir, sessionId, "session.json"),
-          "utf8",
-        ),
-      ),
+      JSON.parse(await readFile(join(sessionsDir, sessionId, "session.json"), "utf8")),
     );
     expect(session.task).toBe("Add yearly billing");
   });
@@ -478,8 +453,6 @@ describe("start command", () => {
     // No config needed — --task validation runs BEFORE loadConfig.
     const result = await runStart(["--task", "   "]);
     expect(result.exitCode).toBe(1);
-    expect(result.stderr).toContain(
-      "--task must not be empty or whitespace-only",
-    );
+    expect(result.stderr).toContain("--task must not be empty or whitespace-only");
   });
 });

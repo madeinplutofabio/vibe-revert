@@ -328,10 +328,7 @@ export class RestoreExtractionConflictError extends Error {
   readonly conflicts: readonly RestoreExtractionConflict[];
 
   constructor(conflicts: readonly RestoreExtractionConflict[], cause?: unknown) {
-    super(
-      `restore aborted: ${conflicts.length} extraction conflict(s) in working tree`,
-      { cause },
-    );
+    super(`restore aborted: ${conflicts.length} extraction conflict(s) in working tree`, { cause });
     this.name = "RestoreExtractionConflictError";
     this.conflicts = conflicts;
   }

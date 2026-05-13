@@ -28,26 +28,11 @@
 
 import { execFile } from "node:child_process";
 import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
-import {
-  lstat,
-  mkdir,
-  mkdtemp,
-  rm,
-  symlink,
-  writeFile,
-} from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import {
-  afterEach,
-  beforeAll,
-  beforeEach,
-  describe,
-  expect,
-  it,
-  vi,
-} from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 // vi.mock is hoisted to the top of the file by vitest. The factory wraps
 // the real sha256File so unmodified calls delegate to it; per-test overrides
@@ -183,9 +168,7 @@ describe("restoreCheckpoint — Step 3d targeted tests", () => {
   let realSha256File: typeof import("../src/hashes.js").sha256File;
 
   beforeAll(async () => {
-    const real = await vi.importActual<typeof import("../src/hashes.js")>(
-      "../src/hashes.js",
-    );
+    const real = await vi.importActual<typeof import("../src/hashes.js")>("../src/hashes.js");
     realSha256File = real.sha256File;
   });
 
@@ -235,9 +218,7 @@ describe("restoreCheckpoint — Step 3d targeted tests", () => {
 
         expect(caught).toBeInstanceOf(RestoreVerificationError);
         const err = caught as RestoreVerificationError;
-        const flatMismatch = err.mismatches.find(
-          (m) => m.path === repo.flatCapturedRel,
-        );
+        const flatMismatch = err.mismatches.find((m) => m.path === repo.flatCapturedRel);
         expect(flatMismatch).toBeDefined();
         expect(flatMismatch?.actualSha256).toBeNull();
         expect(flatMismatch?.expectedSha256).toMatch(/^[0-9a-f]{64}$/);
@@ -321,9 +302,7 @@ describe("restoreCheckpoint — Step 3d targeted tests", () => {
           expect(dirSt.isDirectory()).toBe(true);
           expect(dirSt.isSymbolicLink()).toBe(false);
           // Captured nested file is present as a regular file.
-          const fileSt = await lstat(
-            join(repo.repoRoot, repo.nestedCapturedRel),
-          );
+          const fileSt = await lstat(join(repo.repoRoot, repo.nestedCapturedRel));
           expect(fileSt.isFile()).toBe(true);
         } finally {
           await repo.cleanup();
@@ -426,10 +405,7 @@ describe("restoreCheckpoint — Step 3d targeted tests", () => {
         expect(err.currentPatterns).toEqual(["captured.txt", "nested/**"]);
         expect(err.tighteningPatterns).toEqual(["captured.txt", "nested/**"]);
         expect(err.looseningPatterns).toEqual(["build/**"]);
-        expect(err.tighteningPaths).toEqual([
-          repo.flatCapturedRel,
-          repo.nestedCapturedRel,
-        ]);
+        expect(err.tighteningPaths).toEqual([repo.flatCapturedRel, repo.nestedCapturedRel]);
       } finally {
         await repo.cleanup();
       }
@@ -469,9 +445,7 @@ describe("restoreCheckpoint — Step 3d targeted tests", () => {
 
         expect(caught).toBeInstanceOf(RestoreExtractionConflictError);
         const err = caught as RestoreExtractionConflictError;
-        const flatConflict = err.conflicts.find(
-          (c) => c.manifestPath === repo.flatCapturedRel,
-        );
+        const flatConflict = err.conflicts.find((c) => c.manifestPath === repo.flatCapturedRel);
         expect(flatConflict).toBeDefined();
         expect(flatConflict?.reason).toMatch(/directory/i);
         expect(flatConflict?.reason).toMatch(/could not be removed/i);

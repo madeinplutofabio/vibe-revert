@@ -62,6 +62,8 @@ export {
   ConfigValidationError,
   loadConfig,
 } from "./config.js";
+// Session lifecycle (M B Step 4).
+export { generateSessionId } from "./ids.js";
 // Path helpers + repo-root resolution.
 export {
   ensureViberevertDirs,
@@ -69,12 +71,8 @@ export {
   resolveRepoRoot,
   viberevertDir,
 } from "./paths.js";
-
 // Redaction (stub for v0.7.0-beta; reserved for future cloud-sync seam).
 export { redact, SECRET_PATTERN_COUNT } from "./redact.js";
-
-// Session lifecycle (M B Step 4).
-export { generateSessionId } from "./ids.js";
 export type {
   EndSessionOpts,
   ListSessionsResult,

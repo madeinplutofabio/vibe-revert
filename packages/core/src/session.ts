@@ -64,14 +64,14 @@
 //    `session_id` and writes the result back) could silently endorse the
 //    inconsistency.
 
-import { chmod, mkdir, readFile, readdir, rm } from "node:fs/promises";
+import { chmod, mkdir, readdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import {
   type ActiveSessionLock,
   ActiveSessionLockSchema,
+  SESSION_STATE_SCHEMA_VERSION,
   type SessionState,
   SessionStateSchema,
-  SESSION_STATE_SCHEMA_VERSION,
 } from "@viberevert/session-format";
 import { renameDirAtomic, writeFileAtomic } from "./atomic.js";
 
@@ -445,10 +445,7 @@ export async function endSession(opts: EndSessionOpts): Promise<void> {
  * and writes the result back) relies on this guarantee to avoid
  * silently mutating the wrong session's state.
  */
-export async function loadSession(
-  sessionId: string,
-  repoRoot: string,
-): Promise<SessionState> {
+export async function loadSession(sessionId: string, repoRoot: string): Promise<SessionState> {
   if (sessionId.startsWith(".tmp-")) {
     throw new SessionNotFoundError(
       sessionId,
@@ -478,10 +475,9 @@ export async function loadSession(
   try {
     parsed = JSON.parse(raw);
   } catch (err) {
-    throw new Error(
-      `session.json for ${sessionId} is not valid JSON: ${(err as Error).message}`,
-      { cause: err },
-    );
+    throw new Error(`session.json for ${sessionId} is not valid JSON: ${(err as Error).message}`, {
+      cause: err,
+    });
   }
 
   const session = SessionStateSchema.parse(parsed);
@@ -589,9 +585,7 @@ export async function listSessions(repoRoot: string): Promise<ListSessionsResult
         kind: "schema_invalid",
         sessionId: id,
         path: sessionJsonPathRel,
-        reason: result.error.issues
-          .map((i) => `${i.path.join(".")}: ${i.message}`)
-          .join("; "),
+        reason: result.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; "),
       });
       continue;
     }
@@ -646,9 +640,7 @@ export async function listSessions(repoRoot: string): Promise<ListSessionsResult
  * schema validation failure (the file exists but is corrupt — caller's
  * problem to surface).
  */
-export async function loadActiveSessionLock(
-  repoRoot: string,
-): Promise<ActiveSessionLock | null> {
+export async function loadActiveSessionLock(repoRoot: string): Promise<ActiveSessionLock | null> {
   const lockPathAbs = join(repoRoot, VIBEREVERT_DIR, ACTIVE_SESSION_LOCK_FILENAME);
 
   let raw: string;
@@ -665,10 +657,9 @@ export async function loadActiveSessionLock(
   try {
     parsed = JSON.parse(raw);
   } catch (err) {
-    throw new Error(
-      `active-session.json is not valid JSON: ${(err as Error).message}`,
-      { cause: err },
-    );
+    throw new Error(`active-session.json is not valid JSON: ${(err as Error).message}`, {
+      cause: err,
+    });
   }
 
   return ActiveSessionLockSchema.parse(parsed);

@@ -705,17 +705,14 @@ describe("SessionStateSchema (D14)", () => {
     session_id: "sess_01JV8Z0N6E9QABCDEFGHIJKLMN",
     checkpoint_id: "cp_01JV8Z0N6FP3ABCDEFGHIJKLMN",
     started_at: "2026-05-04T10:30:11Z",
-    before_status_path:
-      ".viberevert/sessions/sess_01JV8Z0N6E9QABCDEFGHIJKLMN/before-status.txt",
-    commands_log_path:
-      ".viberevert/sessions/sess_01JV8Z0N6E9QABCDEFGHIJKLMN/commands.log",
+    before_status_path: ".viberevert/sessions/sess_01JV8Z0N6E9QABCDEFGHIJKLMN/before-status.txt",
+    commands_log_path: ".viberevert/sessions/sess_01JV8Z0N6E9QABCDEFGHIJKLMN/commands.log",
   };
 
   const validEnded = {
     ...validInFlight,
     ended_at: "2026-05-04T11:15:42Z",
-    after_status_path:
-      ".viberevert/sessions/sess_01JV8Z0N6E9QABCDEFGHIJKLMN/after-status.txt",
+    after_status_path: ".viberevert/sessions/sess_01JV8Z0N6E9QABCDEFGHIJKLMN/after-status.txt",
     task: "Add yearly billing",
     agent_command: "claude",
   };
@@ -743,8 +740,7 @@ describe("SessionStateSchema (D14)", () => {
     expect(() =>
       SessionStateSchema.parse({
         ...validInFlight,
-        after_status_path:
-          ".viberevert/sessions/sess_01JV8Z0N6E9QABCDEFGHIJKLMN/after-status.txt",
+        after_status_path: ".viberevert/sessions/sess_01JV8Z0N6E9QABCDEFGHIJKLMN/after-status.txt",
       }),
     ).toThrow();
   });
@@ -899,9 +895,7 @@ describe("ActiveSessionLockSchema (D14)", () => {
   });
 
   it("rejects unknown top-level field (strict)", () => {
-    expect(() =>
-      ActiveSessionLockSchema.parse({ ...validLock, extra_field: "nope" }),
-    ).toThrow();
+    expect(() => ActiveSessionLockSchema.parse({ ...validLock, extra_field: "nope" })).toThrow();
   });
 });
 
@@ -941,8 +935,8 @@ describe("JSON Schema exports", () => {
   });
 
   it("ManifestJsonSchema's snapshots property includes tracked_dirty_paths as required", () => {
-    const props = (ManifestJsonSchema as { properties: Record<string, unknown> }).properties;
-    const snapshots = props["snapshots"] as {
+    const props = (ManifestJsonSchema as { properties: { snapshots?: unknown } }).properties;
+    const snapshots = props.snapshots as {
       properties: Record<string, unknown>;
       required: readonly string[];
     };
@@ -951,8 +945,8 @@ describe("JSON Schema exports", () => {
   });
 
   it("ManifestJsonSchema's untracked property includes exclude_patterns as required (Step 3e)", () => {
-    const props = (ManifestJsonSchema as { properties: Record<string, unknown> }).properties;
-    const untracked = props["untracked"] as {
+    const props = (ManifestJsonSchema as { properties: { untracked?: unknown } }).properties;
+    const untracked = props.untracked as {
       properties: Record<string, unknown>;
       required: readonly string[];
     };

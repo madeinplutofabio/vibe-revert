@@ -21,7 +21,7 @@
 //     overwrite of a session/checkpoint dir would destroy state. Test
 //     locks the contract.
 
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -105,12 +105,10 @@ describe("renameDirAtomic", () => {
     const topLevel = await readdir(workDir);
     expect(topLevel).toEqual(["sess_FAKE"]);
 
-    expect(await readFile(join(finalDir, "session.json"), "utf8")).toBe(
-      '{"id":"sess_FAKE"}',
+    expect(await readFile(join(finalDir, "session.json"), "utf8")).toBe('{"id":"sess_FAKE"}');
+    expect(await readFile(join(finalDir, "checkpoint", "manifest.json"), "utf8")).toBe(
+      '{"v":"1.0"}',
     );
-    expect(
-      await readFile(join(finalDir, "checkpoint", "manifest.json"), "utf8"),
-    ).toBe('{"v":"1.0"}');
   });
 
   it("refuses to overwrite an existing destination (loud failure per D13)", async () => {
@@ -121,16 +119,10 @@ describe("renameDirAtomic", () => {
     await mkdir(finalDir);
     await writeFile(join(finalDir, "preexisting.txt"), "preexisting");
 
-    await expect(renameDirAtomic(tmpDir, finalDir)).rejects.toThrow(
-      /destination already exists/,
-    );
+    await expect(renameDirAtomic(tmpDir, finalDir)).rejects.toThrow(/destination already exists/);
 
     // Source dir is untouched; destination is untouched.
-    expect(await readFile(join(tmpDir, "incoming.txt"), "utf8")).toBe(
-      "incoming",
-    );
-    expect(await readFile(join(finalDir, "preexisting.txt"), "utf8")).toBe(
-      "preexisting",
-    );
+    expect(await readFile(join(tmpDir, "incoming.txt"), "utf8")).toBe("incoming");
+    expect(await readFile(join(finalDir, "preexisting.txt"), "utf8")).toBe("preexisting");
   });
 });

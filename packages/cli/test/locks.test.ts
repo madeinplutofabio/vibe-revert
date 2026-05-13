@@ -48,11 +48,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-import {
-  ConcurrentOperationError,
-  type LockInfo,
-  withExclusiveLock,
-} from "../src/locks.js";
+import { ConcurrentOperationError, type LockInfo, withExclusiveLock } from "../src/locks.js";
 
 // Mock node:fs/promises so the cleanup-failure tests can override `rm`.
 // The factory delegates to the real implementations by default — only
@@ -82,9 +78,7 @@ let workDir: string;
 let actualRm: typeof rm;
 
 beforeAll(async () => {
-  const actual = await vi.importActual<typeof import("node:fs/promises")>(
-    "node:fs/promises",
-  );
+  const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
   actualRm = actual.rm;
 });
 
@@ -163,9 +157,7 @@ describe("withExclusiveLock — acquisition + cleanup", () => {
     const fulfilled = results.filter(
       (r): r is PromiseFulfilledResult<string> => r.status === "fulfilled",
     );
-    const rejected = results.filter(
-      (r): r is PromiseRejectedResult => r.status === "rejected",
-    );
+    const rejected = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
     expect(fulfilled).toHaveLength(1);
     expect(rejected).toHaveLength(1);
 
@@ -303,8 +295,8 @@ describe("withExclusiveLock — cleanup-failure handling", () => {
     // needs to know about the stale lock immediately.
     vi.mocked(rm).mockRejectedValueOnce(rmError);
 
-    await expect(
-      withExclusiveLock(lockDir, TEST_LOCK_INFO, async () => "ok"),
-    ).rejects.toBe(rmError);
+    await expect(withExclusiveLock(lockDir, TEST_LOCK_INFO, async () => "ok")).rejects.toBe(
+      rmError,
+    );
   });
 });

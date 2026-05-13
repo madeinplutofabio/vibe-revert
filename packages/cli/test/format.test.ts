@@ -28,12 +28,8 @@ describe("truncateIdForDisplay", () => {
   it("truncates `cp_<ULID>` and `sess_<ULID>` to prefix + 14 body chars", () => {
     // Crockford ULIDs (no I, L, O, U) — same fixture pattern as
     // packages/core/test/session.test.ts.
-    expect(truncateIdForDisplay("cp_01JV8Y7W2M7ABCDEFGHJKMNPQR")).toBe(
-      "cp_01JV8Y7W2M7ABC",
-    );
-    expect(truncateIdForDisplay("sess_01JV8Z0N6E7ABCDEFGHJKMNPQR")).toBe(
-      "sess_01JV8Z0N6E7ABC",
-    );
+    expect(truncateIdForDisplay("cp_01JV8Y7W2M7ABCDEFGHJKMNPQR")).toBe("cp_01JV8Y7W2M7ABC");
+    expect(truncateIdForDisplay("sess_01JV8Z0N6E7ABCDEFGHJKMNPQR")).toBe("sess_01JV8Z0N6E7ABC");
   });
 
   it("returns input unchanged when there is no underscore separator", () => {
@@ -58,14 +54,10 @@ describe("truncateIdForDisplay", () => {
 describe("truncateShaForDisplay", () => {
   it("truncates SHA-1 (40 chars) and SHA-256 (64 chars) to 7 chars", () => {
     // SHA-1: 40 hex chars
-    expect(
-      truncateShaForDisplay("a1b2c3d4e5f6789012345678901234567890abcd"),
-    ).toBe("a1b2c3d");
+    expect(truncateShaForDisplay("a1b2c3d4e5f6789012345678901234567890abcd")).toBe("a1b2c3d");
     // SHA-256: 64 hex chars
     expect(
-      truncateShaForDisplay(
-        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-      ),
+      truncateShaForDisplay("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
     ).toBe("0123456");
   });
 

@@ -92,11 +92,7 @@ import {
 import { Command, Option } from "clipanion";
 
 import { renameDirAtomic } from "../atomic.js";
-import {
-  ConcurrentOperationError,
-  type LockInfo,
-  withExclusiveLock,
-} from "../locks.js";
+import { ConcurrentOperationError, type LockInfo, withExclusiveLock } from "../locks.js";
 
 const CHECKPOINT_NAME_LOCK_REL = ".viberevert/.locks/checkpoint-name.lock";
 
@@ -104,8 +100,7 @@ export class CheckpointCommand extends Command {
   static override paths = [["checkpoint"]];
 
   static override usage = Command.Usage({
-    description:
-      "Create a standalone checkpoint of the current working tree",
+    description: "Create a standalone checkpoint of the current working tree",
   });
 
   name = Option.String("--name", {
@@ -123,9 +118,7 @@ export class CheckpointCommand extends Command {
         this.context.stderr.write(
           "No git repository or VibeRevert project found (walked up from cwd looking for .git or .viberevert.yml).\n",
         );
-        this.context.stderr.write(
-          "Run `viberevert init` to create a project here.\n",
-        );
+        this.context.stderr.write("Run `viberevert init` to create a project here.\n");
         return 1;
       }
       throw err;
@@ -134,9 +127,7 @@ export class CheckpointCommand extends Command {
     // Step 2: validate --name input (defensive — schema also rejects,
     // but a clean CLI-level error is friendlier than a deep zod issue).
     if (this.name !== undefined && this.name.trim().length === 0) {
-      this.context.stderr.write(
-        "--name must not be empty or whitespace-only.\n",
-      );
+      this.context.stderr.write("--name must not be empty or whitespace-only.\n");
       return 1;
     }
 
@@ -150,18 +141,13 @@ export class CheckpointCommand extends Command {
       rollbackExcludePatterns = config.rollback?.exclude ?? [];
     } catch (err) {
       if (err instanceof ConfigNotFoundError) {
-        this.context.stderr.write(
-          "No .viberevert.yml found in this repo.\n",
-        );
+        this.context.stderr.write("No .viberevert.yml found in this repo.\n");
         this.context.stderr.write("Run:\n");
         this.context.stderr.write("  viberevert init\n\n");
         this.context.stderr.write("to create one.\n");
         return 1;
       }
-      if (
-        err instanceof ConfigParseError ||
-        err instanceof ConfigValidationError
-      ) {
+      if (err instanceof ConfigParseError || err instanceof ConfigValidationError) {
         this.context.stderr.write(`Invalid .viberevert.yml: ${err.message}\n`);
         this.context.stderr.write("Fix the file, or re-run:\n");
         this.context.stderr.write("  viberevert init\n\n");
@@ -190,12 +176,8 @@ export class CheckpointCommand extends Command {
         const collision = existing.find((c) => c.name === this.name);
         if (collision !== undefined) {
           // D5b locked refusal copy.
-          this.context.stderr.write(
-            `Checkpoint name already exists: ${this.name}\n`,
-          );
-          this.context.stderr.write(
-            "Use a different name, or list existing checkpoints with:\n",
-          );
+          this.context.stderr.write(`Checkpoint name already exists: ${this.name}\n`);
+          this.context.stderr.write("Use a different name, or list existing checkpoints with:\n");
           this.context.stderr.write("  viberevert checkpoints\n");
           throw new CollisionExitSentinel();
         }
@@ -205,12 +187,7 @@ export class CheckpointCommand extends Command {
       // the checkpoint id is owned by git and generated inside
       // createCheckpoint, per D17b).
       const tmpName = `.tmp-checkpoint-${randomBytes(8).toString("hex")}`;
-      const tmpDirAbs = join(
-        repoRoot,
-        ".viberevert",
-        "checkpoints",
-        tmpName,
-      );
+      const tmpDirAbs = join(repoRoot, ".viberevert", "checkpoints", tmpName);
 
       let result: { checkpointId: string };
       try {
@@ -237,12 +214,7 @@ export class CheckpointCommand extends Command {
       // renameDirAtomic (NOT core's, NOT git's — D17c discipline).
       // result.checkpointId already includes the `cp_` prefix per
       // D5; do NOT prepend `cp_` again.
-      const finalDirAbs = join(
-        repoRoot,
-        ".viberevert",
-        "checkpoints",
-        result.checkpointId,
-      );
+      const finalDirAbs = join(repoRoot, ".viberevert", "checkpoints", result.checkpointId);
       await renameDirAtomic(tmpDirAbs, finalDirAbs);
 
       return result;
@@ -327,13 +299,8 @@ async function safeListCheckpoints(
   try {
     return await listCheckpoints(repoRoot);
   } catch (err) {
-    if (
-      err instanceof CheckpointCorruptError ||
-      err instanceof CheckpointNotFoundError
-    ) {
-      cmd.context.stderr.write(
-        `Error reading existing checkpoints: ${err.message}\n`,
-      );
+    if (err instanceof CheckpointCorruptError || err instanceof CheckpointNotFoundError) {
+      cmd.context.stderr.write(`Error reading existing checkpoints: ${err.message}\n`);
       return null;
     }
     throw err;

@@ -68,10 +68,7 @@ import {
   resolveRepoRoot,
 } from "@viberevert/core";
 import { Command, Option } from "clipanion";
-import {
-  truncateIdForDisplay,
-  truncateTaskForDisplay,
-} from "../format.js";
+import { truncateIdForDisplay, truncateTaskForDisplay } from "../format.js";
 
 export class SessionsCommand extends Command {
   static override paths = [["sessions"]];
@@ -93,9 +90,7 @@ export class SessionsCommand extends Command {
         this.context.stderr.write(
           "No git repository or VibeRevert project found (walked up from cwd looking for .git or .viberevert.yml).\n",
         );
-        this.context.stderr.write(
-          "Run `viberevert init` to create a project here.\n",
-        );
+        this.context.stderr.write("Run `viberevert init` to create a project here.\n");
         return 1;
       }
       throw err;
@@ -170,10 +165,7 @@ function formatWarning(w: ListSessionsWarning): string {
  * justified per D17c). If a third listing command appears, this would
  * justify extraction to `../format.ts`.
  */
-function renderTable(
-  headers: readonly string[],
-  rows: readonly (readonly string[])[],
-): string {
+function renderTable(headers: readonly string[], rows: readonly (readonly string[])[]): string {
   const widths = headers.map((header, colIdx) => {
     let w = header.length;
     for (const row of rows) {

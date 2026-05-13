@@ -89,11 +89,7 @@ import { createCheckpoint, getStatusPorcelainText } from "@viberevert/git";
 import { Command, Option } from "clipanion";
 
 import { truncateIdForDisplay } from "../format.js";
-import {
-  ConcurrentOperationError,
-  type LockInfo,
-  withExclusiveLock,
-} from "../locks.js";
+import { ConcurrentOperationError, type LockInfo, withExclusiveLock } from "../locks.js";
 
 const START_LOCK_REL = ".viberevert/.locks/start.lock";
 
@@ -118,9 +114,7 @@ export class StartCommand extends Command {
         this.context.stderr.write(
           "No git repository or VibeRevert project found (walked up from cwd looking for .git or .viberevert.yml).\n",
         );
-        this.context.stderr.write(
-          "Run `viberevert init` to create a project here.\n",
-        );
+        this.context.stderr.write("Run `viberevert init` to create a project here.\n");
         return 1;
       }
       throw err;
@@ -130,9 +124,7 @@ export class StartCommand extends Command {
     // blank strings, but a clean CLI-level error is friendlier than
     // a deep zod issue).
     if (this.task !== undefined && this.task.trim().length === 0) {
-      this.context.stderr.write(
-        "--task must not be empty or whitespace-only.\n",
-      );
+      this.context.stderr.write("--task must not be empty or whitespace-only.\n");
       return 1;
     }
 
@@ -144,18 +136,13 @@ export class StartCommand extends Command {
       rollbackExcludePatterns = config.rollback?.exclude ?? [];
     } catch (err) {
       if (err instanceof ConfigNotFoundError) {
-        this.context.stderr.write(
-          "No .viberevert.yml found in this repo.\n",
-        );
+        this.context.stderr.write("No .viberevert.yml found in this repo.\n");
         this.context.stderr.write("Run:\n");
         this.context.stderr.write("  viberevert init\n\n");
         this.context.stderr.write("to create one.\n");
         return 1;
       }
-      if (
-        err instanceof ConfigParseError ||
-        err instanceof ConfigValidationError
-      ) {
+      if (err instanceof ConfigParseError || err instanceof ConfigValidationError) {
         this.context.stderr.write(`Invalid .viberevert.yml: ${err.message}\n`);
         this.context.stderr.write("Fix the file, or re-run:\n");
         this.context.stderr.write("  viberevert init\n\n");
@@ -287,16 +274,12 @@ export class StartCommand extends Command {
         // include `viberevert rollback` (deferred to M D per D7/D10).
         const lock = err.active;
         this.context.stderr.write("A session is already active in this repo.\n\n");
-        this.context.stderr.write(
-          `Session:     ${truncateIdForDisplay(lock.session_id)}\n`,
-        );
+        this.context.stderr.write(`Session:     ${truncateIdForDisplay(lock.session_id)}\n`);
         this.context.stderr.write(`Started at:  ${lock.started_at}\n`);
         if (lock.task !== undefined) {
           this.context.stderr.write(`Task:        ${lock.task}\n`);
         }
-        this.context.stderr.write(
-          `Checkpoint:  ${truncateIdForDisplay(lock.checkpoint_id)}\n`,
-        );
+        this.context.stderr.write(`Checkpoint:  ${truncateIdForDisplay(lock.checkpoint_id)}\n`);
         this.context.stderr.write("\nUse:\n");
         this.context.stderr.write("  viberevert sessions\n");
         this.context.stderr.write("  viberevert end\n");

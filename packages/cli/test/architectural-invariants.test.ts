@@ -31,7 +31,7 @@
 // file(s), grep for the antipattern via `findOffenders`, assert empty.
 // Always cite the plan/decision lock that motivates the invariant.
 
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, extname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -89,7 +89,7 @@ describe("Architectural invariants — git invocation single-owner (D17c)", () =
   // doctor.ts is a NARROW carve-out: it is allowed to spawn non-git
   // diagnostic binaries (pnpm), but MUST NOT spawn git directly.
 
-  it("doctor.ts does NOT pass the literal \"git\" to spawn family functions or to its local probeVersion helper", () => {
+  it('doctor.ts does NOT pass the literal "git" to spawn family functions or to its local probeVersion helper', () => {
     // The git probe in doctor.ts must go through @viberevert/git's
     // probeGitVersion() helper. This grep catches accidental regressions
     // where someone reintroduces a direct spawn of "git" from doctor —
@@ -211,15 +211,12 @@ describe("Architectural invariants — D19 config-blind commands", () => {
   // "MUST NOT import or call `loadConfig`" architectural-lock blocks
   // in each command's file header).
 
-  it.each(["end", "checkpoints", "sessions"])(
-    "%s.ts does NOT reference loadConfig",
-    (cmd) => {
-      const source = readSource(`packages/cli/src/commands/${cmd}.ts`);
-      const offenders = findOffenders(source, /\bloadConfig\b/);
-      expect(
-        offenders,
-        `${cmd}.ts must not reference loadConfig per D19 config-blind contract. Matches: ${JSON.stringify(offenders)}`,
-      ).toEqual([]);
-    },
-  );
+  it.each(["end", "checkpoints", "sessions"])("%s.ts does NOT reference loadConfig", (cmd) => {
+    const source = readSource(`packages/cli/src/commands/${cmd}.ts`);
+    const offenders = findOffenders(source, /\bloadConfig\b/);
+    expect(
+      offenders,
+      `${cmd}.ts must not reference loadConfig per D19 config-blind contract. Matches: ${JSON.stringify(offenders)}`,
+    ).toEqual([]);
+  });
 });

@@ -31,7 +31,7 @@
 // here are a strict subset of packages/core/test/atomic.test.ts's
 // renameDirAtomic block.
 
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -61,10 +61,7 @@ describe("renameDirAtomic", () => {
     await mkdir(tmpDir);
     await writeFile(join(tmpDir, "manifest.json"), '{"id":"cp_FAKE"}');
     await mkdir(join(tmpDir, "rollback"));
-    await writeFile(
-      join(tmpDir, "rollback", "tracked-dirty.tar.gz"),
-      "fake-tarball-bytes",
-    );
+    await writeFile(join(tmpDir, "rollback", "tracked-dirty.tar.gz"), "fake-tarball-bytes");
 
     await renameDirAtomic(tmpDir, finalDir);
 
@@ -73,15 +70,10 @@ describe("renameDirAtomic", () => {
     expect(topLevel).toEqual(["cp_FAKE"]);
 
     // Contents (including nested subdirs) preserved byte-for-byte.
-    expect(await readFile(join(finalDir, "manifest.json"), "utf8")).toBe(
-      '{"id":"cp_FAKE"}',
+    expect(await readFile(join(finalDir, "manifest.json"), "utf8")).toBe('{"id":"cp_FAKE"}');
+    expect(await readFile(join(finalDir, "rollback", "tracked-dirty.tar.gz"), "utf8")).toBe(
+      "fake-tarball-bytes",
     );
-    expect(
-      await readFile(
-        join(finalDir, "rollback", "tracked-dirty.tar.gz"),
-        "utf8",
-      ),
-    ).toBe("fake-tarball-bytes");
   });
 
   it("refuses to overwrite an existing destination (loud failure per D13)", async () => {
@@ -92,17 +84,11 @@ describe("renameDirAtomic", () => {
     await mkdir(finalDir);
     await writeFile(join(finalDir, "preexisting.txt"), "preexisting");
 
-    await expect(renameDirAtomic(tmpDir, finalDir)).rejects.toThrow(
-      /destination already exists/,
-    );
+    await expect(renameDirAtomic(tmpDir, finalDir)).rejects.toThrow(/destination already exists/);
 
     // BOTH source and destination byte-untouched — no half-rename,
     // no partial state, no silent overwrite of the prior checkpoint.
-    expect(await readFile(join(tmpDir, "incoming.txt"), "utf8")).toBe(
-      "incoming",
-    );
-    expect(await readFile(join(finalDir, "preexisting.txt"), "utf8")).toBe(
-      "preexisting",
-    );
+    expect(await readFile(join(tmpDir, "incoming.txt"), "utf8")).toBe("incoming");
+    expect(await readFile(join(finalDir, "preexisting.txt"), "utf8")).toBe("preexisting");
   });
 });

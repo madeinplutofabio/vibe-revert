@@ -49,10 +49,7 @@ import { lstat, rename, writeFile } from "node:fs/promises";
  * loudly rather than silently overwriting an in-flight peer's temp
  * file.
  */
-export async function writeFileAtomic(
-  targetPath: string,
-  data: Buffer | string,
-): Promise<void> {
+export async function writeFileAtomic(targetPath: string, data: Buffer | string): Promise<void> {
   const suffix = randomBytes(8).toString("hex");
   const tempPath = `${targetPath}.tmp.${suffix}`;
   await writeFile(tempPath, data, { flag: "wx" });
@@ -101,10 +98,7 @@ export async function writeFileAtomic(
  * lives at the repo root, so all temp-and-final paths are siblings on
  * the same mount).
  */
-export async function renameDirAtomic(
-  tmpDir: string,
-  finalDir: string,
-): Promise<void> {
+export async function renameDirAtomic(tmpDir: string, finalDir: string): Promise<void> {
   let destExists = false;
   try {
     await lstat(finalDir);
@@ -115,9 +109,7 @@ export async function renameDirAtomic(
     }
   }
   if (destExists) {
-    throw new Error(
-      `renameDirAtomic: destination already exists: ${finalDir}`,
-    );
+    throw new Error(`renameDirAtomic: destination already exists: ${finalDir}`);
   }
   await rename(tmpDir, finalDir);
 }
