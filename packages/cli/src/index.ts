@@ -4,11 +4,13 @@
 
 import { Builtins, Cli } from "clipanion";
 import pkg from "../package.json" with { type: "json" };
+import { CheckpointCommand } from "./commands/checkpoint.js";
 import { CheckpointsCommand } from "./commands/checkpoints.js";
 import { DoctorCommand } from "./commands/doctor.js";
 import { EndCommand } from "./commands/end.js";
 import { InitCommand } from "./commands/init.js";
 import { SessionsCommand } from "./commands/sessions.js";
+import { StartCommand } from "./commands/start.js";
 import { VersionCommand } from "./commands/version.js";
 
 const cli = new Cli({
@@ -24,5 +26,7 @@ cli.register(InitCommand);
 cli.register(CheckpointsCommand);
 cli.register(EndCommand);
 cli.register(SessionsCommand);
+cli.register(CheckpointCommand);
+cli.register(StartCommand);
 
 await cli.runExit(process.argv.slice(2));
