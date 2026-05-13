@@ -453,7 +453,18 @@ export async function restoreCheckpoint(
   //    filters reject non-regular entries (defense in depth — already
   //    asserted in archive validation, but tar.extract has its own filter
   //    pass and we keep both layers in agreement).
-  await extractUntrackedTarball(untrackedArchiveBuf, opts.repoRoot);
+  //
+  //    Skipped when the captured untracked set is empty — there's
+  //    nothing to extract, and tar.extract on a minimal empty archive
+  //    (snapshots.ts writes 2x 512-byte zero blocks gzipped, the
+  //    standard tar EOF marker) fails with TAR_BAD_ARCHIVE on
+  //    node-tar v7.x. assertArchiveEntries above already verified that
+  //    an empty archive matches empty file_hashes (set parity), so
+  //    skipping extraction is sound — the buffer is provably empty by
+  //    the time we get here when expectedUntrackedSet is empty.
+  if (expectedUntrackedSet.length > 0) {
+    await extractUntrackedTarball(untrackedArchiveBuf, opts.repoRoot);
+  }
 
   // ===========================================================================
   // Post-mutation verification (parity FIRST, hashes SECOND)
