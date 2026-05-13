@@ -6,6 +6,13 @@ dist/
 build/
 .next/
 *.tsbuildinfo
+# Belt-and-braces: prevent stray TypeScript build artifacts from landing
+# in src/ if a future tsc misconfiguration accidentally emits them there.
+# All packages output to dist/, not src/, so any of these in src/ is wrong.
+packages/*/src/**/*.js
+packages/*/src/**/*.js.map
+packages/*/src/**/*.d.ts
+packages/*/src/**/*.d.ts.map
 
 # test artifacts
 coverage/

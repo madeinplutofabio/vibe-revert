@@ -13,6 +13,7 @@ import {
   SECRET_PATTERN_COUNT,
   viberevertDir,
 } from "@viberevert/core";
+import { probeGitVersion } from "@viberevert/git";
 import { Command } from "clipanion";
 import { detectFramework } from "../detect.js";
 
@@ -39,9 +40,21 @@ export class DoctorCommand extends Command {
     // Node version (from process.version, always available)
     lines.push(["Node", process.version]);
 
-    // pnpm + git via spawnSync
+    // pnpm via local spawnSync (the carve-out: doctor.ts is the only
+    // place in the CLI allowed to spawn non-git diagnostic binaries —
+    // see D17c). git goes through @viberevert/git's probeGitVersion()
+    // helper to honor the "git invocation single-owner" rule:
+    // GitNotAvailableError (raised on missing/unusable git) is caught
+    // and converted to "not found" to preserve doctor.ts's
+    // never-throws-on-missing-binary semantic.
     lines.push(["pnpm", probeVersion("pnpm")]);
-    lines.push(["git", probeVersion("git")]);
+    let gitVersion: string;
+    try {
+      gitVersion = await probeGitVersion();
+    } catch {
+      gitVersion = "not found";
+    }
+    lines.push(["git", gitVersion]);
 
     // Repo root
     let repoRoot: string | undefined;

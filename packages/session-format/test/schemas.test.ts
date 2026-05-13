@@ -15,6 +15,7 @@ import {
   isSortedUniqueStringArray,
   ManifestJsonSchema,
   ManifestSchema,
+  normalizePathArray,
   normalizeRelativePath,
   normalizeStringArray,
   SCHEMA_VERSION,
@@ -99,6 +100,62 @@ describe("normalizeRelativePath", () => {
     "..",
   ])("throws on %s", (input) => {
     expect(() => normalizeRelativePath(input)).toThrow();
+  });
+});
+
+describe("normalizePathArray", () => {
+  it("returns empty array for empty input", () => {
+    expect(normalizePathArray([])).toEqual([]);
+  });
+
+  it("canonicalizes, dedupes, and sorts a mixed array", () => {
+    // ./foo/bar -> foo/bar; src\\baz -> src/baz.
+    expect(normalizePathArray(["./foo/bar", "src\\baz"])).toEqual(["foo/bar", "src/baz"]);
+  });
+
+  it("sorts ASCII-ascending after canonicalization", () => {
+    expect(normalizePathArray(["zoo.ts", "alpha.ts", "mid.ts"])).toEqual([
+      "alpha.ts",
+      "mid.ts",
+      "zoo.ts",
+    ]);
+  });
+
+  it("dedupes paths that canonicalize to the same value", () => {
+    // All three canonicalize to "foo/bar".
+    expect(normalizePathArray(["foo/bar", "foo\\bar", "./foo/bar"])).toEqual(["foo/bar"]);
+  });
+
+  it("throws on un-canonicalizable input (parent traversal)", () => {
+    expect(() => normalizePathArray(["foo", "../escape"])).toThrow();
+  });
+
+  it("throws on un-canonicalizable input (absolute path)", () => {
+    expect(() => normalizePathArray(["/abs/foo"])).toThrow();
+  });
+
+  it("throws on un-canonicalizable input (empty string)", () => {
+    expect(() => normalizePathArray([""])).toThrow();
+  });
+
+  // Load-bearing: locks the divergence from normalizeStringArray.
+  // Pathnames with leading/trailing whitespace are unusual but legitimate
+  // filenames on most filesystems; trimming them at the manifest boundary
+  // would silently rewrite the captured set and break the trust-preserving
+  // principle that what we capture is what we restore.
+  it("does NOT trim leading whitespace from path entries", () => {
+    // " foo" sorts BEFORE "bar" because space (0x20) < 'b' (0x62).
+    // If the helper trimmed, " foo" would collapse to "foo" and the result
+    // would be ["bar", "foo"] — that's exactly the bug we're guarding against.
+    expect(normalizePathArray([" foo", "bar"])).toEqual([" foo", "bar"]);
+  });
+
+  it("does NOT trim trailing whitespace from path entries", () => {
+    // "foo " stays "foo "; sorts AFTER "bar" because b < f. If the helper
+    // trimmed, "foo " would collapse to "foo" and the result would still be
+    // ["bar", "foo"] — but the entry would have lost its trailing space,
+    // which is the silent-rewrite we're preventing.
+    expect(normalizePathArray(["foo ", "bar"])).toEqual(["bar", "foo "]);
   });
 });
 
@@ -269,12 +326,14 @@ describe("ManifestSchema", () => {
     },
     snapshots: {
       tracked_dirty_archive_path: "rollback/tracked-dirty.tar.gz",
+      tracked_dirty_paths: ["src/foo.ts"],
       file_hashes: {
         "src/foo.ts": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       },
     },
     untracked: {
       archive_path: "rollback/untracked.tar.gz",
+      exclude_patterns: [],
       file_hashes: {},
     },
     rollback_target_description: "Restore to pre-session state",
@@ -353,6 +412,213 @@ describe("ManifestSchema", () => {
 
     it("rejects whitespace-only name", () => {
       expect(() => ManifestSchema.parse({ ...validManifest, name: "   " })).toThrow();
+    });
+  });
+
+  // M B step-13 amendment: snapshots.tracked_dirty_paths is required and
+  // captures the FULL tracked-dirty path set (including deletions, symlink
+  // changes, mode-only changes — anything `git diff --name-only` reports),
+  // NOT just the regular-file subset captured in snapshots.file_hashes.
+  // Restore uses this for exact set-parity verification of the tracked-dirty
+  // surface, closing the soundness hole where a tampered patch could
+  // smuggle an unauthorized tracked deletion past file_hashes-only checks.
+  describe("snapshots.tracked_dirty_paths field", () => {
+    it("rejects manifest missing snapshots.tracked_dirty_paths", () => {
+      const { tracked_dirty_paths: _omitted, ...snapshotsWithout } = validManifest.snapshots;
+      void _omitted;
+      expect(() =>
+        ManifestSchema.parse({
+          ...validManifest,
+          snapshots: snapshotsWithout,
+        }),
+      ).toThrow();
+    });
+
+    it("accepts an empty tracked_dirty_paths array (clean tracked tree)", () => {
+      const v = {
+        ...validManifest,
+        snapshots: {
+          ...validManifest.snapshots,
+          tracked_dirty_paths: [],
+          file_hashes: {},
+        },
+      };
+      expect(ManifestSchema.parse(v)).toEqual(v);
+    });
+
+    it("accepts tracked_dirty_paths entries that are NOT in file_hashes (deletions)", () => {
+      // The whole reason this field exists: tracked deletions are dirty but
+      // can't be hashed. They must appear in tracked_dirty_paths to be
+      // verifiable by restore, even though file_hashes can't reference them.
+      const v = {
+        ...validManifest,
+        snapshots: {
+          ...validManifest.snapshots,
+          // Two dirty paths: src/foo.ts is regular (hashed below),
+          // src/deleted.ts is a tracked deletion (no hash).
+          tracked_dirty_paths: ["src/deleted.ts", "src/foo.ts"],
+          // file_hashes still only contains the regular-file subset.
+          file_hashes: validManifest.snapshots.file_hashes,
+        },
+      };
+      expect(ManifestSchema.parse(v)).toEqual(v);
+    });
+
+    it("rejects unsorted tracked_dirty_paths", () => {
+      expect(() =>
+        ManifestSchema.parse({
+          ...validManifest,
+          snapshots: {
+            ...validManifest.snapshots,
+            tracked_dirty_paths: ["src/zoo.ts", "src/foo.ts"],
+            file_hashes: {},
+          },
+        }),
+      ).toThrow();
+    });
+
+    it("rejects duplicate tracked_dirty_paths entries", () => {
+      expect(() =>
+        ManifestSchema.parse({
+          ...validManifest,
+          snapshots: {
+            ...validManifest.snapshots,
+            tracked_dirty_paths: ["src/foo.ts", "src/foo.ts"],
+          },
+        }),
+      ).toThrow();
+    });
+
+    it("rejects non-canonical path in tracked_dirty_paths (parent traversal)", () => {
+      expect(() =>
+        ManifestSchema.parse({
+          ...validManifest,
+          snapshots: {
+            ...validManifest.snapshots,
+            tracked_dirty_paths: ["../escape.ts"],
+            file_hashes: {},
+          },
+        }),
+      ).toThrow();
+    });
+
+    it("rejects non-canonical path in tracked_dirty_paths (Windows backslash)", () => {
+      expect(() =>
+        ManifestSchema.parse({
+          ...validManifest,
+          snapshots: {
+            ...validManifest.snapshots,
+            tracked_dirty_paths: ["src\\foo.ts"],
+            file_hashes: {},
+          },
+        }),
+      ).toThrow();
+    });
+
+    it("rejects absolute path in tracked_dirty_paths", () => {
+      expect(() =>
+        ManifestSchema.parse({
+          ...validManifest,
+          snapshots: {
+            ...validManifest.snapshots,
+            tracked_dirty_paths: ["/abs/foo.ts"],
+            file_hashes: {},
+          },
+        }),
+      ).toThrow();
+    });
+  });
+
+  // M B Step 3e: untracked.exclude_patterns is required and captures the
+  // rollback.exclude glob list normalized via normalizeStringArray (sorted
+  // + deduped + trimmed). Restore uses both the captured patterns and the
+  // current restore-time patterns to detect bidirectional drift via
+  // RestoreExcludeDriftError. See the load-bearing doc paragraph in
+  // schemas.ts's Manifest section for the full contract + the
+  // unordered-deny-list assumption that makes set comparison sound.
+  describe("untracked.exclude_patterns field", () => {
+    it("rejects manifest missing untracked.exclude_patterns", () => {
+      const { exclude_patterns: _omitted, ...untrackedWithout } = validManifest.untracked;
+      void _omitted;
+      expect(() =>
+        ManifestSchema.parse({
+          ...validManifest,
+          untracked: untrackedWithout,
+        }),
+      ).toThrow();
+    });
+
+    it("accepts an empty exclude_patterns array (no rollback.exclude config at capture time)", () => {
+      // The base validManifest already has exclude_patterns: []; this test
+      // makes the empty-array case explicit so future readers don't have to
+      // chase the fixture to learn the default.
+      const v = {
+        ...validManifest,
+        untracked: { ...validManifest.untracked, exclude_patterns: [] },
+      };
+      expect(ManifestSchema.parse(v)).toEqual(v);
+    });
+
+    it("accepts arbitrary glob patterns (sorted, deduped)", () => {
+      // Glob patterns can be arbitrary strings — picomatch interprets them.
+      // The schema doesn't validate glob syntax (that's picomatch's job at
+      // capture/restore time); it only validates the array shape.
+      const v = {
+        ...validManifest,
+        untracked: {
+          ...validManifest.untracked,
+          exclude_patterns: ["*.log", "dist/**", "node_modules/**"],
+        },
+      };
+      expect(ManifestSchema.parse(v)).toEqual(v);
+    });
+
+    it("rejects unsorted exclude_patterns", () => {
+      expect(() =>
+        ManifestSchema.parse({
+          ...validManifest,
+          untracked: {
+            ...validManifest.untracked,
+            exclude_patterns: ["node_modules/**", "dist/**"],
+          },
+        }),
+      ).toThrow();
+    });
+
+    it("rejects duplicate exclude_patterns entries", () => {
+      expect(() =>
+        ManifestSchema.parse({
+          ...validManifest,
+          untracked: {
+            ...validManifest.untracked,
+            exclude_patterns: ["dist/**", "dist/**"],
+          },
+        }),
+      ).toThrow();
+    });
+
+    it("rejects empty-string exclude_patterns entries", () => {
+      expect(() =>
+        ManifestSchema.parse({
+          ...validManifest,
+          untracked: {
+            ...validManifest.untracked,
+            exclude_patterns: [""],
+          },
+        }),
+      ).toThrow();
+    });
+
+    it("rejects whitespace-only exclude_patterns entries", () => {
+      expect(() =>
+        ManifestSchema.parse({
+          ...validManifest,
+          untracked: {
+            ...validManifest.untracked,
+            exclude_patterns: ["   "],
+          },
+        }),
+      ).toThrow();
     });
   });
 });
@@ -672,6 +938,26 @@ describe("JSON Schema exports", () => {
   it("ManifestJsonSchema does NOT list `name` in required (D15: optional)", () => {
     const required = (ManifestJsonSchema as { required?: readonly string[] }).required ?? [];
     expect(required).not.toContain("name");
+  });
+
+  it("ManifestJsonSchema's snapshots property includes tracked_dirty_paths as required", () => {
+    const props = (ManifestJsonSchema as { properties: Record<string, unknown> }).properties;
+    const snapshots = props["snapshots"] as {
+      properties: Record<string, unknown>;
+      required: readonly string[];
+    };
+    expect(snapshots.properties).toHaveProperty("tracked_dirty_paths");
+    expect(snapshots.required).toContain("tracked_dirty_paths");
+  });
+
+  it("ManifestJsonSchema's untracked property includes exclude_patterns as required (Step 3e)", () => {
+    const props = (ManifestJsonSchema as { properties: Record<string, unknown> }).properties;
+    const untracked = props["untracked"] as {
+      properties: Record<string, unknown>;
+      required: readonly string[];
+    };
+    expect(untracked.properties).toHaveProperty("exclude_patterns");
+    expect(untracked.required).toContain("exclude_patterns");
   });
 
   it("SessionStateJsonSchema describes all expected properties", () => {

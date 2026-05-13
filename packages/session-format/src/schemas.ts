@@ -5,7 +5,11 @@
 // fields are rejected, not silently stripped. This prevents schema drift.
 //
 // Scalar string schemas are pure validators (no silent trimming). Trimming
-// happens only in producer-side helpers like normalizeStringArray.
+// happens only in producer-side helpers like normalizeStringArray; path
+// helpers (normalizeRelativePath, normalizePathArray) deliberately do NOT
+// trim, because pathnames with leading/trailing whitespace are legitimate
+// filenames and silent rewriting at the manifest boundary would violate the
+// trust-preserving principle that what we capture is what we restore.
 //
 // Naming convention: <Thing>Schema is the runtime zod value; <Thing> is the
 // inferred TypeScript type. This avoids value/type same-name ambiguity at the
@@ -21,12 +25,19 @@ import { SCHEMA_VERSION } from "./version.js";
 // only and are canonical (no ".", no "..", no empty segments, no leading or
 // trailing slash, not absolute, not UNC, not drive-letter-rooted).
 //
-// Two-function API:
-//   - normalizeRelativePath: producer-side canonicalizer (representation only,
-//     no semantic resolution; throws on any input that cannot be canonicalized
-//     to a safe stored path).
-//   - isSafeStoredRelativePath: schema-side predicate (no transformation,
-//     returns true only if the input is already canonical).
+// API:
+//   - isSafeStoredRelativePath: schema-side predicate. No transformation;
+//     returns true only if the input is already canonical.
+//   - normalizeRelativePath: producer-side canonicalizer for a single path
+//     (representation only, no semantic resolution; throws on any input that
+//     cannot be canonicalized to a safe stored path).
+//   - normalizePathArray: producer-side canonicalizer for an array of paths.
+//     Maps each entry through normalizeRelativePath, dedupes via a Set, and
+//     sorts ASCII-ascending. Distinct from normalizeStringArray, which is
+//     wrong for paths because it trims: pathnames with leading/trailing
+//     whitespace, while unusual, ARE legitimate filenames on most
+//     filesystems, and silently rewriting them at the manifest boundary is
+//     the opposite of trust-preserving.
 // =============================================================================
 
 const ABSOLUTE_DRIVE_LETTER = /^[a-zA-Z]:/;
@@ -72,6 +83,22 @@ const safeStoredRelativePath = z.string().refine(isSafeStoredRelativePath, {
   message:
     "must be a canonical relative path: forward slashes only, no leading/trailing slash, no '.' or '..' segments, not absolute",
 });
+
+/**
+ * Producer-side helper for arrays of relative paths. Maps each entry through
+ * normalizeRelativePath (which throws on un-canonicalizable input), dedupes
+ * via a Set, and sorts ASCII-ascending. Returns a string[] that satisfies
+ * sortedUniquePathArray.
+ *
+ * Distinct from normalizeStringArray: that helper trims whitespace, which is
+ * wrong for paths. Pathnames with leading/trailing whitespace, while unusual,
+ * are legitimate filenames on most filesystems; trimming them at the manifest
+ * boundary would silently rewrite the captured set and break the trust-
+ * preserving principle that what we capture is what we restore.
+ */
+export function normalizePathArray(input: readonly string[]): string[] {
+  return Array.from(new Set(input.map(normalizeRelativePath))).sort();
+}
 
 // =============================================================================
 // String atom and string-array helpers
@@ -119,6 +146,21 @@ export function normalizeStringArray(input: readonly string[]): string[] {
 
 const sortedUniqueStringArray = z.array(nonBlankString).refine(isSortedUniqueStringArray, {
   message: "must be sorted ascending, contain no duplicates, and contain no blank strings",
+});
+
+/**
+ * Like `sortedUniqueStringArray` but with `safeStoredRelativePath` as the
+ * element validator: each entry must be a canonical relative POSIX path
+ * (forward slashes only, no leading/trailing slash, no '.' or '..' segments,
+ * not absolute). Used by `Manifest.snapshots.tracked_dirty_paths`.
+ *
+ * The same lexicographic sorted-unique invariant as `sortedUniqueStringArray`
+ * applies: producers MUST sort + dedupe (gitListTrackedDirty already does);
+ * the schema rejects non-canonical arrays.
+ */
+const sortedUniquePathArray = z.array(safeStoredRelativePath).refine(isSortedUniqueStringArray, {
+  message:
+    "must be sorted ascending, contain no duplicates, and contain only canonical relative POSIX paths",
 });
 
 // =============================================================================
@@ -234,6 +276,68 @@ export type CheckResult = z.infer<typeof CheckResultSchema>;
 // `session_id` semantics (D6): the parent record's ID. For checkpoints
 // belonging to a session, this is the owning session's `sess_<ULID>`. For
 // standalone checkpoints, it is the checkpoint's own `cp_<ULID>`.
+//
+// `snapshots.tracked_dirty_paths` vs `snapshots.file_hashes` (load-bearing):
+//   - `tracked_dirty_paths` is the FULL set of tracked paths that were dirty
+//     at checkpoint time — the verbatim output of `git diff --name-only` +
+//     `git diff --cached --name-only` (sorted, deduped). It INCLUDES tracked
+//     deletions, tracked-symlink changes, mode-only changes, and any other
+//     dirty tracked entry, regardless of whether the path currently exists
+//     on disk as a regular file. Restore uses this for exact set-parity
+//     verification of the tracked-dirty surface.
+//   - `file_hashes` is a STRICT SUBSET — only the regular-file entries
+//     whose bytes were captured into `tracked_dirty_archive_path`
+//     (snapshots.ts's `filterRegularFiles` skips deletions, symlinks,
+//     non-regular entries). Restore uses this for content-level SHA-256
+//     verification.
+//   - Both fields are required because they answer different questions and
+//     verify different things. Removing `tracked_dirty_paths` would re-open
+//     the soundness hole where a tampered patch could smuggle an
+//     unauthorized tracked deletion or mode/symlink change past restore
+//     verification (the path wouldn't be in `file_hashes`, and there'd be
+//     no other set to compare against).
+//
+// `untracked.exclude_patterns` (load-bearing for restore drift detection):
+// the `rollback.exclude` glob list in effect at checkpoint creation time,
+// persisted after normalization via `normalizeStringArray` (trimmed,
+// deduped, sorted ASCII-ascending). NOT verbatim — what readers see in
+// the manifest is the normalized form, not the raw line order from
+// `.viberevert.yml`.
+//
+// **Why sort + dedup is safe (load-bearing assumption):** M B treats
+// `rollback.exclude` as an UNORDERED DENY-LIST per D3 — `nonegate: true`
+// disables `!pattern` re-include semantics, and there is no "earlier
+// patterns take precedence" rule. Under those constraints, two pattern
+// lists are semantically equivalent iff they represent the same SET of
+// patterns, so sorting + dedup are lossless transformations and
+// pattern-set comparison is a sound drift signal. If a future milestone
+// introduces order-sensitive glob semantics (negation, precedence
+// rules, anchored-vs-unanchored ordering, etc.), this normalization
+// stops being valid and `RestoreExcludeDriftError`'s pattern-set
+// comparison would miss order-sensitive policy changes — both this
+// docstring and the producer-side normalization call must be revisited
+// at that point.
+//
+// Required field because restore needs both ends of the exclude policy
+// on hand to detect drift bidirectionally:
+//   - **Tightening drift** (current patterns are a SUPERSET of captured):
+//     the new patterns may match captured manifest paths, which would
+//     mean restore is being asked to extract files into paths the policy
+//     now says are off-limits. Pre-mutation refusal via
+//     `RestoreExcludeDriftError` (in `@viberevert/git`).
+//   - **Loosening drift** (current patterns are a SUBSET of captured):
+//     the working tree may contain pre-existing files that capture-time
+//     exclusion preserved but restore-time would now consider deletable
+//     by `deleteUncapturedUntracked`. Same pre-mutation refusal.
+// Without this field persisted, only the tightening direction is
+// detectable (by intersecting current-matcher against manifest paths);
+// loosening requires comparing pattern sets directly, which needs the
+// captured set on hand.
+//
+// Glob-string semantics, not path-string semantics — producers use
+// `normalizeStringArray` (trims whitespace), NOT `normalizePathArray`
+// (which preserves whitespace because pathnames legitimately may
+// contain it).
 // =============================================================================
 
 const FileHashMap = z.record(safeStoredRelativePath, z.hash("sha256"));
@@ -254,10 +358,12 @@ export const ManifestSchema = z.strictObject({
   }),
   snapshots: z.strictObject({
     tracked_dirty_archive_path: safeStoredRelativePath,
+    tracked_dirty_paths: sortedUniquePathArray,
     file_hashes: FileHashMap,
   }),
   untracked: z.strictObject({
     archive_path: safeStoredRelativePath,
+    exclude_patterns: sortedUniqueStringArray,
     file_hashes: FileHashMap,
   }),
   rollback_target_description: nonBlankString,

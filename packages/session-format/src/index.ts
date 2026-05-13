@@ -51,6 +51,7 @@ export {
   isSafeStoredRelativePath,
   isSortedUniqueStringArray,
   ManifestSchema,
+  normalizePathArray,
   normalizeRelativePath,
   normalizeStringArray,
   RiskLevelSchema,

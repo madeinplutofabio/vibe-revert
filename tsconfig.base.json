@@ -24,7 +24,8 @@
     "baseUrl": ".",
     "paths": {
       "@viberevert/session-format": ["packages/session-format/src/index.ts"],
-      "@viberevert/core": ["packages/core/src/index.ts"]
+      "@viberevert/core": ["packages/core/src/index.ts"],
+      "@viberevert/git": ["packages/git/src/index.ts"]
     }
   }
 }
