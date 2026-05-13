@@ -45,6 +45,9 @@ importers:
       '@viberevert/session-format':
         specifier: workspace:*
         version: link:../session-format
+      ulid:
+        specifier: 3.0.2
+        version: 3.0.2
       yaml:
         specifier: 2.8.3
         version: 2.8.3
