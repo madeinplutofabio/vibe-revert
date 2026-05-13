@@ -348,10 +348,13 @@ export async function startSession(opts: StartSessionOpts): Promise<void> {
 /**
  * End the currently-active session.
  *
- * Pre-conditions (caller's responsibility — NOT checked by core):
- *   - The D22 start-lock or its end-side equivalent is held (caller's
- *     orchestration concern; M B's CLI uses a single start-lock that
- *     covers both start and end paths).
+ * Pre-conditions:
+ *   - None beyond the persisted active-session state. M B's CLI does
+ *     not wrap `viberevert end` in the D22 start lock. Most concurrent
+ *     end attempts are handled by `active-session.json` re-checking and
+ *     `NoActiveSessionError`; a narrower double-end race after both
+ *     calls pass the re-check may surface as a filesystem ENOENT during
+ *     active-lock removal.
  *
  * What this function does, in order:
  *   1. Read `active-session.json` via `loadActiveSessionLock`. If null,

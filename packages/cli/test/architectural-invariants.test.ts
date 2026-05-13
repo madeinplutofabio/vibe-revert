@@ -194,3 +194,32 @@ describe("Architectural invariants — restore.ts stream handling", () => {
     ).toEqual([]);
   });
 });
+
+describe("Architectural invariants — D19 config-blind commands", () => {
+  // D19: `viberevert end`, `viberevert checkpoints`, and
+  // `viberevert sessions` MUST NOT import or reference `loadConfig`
+  // from @viberevert/core. They operate purely on persisted
+  // `.viberevert/` state and have no config-driven behavior. Allowing
+  // config loading would create surprising failures in recovery paths
+  // (a corrupt `.viberevert.yml` would block the listing commands the
+  // user needs to clean up state).
+  //
+  // The `\bloadConfig\b` pattern catches imports, call sites, and any
+  // other mention of the symbol. The findOffenders helper's `//`
+  // comment filter skips the lines where these files document the
+  // invariant by mentioning `loadConfig` in plain English (e.g., the
+  // "MUST NOT import or call `loadConfig`" architectural-lock blocks
+  // in each command's file header).
+
+  it.each(["end", "checkpoints", "sessions"])(
+    "%s.ts does NOT reference loadConfig",
+    (cmd) => {
+      const source = readSource(`packages/cli/src/commands/${cmd}.ts`);
+      const offenders = findOffenders(source, /\bloadConfig\b/);
+      expect(
+        offenders,
+        `${cmd}.ts must not reference loadConfig per D19 config-blind contract. Matches: ${JSON.stringify(offenders)}`,
+      ).toEqual([]);
+    },
+  );
+});

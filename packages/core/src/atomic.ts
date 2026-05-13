@@ -61,7 +61,7 @@ export async function writeFileAtomic(
 
 /**
  * Atomically rename `tmpDir` → `finalDir`. Fails loudly if `finalDir`
- * already exists.
+ * already exists in non-racing/stale states.
  *
  * The locked rule for session dirs per D13: the final id-based dir
  * name must be unique. Session IDs are ULID-based (extremely high
@@ -74,12 +74,27 @@ export async function writeFileAtomic(
  *
  * Cross-platform note: Node's `rename()` behavior on existing
  * destinations differs between POSIX (often overwrites) and Windows
- * (often fails). To get consistent fail-if-exists semantics, this
- * helper pre-checks via `lstat`. There is a narrow TOCTOU window
- * between the lstat and the rename — but the concurrency model that
- * uses this helper (the D22 start-lock in the CLI orchestration layer)
- * already serializes session-creation flows, so the window is
- * effectively closed in practice.
+ * (often fails). To get consistent fail-if-exists semantics under
+ * non-racing conditions, this helper pre-checks via `lstat`.
+ *
+ * **This helper is NOT a standalone no-replace primitive under
+ * arbitrary concurrent callers.** The no-collision guarantee comes
+ * from the caller's D22 exclusive lock where one is acquired, plus
+ * ULID uniqueness for id-based destinations. This helper provides
+ * the final same-filesystem atomic visibility step and a defensive
+ * fail-if-destination-already-exists check for non-racing/stale
+ * states.
+ *
+ * Portably closing the `lstat`→`rename` TOCTOU at this layer is not
+ * straightforward in Node: `fs.promises` operations are not
+ * synchronized under concurrent modification, and while exclusive
+ * file creation flags (`wx`) cover the `writeFileAtomic` case, no
+ * equivalent portable primitive exists for atomic-no-replace
+ * directory rename. The right place to enforce no-racing-callers
+ * is at the call-site (e.g., a future grep/invariant test asserting
+ * that `renameDirAtomic` is only invoked inside `withExclusiveLock`
+ * flows) — not a fragile concurrency attempt inside the helper
+ * itself.
  *
  * `rename()` itself is atomic on the same filesystem on both POSIX and
  * NTFS (per the locked D13 cross-filesystem caveat: `.viberevert/`
