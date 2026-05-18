@@ -182,6 +182,76 @@ export const ChangedFileStatusSchema = z.enum([
 ]);
 export type ChangedFileStatus = z.infer<typeof ChangedFileStatusSchema>;
 
+/**
+ * Discriminator for how a SessionReport's diff base was resolved. Carried on
+ * the file-level `ReportFile` wrapper (NOT on the inner `SessionReport`) so
+ * downstream consumers can disambiguate the meaning of `since_ref` without
+ * re-parsing it. Per D56 in the M C plan.
+ *
+ *   - "git_ref"          → `--since main`, `--since HEAD~1`, `--since <SHA>`,
+ *                          `--since <tag>`, or `--since HEAD` under `--staged`.
+ *   - "checkpoint_id"    → `--since cp_<ULID>`.
+ *   - "checkpoint_name"  → `--since <name>` matched against a manifest.
+ *   - "session_id"       → `--since sess_<ULID>`.
+ *   - "active_session"   → `--since` omitted with an active session present.
+ */
+export const SinceKindSchema = z.enum([
+  "git_ref",
+  "checkpoint_id",
+  "checkpoint_name",
+  "session_id",
+  "active_session",
+]);
+export type SinceKind = z.infer<typeof SinceKindSchema>;
+
+/**
+ * Discriminator for the storage location of a written report. Per D26 in the
+ * M C plan: session-bound reports live at
+ * `.viberevert/sessions/<sess>/report.json` (file-level atomic);
+ * ad-hoc reports live at `.viberevert/reports/<rpt_ULID>/report.json`
+ * (dir-level atomic).
+ */
+export const ReportFileKindSchema = z.enum(["session_bound", "ad_hoc"]);
+export type ReportFileKind = z.infer<typeof ReportFileKindSchema>;
+
+// =============================================================================
+// Severity ordering (single source of truth for level comparison)
+//
+// Per D25 in the M C plan. The checks engine, reporters, and CLI MUST import
+// `compareLevel` / `riskLevelAtOrAbove` from here — no ad-hoc string
+// comparison anywhere. The integer ranks are an implementation detail; only
+// the helpers' return values are public.
+// =============================================================================
+
+const LEVEL_RANK: Readonly<Record<RiskLevel, number>> = {
+  low: 0,
+  medium: 1,
+  high: 2,
+  critical: 3,
+};
+
+/**
+ * Total order over `RiskLevel`: `low < medium < high < critical`. Returns
+ * `-1` if `a < b`, `0` if `a === b`, `+1` if `a > b`. Intended for use as a
+ * comparator (e.g. `[...levels].sort(compareLevel)`).
+ */
+export function compareLevel(a: RiskLevel, b: RiskLevel): -1 | 0 | 1 {
+  const ra = LEVEL_RANK[a];
+  const rb = LEVEL_RANK[b];
+  if (ra < rb) return -1;
+  if (ra > rb) return 1;
+  return 0;
+}
+
+/**
+ * True iff `actual` meets or exceeds `threshold` in the locked severity
+ * ordering. Used by `viberevert check`'s gate (`actual >= risk.block_on`)
+ * and by `--threshold <level>` output filtering in renderers.
+ */
+export function riskLevelAtOrAbove(actual: RiskLevel, threshold: RiskLevel): boolean {
+  return LEVEL_RANK[actual] >= LEVEL_RANK[threshold];
+}
+
 // =============================================================================
 // Evidence (strict)
 //
@@ -372,23 +442,67 @@ export type Manifest = z.infer<typeof ManifestSchema>;
 
 // =============================================================================
 // SessionReport (strict; M C `viberevert check` output artifact)
+//
+// Noise-budget caps (per D31 in the M C plan): a report MUST NOT exceed
+// these limits when persisted. These are the LAST line of defense — the
+// checks engine's D40 clustering pre-shrinks output before persistence so
+// a non-buggy engine never trips them. Exceeding any cap signals an engine
+// bug and the schema rejects the file.
+//
+// The low-cap matches the engine's own low-cap EXACTLY (per D40's locked
+// "Headroom" table). The total and per-category caps leave a small (10)
+// headroom over the engine's caps so a slightly-off engine still produces
+// a schema-valid file with a clear "clustering should have been tighter"
+// signal in code review rather than a hard parse failure in CI.
 // =============================================================================
 
-export const SessionReportSchema = z.strictObject({
-  schema_version: z.literal(SCHEMA_VERSION),
-  session_id: nonBlankString,
-  started_at: z.iso.datetime({ offset: true, precision: 0 }),
-  ended_at: z.iso.datetime({ offset: true, precision: 0 }).optional(),
-  agent_command: nonBlankString.optional(),
-  detected_frameworks: sortedUniqueStringArray,
-  task: nonBlankString.optional(),
-  checkpoint_id: nonBlankString.optional(),
-  risk_level: RiskLevelSchema,
-  changed_files: z.array(ChangedFileSchema),
-  results: z.array(CheckResultSchema),
-  rollback_available: z.boolean(),
-  summary: nonBlankString.optional(),
-});
+/** Per D31. Locked for v0.7.0-beta. Bumps require a new locked decision. */
+export const NOISE_BUDGET_MAX_TOTAL = 100 as const;
+/** Per D31. Matches the engine's D40 low-cap exactly (no headroom). */
+export const NOISE_BUDGET_MAX_LOW = 20 as const;
+/** Per D31. */
+export const NOISE_BUDGET_MAX_PER_CATEGORY = 40 as const;
+
+export const SessionReportSchema = z
+  .strictObject({
+    schema_version: z.literal(SCHEMA_VERSION),
+    session_id: nonBlankString,
+    started_at: z.iso.datetime({ offset: true, precision: 0 }),
+    ended_at: z.iso.datetime({ offset: true, precision: 0 }).optional(),
+    agent_command: nonBlankString.optional(),
+    detected_frameworks: sortedUniqueStringArray,
+    task: nonBlankString.optional(),
+    checkpoint_id: nonBlankString.optional(),
+    risk_level: RiskLevelSchema,
+    changed_files: z.array(ChangedFileSchema),
+    results: z.array(CheckResultSchema),
+    rollback_available: z.boolean(),
+    summary: nonBlankString.optional(),
+  })
+  .refine((r) => r.results.length <= NOISE_BUDGET_MAX_TOTAL, {
+    message: `results must contain at most ${NOISE_BUDGET_MAX_TOTAL} findings total (engine should cluster)`,
+    path: ["results"],
+  })
+  .refine((r) => r.results.filter((f) => f.level === "low").length <= NOISE_BUDGET_MAX_LOW, {
+    message: `results must contain at most ${NOISE_BUDGET_MAX_LOW} findings of level 'low' (engine should cluster low-tail)`,
+    path: ["results"],
+  })
+  .refine(
+    (r) => {
+      const counts = new Map<string, number>();
+      for (const f of r.results) {
+        counts.set(f.category, (counts.get(f.category) ?? 0) + 1);
+      }
+      for (const count of counts.values()) {
+        if (count > NOISE_BUDGET_MAX_PER_CATEGORY) return false;
+      }
+      return true;
+    },
+    {
+      message: `results must contain at most ${NOISE_BUDGET_MAX_PER_CATEGORY} findings per category (engine should cluster category-tail)`,
+      path: ["results"],
+    },
+  );
 export type SessionReport = z.infer<typeof SessionReportSchema>;
 
 // =============================================================================
@@ -469,3 +583,133 @@ export const ActiveSessionLockSchema = SessionStateBaseSchema.pick({
   task: true,
 });
 export type ActiveSessionLock = z.infer<typeof ActiveSessionLockSchema>;
+
+// =============================================================================
+// ReportFile (strict; M C on-disk wrapper for a written report)
+//
+// Per D31 in the M C plan. `SessionReportSchema` requires `session_id`, and
+// an ad-hoc report (no owning session) has no real session id. Rather than
+// breaking the locked v1.0 `SessionReportSchema`, we wrap it here with a
+// small file-level header that distinguishes session-bound vs ad-hoc reports.
+// Two persistence locations per D26 share ONE schema:
+//
+//   - session_bound  →  .viberevert/sessions/<sess>/report.json  (file-level atomic)
+//   - ad_hoc         →  .viberevert/reports/<rpt_ULID>/report.json (dir-level atomic)
+//
+// `report_id` semantics:
+//   - session_bound: equals the owning session's `sess_<ULID>`.
+//   - ad_hoc:        equals a fresh `rpt_<ULID>` generated by the CLI for
+//                    this report (see `generateReportId()` in @viberevert/core).
+//   The file is self-identifying without inspecting its on-disk path.
+//
+//   **Important:** the embedded `report.session_id` MUST equal `report_id`
+//   in BOTH cases — see the identity-invariant refine below. For ad-hoc
+//   reports this means `report.session_id` deliberately carries the
+//   `rpt_<ULID>` value, NOT a `sess_<ULID>` value (the underlying
+//   `SessionReportSchema.session_id` is `nonBlankString`, not
+//   `sess_`-prefix-constrained, so this is legal at the inner schema and
+//   tightened here at the wrapper). Anything reading `report.session_id`
+//   on an ad-hoc report should treat it as the report's own id, not as a
+//   session reference; the `kind` discriminator on the wrapper makes the
+//   distinction explicit.
+//
+// `since_kind` + `since_ref` + `since_resolved_sha` together fully describe
+// the diff base (per D56):
+//   - since_kind         → discriminator: how the user expressed the base.
+//   - since_ref          → verbatim user input, post-resolution
+//                          (e.g. "baseline" for checkpoint-name,
+//                          "sess_01..." for session-id, "main" for git-ref).
+//   - since_resolved_sha → audit field. For git-ref → the resolved SHA.
+//                          For checkpoint/session → the checkpoint's
+//                          captured `manifest.git.head_sha`.
+//
+// `staged_only` per D39: present-iff-true (literal `true`, never `false`).
+// Omitted when `--staged` was not used. Combined with `kind: "ad_hoc"` only
+// — checkpoint/session bases are mutually exclusive with `--staged` (D58).
+//
+// `written_at` is the wall-clock time the CLI persisted this report.
+// Second-precision ISO 8601 (matches all other M B / M C timestamps);
+// producers MUST route through `toIsoSecondString` from `./time.js`
+// because `Date.prototype.toISOString()` always emits millisecond
+// precision which `z.iso.datetime({ precision: 0 })` rejects.
+// =============================================================================
+
+/**
+ * Independent schema version for the ReportFile wrapper artifact. Distinct
+ * from SCHEMA_VERSION (which versions Manifest + SessionReport) AND from
+ * SESSION_STATE_SCHEMA_VERSION (which versions session.json). Mirrors the
+ * M B precedent of versioning each persisted-artifact family independently
+ * so a bump in one wrapper does not force a bump in the others.
+ */
+export const REPORT_FILE_SCHEMA_VERSION = "1.0" as const;
+
+export type ReportFileSchemaVersion = typeof REPORT_FILE_SCHEMA_VERSION;
+
+// Crockford base32 alphabet excludes I, L, O, U. The 26-char body comes after
+// the prefix. These regexes are used by the ReportFileSchema refines below to
+// catch typos and malformed ids that a naive .startsWith() check would miss
+// (e.g., "sess_garbage" or "sess_" alone).
+const SESS_ULID_REGEX = /^sess_[0-9A-HJKMNP-TV-Z]{26}$/;
+const RPT_ULID_REGEX = /^rpt_[0-9A-HJKMNP-TV-Z]{26}$/;
+
+// The locked `since_kind ↔ kind` consistency rule per D56:
+//   - session_bound  ↔ since_kind ∈ { session_id, active_session }
+//   - ad_hoc         ↔ since_kind ∈ { checkpoint_id, checkpoint_name, git_ref }
+// These constant sets are checked at refine time so the rule is easy to audit
+// and trivially extensible if a future SinceKind value lands.
+const SESSION_BOUND_SINCE_KINDS: ReadonlySet<SinceKind> = new Set(["session_id", "active_session"]);
+const AD_HOC_SINCE_KINDS: ReadonlySet<SinceKind> = new Set([
+  "checkpoint_id",
+  "checkpoint_name",
+  "git_ref",
+]);
+
+export const ReportFileSchema = z
+  .strictObject({
+    schema_version: z.literal(REPORT_FILE_SCHEMA_VERSION),
+    kind: ReportFileKindSchema,
+    report_id: nonBlankString,
+    since_kind: SinceKindSchema,
+    since_ref: nonBlankString,
+    since_resolved_sha: nonBlankString,
+    staged_only: z.literal(true).optional(),
+    written_at: z.iso.datetime({ offset: true, precision: 0 }),
+    report: SessionReportSchema,
+  })
+  // (1) session_bound report_id must be a real sess_<26-char Crockford ULID>.
+  .refine((f) => f.kind !== "session_bound" || SESS_ULID_REGEX.test(f.report_id), {
+    message: "session_bound report_id must be a sess_<26-char Crockford ULID>",
+    path: ["report_id"],
+  })
+  // (2) ad_hoc report_id must be a real rpt_<26-char Crockford ULID>.
+  .refine((f) => f.kind !== "ad_hoc" || RPT_ULID_REGEX.test(f.report_id), {
+    message: "ad_hoc report_id must be a rpt_<26-char Crockford ULID>",
+    path: ["report_id"],
+  })
+  // (3) staged_only=true implies kind: "ad_hoc" (D39: --staged is mutually
+  //     exclusive with session/checkpoint bases per D58, so any session_bound
+  //     report carrying staged_only is a producer bug).
+  .refine((f) => f.staged_only !== true || f.kind === "ad_hoc", {
+    message: "staged_only=true requires kind='ad_hoc'",
+    path: ["staged_only"],
+  })
+  // (4) since_kind ↔ kind consistency per D56.
+  .refine(
+    (f) =>
+      f.kind === "session_bound"
+        ? SESSION_BOUND_SINCE_KINDS.has(f.since_kind)
+        : AD_HOC_SINCE_KINDS.has(f.since_kind),
+    {
+      message: "since_kind is inconsistent with kind",
+      path: ["since_kind"],
+    },
+  )
+  // (5) Identity invariant: report_id mirrors the embedded SessionReport's
+  //     session_id exactly. Guarantees a consumer reading either field gets
+  //     the same identity, and prevents a class of producer bugs where the
+  //     wrapper-id and embedded-id drift.
+  .refine((f) => f.report.session_id === f.report_id, {
+    message: "report.session_id must equal report_id",
+    path: ["report", "session_id"],
+  });
+export type ReportFile = z.infer<typeof ReportFileSchema>;

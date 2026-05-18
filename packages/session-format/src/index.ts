@@ -22,6 +22,7 @@ export {
   CheckResultJsonSchema,
   EvidenceJsonSchema,
   ManifestJsonSchema,
+  ReportFileJsonSchema,
   SessionReportJsonSchema,
   SessionStateJsonSchema,
 } from "./json-schema.js";
@@ -34,10 +35,14 @@ export type {
   Confidence,
   Evidence,
   Manifest,
+  ReportFile,
+  ReportFileKind,
+  ReportFileSchemaVersion,
   RiskLevel,
   SessionReport,
   SessionState,
   SessionStateSchemaVersion,
+  SinceKind,
 } from "./schemas.js";
 
 // Runtime zod schema values + helpers.
@@ -47,17 +52,27 @@ export {
   ChangedFileStatusSchema,
   CheckResultSchema,
   ConfidenceSchema,
+  compareLevel,
   EvidenceSchema,
   isSafeStoredRelativePath,
   isSortedUniqueStringArray,
   ManifestSchema,
+  NOISE_BUDGET_MAX_LOW,
+  NOISE_BUDGET_MAX_PER_CATEGORY,
+  NOISE_BUDGET_MAX_TOTAL,
   normalizePathArray,
   normalizeRelativePath,
   normalizeStringArray,
+  REPORT_FILE_SCHEMA_VERSION,
+  ReportFileKindSchema,
+  ReportFileSchema,
   RiskLevelSchema,
+  riskLevelAtOrAbove,
   SESSION_STATE_SCHEMA_VERSION,
   SessionReportSchema,
   SessionStateSchema,
+  SinceKindSchema,
 } from "./schemas.js";
+export { toIsoSecondString } from "./time.js";
 export type { SchemaVersion } from "./version.js";
 export { SCHEMA_VERSION } from "./version.js";

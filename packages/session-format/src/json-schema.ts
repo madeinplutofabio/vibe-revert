@@ -13,9 +13,12 @@
 //
 // Use the zod schemas (./schemas.ts) directly when validating values inside
 // TypeScript code. toJSONSchema cannot always express custom .refine() rules
-// (e.g., the noise-budget recommendation requirement on CheckResult, the
-// ended_at <-> after_status_path coupling on SessionState); those stay
-// enforced only at the zod level.
+// (e.g., the high/critical recommendation requirement on CheckResult; the
+// ended_at <-> after_status_path coupling on SessionState; the M C
+// noise-budget caps on SessionReport; the M C ReportFile wrapper's
+// kind/since_kind consistency, ULID-shape regex on report_id, staged_only
+// ↔ kind consistency, and the identity invariant tying report_id to the
+// embedded report.session_id); those stay enforced only at the zod level.
 //
 // D21 invariant: every persisted-artifact zod schema in ./schemas.ts MUST have
 // a corresponding *JsonSchema export here, re-exported from ./index.ts.
@@ -27,6 +30,7 @@ import {
   CheckResultSchema,
   EvidenceSchema,
   ManifestSchema,
+  ReportFileSchema,
   SessionReportSchema,
   SessionStateSchema,
 } from "./schemas.js";
@@ -43,3 +47,4 @@ export const ActiveSessionLockJsonSchema = z.toJSONSchema(
   ActiveSessionLockSchema,
   JSON_SCHEMA_OPTIONS,
 );
+export const ReportFileJsonSchema = z.toJSONSchema(ReportFileSchema, JSON_SCHEMA_OPTIONS);
