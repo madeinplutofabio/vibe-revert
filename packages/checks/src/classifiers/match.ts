@@ -6,9 +6,14 @@
 // Wraps picomatch with the LOCKED options for VibeRevert (D32, D56):
 //   - dot: true        — patterns like `.env*` match dotfiles
 //   - nocase: false    — case-sensitive matching (Linux convention)
-//   - posixSlashes: true — backslash inputs normalized to forward slashes
-//                          (secondary guard; primary normalization is done
-//                          by the CLI before paths reach checks)
+//   - posixSlashes: true — defense-in-depth only. The cross-platform
+//                          guarantee for backslash normalization is
+//                          provided EXPLICITLY by `normalizeClassifierPath`
+//                          (see below) — picomatch's own posixSlashes flag
+//                          is platform-dependent in practice (normalizes
+//                          on Windows; treats `\` as a literal escape
+//                          character on Linux), so the matcher cannot
+//                          rely on it for OS-independent behavior.
 //   - nonegate: true   — patterns beginning with `!` are LITERAL, NOT
 //                        negations (matches the M B `rollback.exclude`
 //                        semantics from D3 and the M C
@@ -109,6 +114,23 @@ export function compilePathRules(rules: readonly PathRule[]): readonly CompiledP
 }
 
 /**
+ * Normalizes a classifier-input path so the matcher's behavior is OS-
+ * independent. Replaces backslash separators with forward slashes (the
+ * only valid POSIX separator). picomatch's own `posixSlashes` flag is
+ * platform-dependent (works on Windows; treats `\` as a literal escape
+ * character on Linux), so the matcher cannot rely on it for cross-platform
+ * correctness. Explicit normalization here makes the contract self-
+ * enforcing regardless of how callers (the CLI today, MCP / IDE adapters
+ * or third-party tooling tomorrow) construct their path inputs.
+ *
+ * Returns the input unchanged when no backslashes are present (avoids
+ * allocating a new string in the common case).
+ */
+function normalizeClassifierPath(path: string): string {
+  return path.includes("\\") ? path.replace(/\\/g, "/") : path;
+}
+
+/**
  * Pure matcher: given a path, a framework list, and pre-compiled rules,
  * returns the rules whose match conditions are satisfied. Exposed so
  * tests can drive the matcher with synthetic compiled-rule arrays
@@ -131,15 +153,16 @@ export function classifyPathWithCompiledRules(
   detectedFrameworks: readonly string[],
   compiledRules: readonly CompiledPathRule[],
 ): readonly PathRule[] {
+  const normalizedPath = normalizeClassifierPath(path);
   const matched: PathRule[] = [];
   for (const { rule, matchPattern, matchAnyExclude } of compiledRules) {
     if (rule.framework !== undefined && !detectedFrameworks.includes(rule.framework)) {
       continue;
     }
-    if (matchAnyExclude(path)) {
+    if (matchAnyExclude(normalizedPath)) {
       continue;
     }
-    if (matchPattern(path)) {
+    if (matchPattern(normalizedPath)) {
       matched.push(rule);
     }
   }
@@ -158,11 +181,12 @@ const COMPILED_RULES = compilePathRules(PATH_RULES);
  * wrapper around `classifyPathWithCompiledRules` using the
  * production-defaults compiled rules.
  *
- * `path` MUST be canonical repo-relative POSIX (forward slashes only,
- * no leading slash, no `.` / `..` segments). The CLI normalizes via
- * `safeStoredRelativePath` / `normalizeRelativePath` from
- * `@viberevert/session-format` before paths reach this module. The
- * `posixSlashes: true` option is a defensive secondary guard.
+ * `path` must be repo-relative, but may contain either `/` or `\`
+ * separators. The matcher normalizes backslashes to POSIX slashes
+ * before include/exclude matching (see `normalizeClassifierPath`).
+ * Callers should still avoid absolute paths and `.` / `..` segments —
+ * the matcher does not canonicalize those, and patterns are written
+ * assuming neither is present.
  *
  * In Step 2 PATH_RULES is empty, so this function returns `[]` for
  * every input. Step 3 populates PATH_RULES with the real Laravel +

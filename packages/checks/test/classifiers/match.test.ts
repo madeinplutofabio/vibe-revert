@@ -24,7 +24,9 @@
 //     - dot: true → dotfiles match patterns like .env*
 //     - nocase: false → case-SENSITIVE matching
 //     - nonegate: true → leading ! is literal (not a negation)
-//     - posixSlashes: true → backslash inputs normalized to forward slashes
+//     - explicit matcher normalization converts backslash separators to
+//       POSIX slashes before include/exclude matching; posixSlashes remains
+//       enabled as defense-in-depth
 //   - Glob features:
 //     - ** recursive segments
 //     - * matches a single segment only (not /)
@@ -311,12 +313,38 @@ describe("classifyPathWithCompiledRules — locked picomatch options (D32, D56)"
     expect(classifyPathWithCompiledRules("secret", [], compiled)).toEqual([]);
   });
 
-  it("normalizes backslash path separators via { posixSlashes: true }", () => {
+  it("normalizes backslash separators before include matching", () => {
+    // The matcher EXPLICITLY normalizes backslashes to forward slashes
+    // before invoking picomatch (see normalizeClassifierPath in
+    // ../../src/classifiers/match.ts). This is the cross-platform
+    // guarantee; picomatch's own posixSlashes flag is platform-dependent
+    // and cannot be relied on. Production callers (the CLI today, future
+    // adapters tomorrow) get OS-independent matching regardless of input
+    // path shape.
     const rules = [rule({ id: "ts", pattern: "src/**/*.ts" })];
     const compiled = compilePathRules(rules);
     expect(
       classifyPathWithCompiledRules("src\\nested\\app.ts", [], compiled).map((r) => r.id),
     ).toEqual(["ts"]);
+  });
+
+  it("normalizes backslash separators before exclude matching too (symmetric contract)", () => {
+    // Locks the symmetric application: normalization must apply to BOTH
+    // include pattern matching AND exclude pattern matching. A bug that
+    // normalized only the include side would let backslash-input paths
+    // slip past excludes that should suppress them — rule would fire when
+    // it shouldn't. (The "neither side normalized" failure mode is caught
+    // by the preceding include test, which would return [] when the rule
+    // should have fired.)
+    const rules = [
+      rule({
+        id: "ts",
+        pattern: "src/**/*.ts",
+        excludePatterns: ["src/**/*.test.ts"],
+      }),
+    ];
+    const compiled = compilePathRules(rules);
+    expect(classifyPathWithCompiledRules("src\\nested\\foo.test.ts", [], compiled)).toEqual([]);
   });
 });
 
