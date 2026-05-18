@@ -1,0 +1,110 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Fabio Marcello Salvadori
+
+// The built-in check registry + the config-key → emitted-categories map
+// the engine consults for D28's two-layer toggle enforcement.
+//
+// `BUILTIN_CHECKS` is the deterministic list of all Check implementations
+// that ship with VibeRevert. Order in this array IS the order in which
+// `runChecks` invokes them; the engine then sorts findings deterministically
+// at the end per the locked D40 sort key, so registry order does NOT affect
+// the persisted report's finding order — but it DOES affect:
+//   - which check's `run()` fires first (visible only via test spies)
+//   - the order in which the path-classifier accumulates risk tags during
+//     the pre-cluster aggregation step (path-classifier runs FIRST so its
+//     tags are available before content-detectors emit findings)
+//
+// `CHECKS_TOGGLE_MAP` is the SINGLE SOURCE OF TRUTH mapping each
+// `.viberevert.yml` `checks.*` config key to the set of categories that
+// key's `true` / `false` toggles. The map is REVERSE-LOOKED-UP by
+// `deriveEnabledCategories` to compute the enabled-category set the engine
+// uses for its two-layer toggle filter. The map is array-valued because
+// some keys toggle MULTIPLE categories (e.g., `infra` → `["infra",
+// "deployment"]`) — the lock that prevents the path-classifier's
+// `emittedCategories` from going stale relative to the toggle config.
+//
+// LOCKED EXCEPTION: the literal `"summary"` category is produced ONLY by
+// the D40 cluster post-process pass. It is NOT user-toggleable and is NOT
+// in CHECKS_TOGGLE_MAP. The architectural-invariants test in
+// `registry.test.ts` asserts both directions:
+//   (a) every category in every check's emittedCategories appears as a
+//       value in CHECKS_TOGGLE_MAP — EXCEPT "summary"
+//   (b) NO check in BUILTIN_CHECKS has `category === "summary"` (clusters
+//       live in the engine, never in the registry)
+
+import type { Check, ChecksToggleConfig } from "./types.js";
+
+/**
+ * The deterministic list of built-in checks shipped with VibeRevert.
+ *
+ * Step 2 ships an EMPTY registry (engine + scaffolding only). Subsequent
+ * steps populate it:
+ *   - Step 3: path-classifier check (front-loaded so its risk_tags are
+ *     available before content-detectors run)
+ *   - Step 4: secrets detector
+ *   - Step 5: dependency detector
+ *   - Step 6: migration content detector
+ *   - Step 7: test-gap + scope-expansion detectors
+ *
+ * Order matters per the architectural intent (path-classifier first); the
+ * engine preserves array order when invoking `check.run(ctx)`.
+ */
+export const BUILTIN_CHECKS: readonly Check[] = [];
+
+/**
+ * SINGLE SOURCE OF TRUTH for the `.viberevert.yml` `checks.*` key →
+ * emitted-categories mapping. Per D28 in the M C plan.
+ *
+ * Array-valued because some keys toggle MULTIPLE categories
+ * (`infra` → `["infra", "deployment"]`). Reverse-looked-up by
+ * `deriveEnabledCategories` to compute the enabled-category set the
+ * engine uses for its two-layer toggle filter.
+ *
+ * Categories NOT listed here (`permissions`, `admin`, `user-data`,
+ * `network`, `unknown-large-change`) are reserved for later milestones
+ * and are NOT emitted by any check in M C.
+ *
+ * LOCKED EXCEPTION: the literal `"summary"` category produced by D40's
+ * cluster post-process pass is NOT in this map. It is NOT
+ * user-toggleable. The engine's post-toggle filter (D28 layer 2) runs
+ * BEFORE clustering, so cluster summaries always survive regardless of
+ * which `checks.*` keys are enabled.
+ */
+export const CHECKS_TOGGLE_MAP: Readonly<Record<string, readonly string[]>> = {
+  secrets: ["secrets"],
+  dependencies: ["dependencies"],
+  migrations: ["database"],
+  auth: ["auth"],
+  payments: ["payments"],
+  infra: ["infra", "deployment"],
+  tests: ["test-gap"],
+  scope_expansion: ["scope-expansion"],
+};
+
+/**
+ * Reverse-lookup helper: given the resolved toggle config from the CLI,
+ * return the SET of categories that are currently enabled.
+ *
+ * A toggle key that's missing from `configChecks` is treated as `false`
+ * (disabled) — defaults are applied UPSTREAM by `mergeChecksConfig` in
+ * `cli/src/check-orchestration.ts` per D57. The engine treats the input
+ * as the already-fully-defaulted config.
+ *
+ * A toggle key that's `true` enables ALL categories it maps to.
+ *
+ * Toggle keys NOT in CHECKS_TOGGLE_MAP are silently ignored (forward-
+ * compatible with future config additions that the user might write
+ * before checks ships its handler).
+ *
+ * Returns a fresh ReadonlySet (no caching across invocations) so callers
+ * cannot mutate the engine's internal state via the returned reference.
+ */
+export function deriveEnabledCategories(configChecks: ChecksToggleConfig): ReadonlySet<string> {
+  const enabled = new Set<string>();
+  for (const [key, categories] of Object.entries(CHECKS_TOGGLE_MAP)) {
+    if (configChecks[key] === true) {
+      for (const c of categories) enabled.add(c);
+    }
+  }
+  return enabled;
+}

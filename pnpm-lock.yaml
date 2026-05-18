@@ -26,7 +26,18 @@ importers:
 
   packages/adapters: {}
 
-  packages/checks: {}
+  packages/checks:
+    dependencies:
+      '@viberevert/session-format':
+        specifier: workspace:*
+        version: link:../session-format
+      picomatch:
+        specifier: 4.0.4
+        version: 4.0.4
+    devDependencies:
+      '@types/picomatch':
+        specifier: 4.0.2
+        version: 4.0.2
 
   packages/cli:
     dependencies:
