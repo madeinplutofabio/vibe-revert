@@ -8,6 +8,7 @@ import { createInterface } from "node:readline/promises";
 import { ensureViberevertDirs, RepoRootNotFoundError, resolveRepoRoot } from "@viberevert/core";
 import { Command, Option } from "clipanion";
 import { type DetectionResult, detectFramework } from "../detect.js";
+import { ensureViberevertGitignore } from "../gitignore.js";
 import {
   BUILTIN_PROFILES,
   type Generator,
@@ -18,7 +19,8 @@ import {
 /**
  * Initializes a VibeRevert config and scaffold in the current repo.
  *
- * Algorithm (locked in the M A plan):
+ * Algorithm (locked in the M A plan; Step 7b is the M B corrective fix
+ * per gitignore.ts module header):
  *   1. Resolve repo root (or use CWD if none, since `init` may run before .git).
  *   2. Refuse to write if .viberevert.yml exists and is not a regular file
  *      (directory, socket, etc.) — even with --force. If it's a regular file,
@@ -35,7 +37,10 @@ import {
  *   4. Always print the chosen profile before writing.
  *   5. Generate YAML via the profile generator.
  *   6. Write .viberevert.yml.
- *   7. ensureViberevertDirs(repoRoot).
+ *   7a. ensureViberevertDirs(repoRoot).
+ *   7b. ensureViberevertGitignore(repoRoot) — M B trust-critical fix:
+ *       guarantees `.viberevert/` is gitignored so checkpoint/session writes
+ *       never leak into the user's `git status`. Idempotent.
  *   8. Print success.
  */
 export class InitCommand extends Command {
@@ -133,9 +138,24 @@ export class InitCommand extends Command {
     await writeFile(configPath, yaml, "utf8");
     this.context.stdout.write(`Wrote ${configPath}\n`);
 
-    // Step 7: scaffold .viberevert/ subdirs.
+    // Step 7a: scaffold .viberevert/ subdirs.
     await ensureViberevertDirs(repoRoot);
     this.context.stdout.write(`Created .viberevert/ subdirectories\n`);
+
+    // Step 7b: ensure `.viberevert/` is gitignored (M B trust-critical fix
+    // per gitignore.ts module header — idempotent on re-run).
+    const gitignoreAction = await ensureViberevertGitignore(repoRoot);
+    switch (gitignoreAction) {
+      case "created":
+        this.context.stdout.write(`Created .gitignore with .viberevert/ entry\n`);
+        break;
+      case "appended":
+        this.context.stdout.write(`Added .viberevert/ to .gitignore\n`);
+        break;
+      case "already-present":
+        this.context.stdout.write(`Confirmed .viberevert/ already in .gitignore\n`);
+        break;
+    }
 
     // Step 8: success.
     this.context.stdout.write(`\nDone. Next: viberevert doctor\n`);

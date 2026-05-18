@@ -63,9 +63,11 @@ beforeEach(async () => {
     ],
     { cwd: tmpRoot },
   );
-  // Mirror what M A's init does: add `.viberevert/` to .gitignore so
-  // session-state writes don't show up in `git status`. Tests that
-  // assert on after-status content can then make precise assertions.
+  // These tests bypass `viberevert init` and write `.viberevert.yml` and
+  // session-state files directly, so we manually set up the `.gitignore`
+  // state init would have created. Required so session-state writes don't
+  // show up in `git status` and tests that assert on after-status content
+  // can make precise assertions.
   await writeFile(join(tmpRoot, ".gitignore"), ".viberevert/\n");
   process.chdir(tmpRoot);
 });

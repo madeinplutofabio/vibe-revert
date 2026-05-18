@@ -66,7 +66,9 @@ beforeEach(async () => {
   originalCwd = process.cwd();
   // Real git repo for resolveRepoRoot via .git/ marker.
   await execFileAsync("git", ["init", "-q", "-b", "main"], { cwd: tmpRoot });
-  // Mirror M A's init: gitignore .viberevert/.
+  // These tests bypass `viberevert init`, so we manually set up the
+  // `.gitignore` state init would have created. Required for fixture
+  // dirs written directly under `.viberevert/`.
   await writeFile(join(tmpRoot, ".gitignore"), ".viberevert/\n");
   process.chdir(tmpRoot);
 });

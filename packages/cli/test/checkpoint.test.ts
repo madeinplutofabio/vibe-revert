@@ -69,7 +69,9 @@ beforeEach(async () => {
     ],
     { cwd: tmpRoot },
   );
-  // Mirror M A's init: gitignore .viberevert/.
+  // These tests bypass `viberevert init`, so we manually set up the
+  // `.gitignore` state init would have created. Keeps `git status` clean
+  // when checkpoint writes land under `.viberevert/`.
   await writeFile(join(tmpRoot, ".gitignore"), ".viberevert/\n");
   process.chdir(tmpRoot);
 });

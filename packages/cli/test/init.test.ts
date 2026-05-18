@@ -119,6 +119,10 @@ describe("init — golden output per fixture", () => {
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("Wrote");
     expect(result.stdout).toContain("Done.");
+    // M B trust-critical Step 7b: init MUST create .gitignore with the
+    // .viberevert/ rule (none of the init fixtures ship a pre-existing
+    // .gitignore, so this always exercises the "created" branch).
+    expect(result.stdout).toContain("Created .gitignore with .viberevert/ entry");
 
     // Golden YAML matches.
     const actual = await readNormalized(join(workDir, ".viberevert.yml"));
@@ -130,6 +134,12 @@ describe("init — golden output per fixture", () => {
       const s = await stat(join(workDir, ".viberevert", sub));
       expect(s.isDirectory()).toBe(true);
     }
+
+    // M B trust-critical Step 7b: .gitignore was actually created with the
+    // canonical rule (file + content assertions, in addition to the stdout
+    // line above — both must hold).
+    const gitignore = await readNormalized(join(workDir, ".gitignore"));
+    expect(gitignore).toBe(".viberevert/\n");
   });
 });
 
@@ -211,5 +221,74 @@ describe("init — non-interactive ambiguous detection", () => {
     expect(result.stderr).toContain("Multiple framework signatures detected");
     expect(result.stderr).toContain("laravel, nextjs");
     expect(result.stderr).toContain("--profile");
+  });
+});
+
+describe("init — .gitignore handling (M B trust-critical Step 7b)", () => {
+  // End-to-end tests that init's Step 7b actually wires through to the
+  // gitignore.ts helper. The helper's contracts are exhaustively unit-
+  // tested in gitignore.test.ts; these tests confirm init invokes it,
+  // prints the right status line per outcome, and the file ends up in
+  // the expected state on disk.
+
+  it("creates .gitignore + prints the 'created' status when none exists", async () => {
+    // No fixture: chdir directly to tmpRoot. init writes .viberevert.yml,
+    // creates .viberevert/, and creates .gitignore with the canonical rule.
+    process.chdir(tmpRoot);
+    const result = await runInit(["--profile", "generic"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("Created .gitignore with .viberevert/ entry");
+    expect(await readNormalized(join(tmpRoot, ".gitignore"))).toBe(".viberevert/\n");
+  });
+
+  it("appends to existing .gitignore + prints the 'appended' status", async () => {
+    await writeFile(join(tmpRoot, ".gitignore"), "node_modules/\ndist/\n", "utf8");
+    process.chdir(tmpRoot);
+    const result = await runInit(["--profile", "generic"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("Added .viberevert/ to .gitignore");
+    expect(await readNormalized(join(tmpRoot, ".gitignore"))).toBe(
+      "node_modules/\ndist/\n.viberevert/\n",
+    );
+  });
+
+  it("is a no-op + prints the 'already-present' status when rule exists", async () => {
+    const original = "node_modules/\n.viberevert/\ndist/\n";
+    await writeFile(join(tmpRoot, ".gitignore"), original, "utf8");
+    process.chdir(tmpRoot);
+    const result = await runInit(["--profile", "generic"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("Confirmed .viberevert/ already in .gitignore");
+    expect(await readNormalized(join(tmpRoot, ".gitignore"))).toBe(original);
+  });
+
+  it("is idempotent across runs (created -> already-present on re-run with --force)", async () => {
+    process.chdir(tmpRoot);
+    const first = await runInit(["--profile", "generic"]);
+    expect(first.exitCode).toBe(0);
+    expect(first.stdout).toContain("Created .gitignore with .viberevert/ entry");
+
+    const second = await runInit(["--profile", "generic", "--force"]);
+    expect(second.exitCode).toBe(0);
+    expect(second.stdout).toContain("Confirmed .viberevert/ already in .gitignore");
+    expect(await readNormalized(join(tmpRoot, ".gitignore"))).toBe(".viberevert/\n");
+  });
+
+  it("restores the invariant when an existing .gitignore has a trailing negation (trust-critical)", async () => {
+    // The exact scenario the M B fix exists for: a user's .gitignore
+    // currently un-ignores .viberevert/ via a trailing negation. init
+    // MUST append a fresh positive rule so the invariant is restored.
+    await writeFile(
+      join(tmpRoot, ".gitignore"),
+      "node_modules/\n.viberevert/\n!.viberevert/\n",
+      "utf8",
+    );
+    process.chdir(tmpRoot);
+    const result = await runInit(["--profile", "generic"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("Added .viberevert/ to .gitignore");
+    expect(await readNormalized(join(tmpRoot, ".gitignore"))).toBe(
+      "node_modules/\n.viberevert/\n!.viberevert/\n.viberevert/\n",
+    );
   });
 });
