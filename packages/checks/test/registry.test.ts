@@ -4,7 +4,7 @@
 // Unit tests for packages/checks/src/registry.ts.
 //
 // Covers:
-//   - BUILTIN_CHECKS shape (array, currently empty in Step 2)
+//   - BUILTIN_CHECKS shape (array, pathClassifierCheck at index 0 per Step 3)
 //   - CHECKS_TOGGLE_MAP shape (locked 8-key map per D28):
 //     - exactly the 8 locked toggle keys
 //     - each key maps to its locked category list
@@ -20,9 +20,11 @@
 //     - NO registered check emits "summary" directly or via emittedCategories
 //       (clusters live in the engine post-process, never in the registry)
 //     - every check id is unique (duplicates would collide in dedup)
-//     - every check's emittedCategories includes its primary category
-//       (otherwise layer-1 pre-run skip can disable a check while its
-//       toggle is enabled — counterintuitive failure mode)
+//     - every check satisfies the TWO-PRONGED category-to-emittedCategories
+//       contract: toggleable-primary checks must include their primary
+//       category in emittedCategories; umbrella checks (whose primary
+//       category is NOT itself a toggle key) MUST declare emittedCategories
+//       explicitly, non-empty, with every entry a toggle category
 //     - no category is mapped by more than one toggle key (would create
 //       conflicting toggle semantics)
 //     - every toggle value is non-empty and dedup-free (no dead keys,
@@ -31,14 +33,17 @@
 //       CHECKS_TOGGLE_MAP (engine's toggle filter would silently drop
 //       findings from unmapped categories)
 //
-// The check-related invariants pass trivially in Step 2 because
-// BUILTIN_CHECKS is empty. They become load-bearing in Steps 3-7 as real
-// checks join the registry — locking the contract NOW means future check
-// additions get validated automatically. The CHECKS_TOGGLE_MAP-only
-// invariants (mapping uniqueness, value shape) fire today.
+// Step 3 has landed: BUILTIN_CHECKS contains pathClassifierCheck at
+// index 0. The check-related invariants now actively gate registry
+// content rather than passing trivially against an empty array. Future
+// step additions (secrets, dependencies, migrations, test-gap,
+// scope-expansion) ride the same invariants without further
+// test-surface change. The CHECKS_TOGGLE_MAP-only invariants (mapping
+// uniqueness, value shape) fire today regardless of registry size.
 
 import { describe, expect, it } from "vitest";
 
+import { pathClassifierCheck } from "../src/classifiers/path-classifier-check.js";
 import type { ChecksToggleConfig } from "../src/index.js";
 import { BUILTIN_CHECKS, CHECKS_TOGGLE_MAP, deriveEnabledCategories } from "../src/index.js";
 
@@ -51,8 +56,14 @@ describe("BUILTIN_CHECKS", () => {
     expect(Array.isArray(BUILTIN_CHECKS)).toBe(true);
   });
 
-  it("is empty in Step 2 (real checks populated by Steps 3-7)", () => {
-    expect(BUILTIN_CHECKS).toHaveLength(0);
+  it("has pathClassifierCheck at index 0 (front-loaded per Step 3)", () => {
+    // Per D28 + Step 3 lock: the path-classifier is intentionally first
+    // in registry invocation order. Identity comparison (toBe) — not
+    // just id comparison — to lock that the SAME module instance is
+    // wired in (catches a future regression where two divergent copies
+    // of the check accidentally co-exist via parallel import paths).
+    expect(BUILTIN_CHECKS.length).toBeGreaterThan(0);
+    expect(BUILTIN_CHECKS[0]).toBe(pathClassifierCheck);
   });
 });
 
@@ -195,10 +206,11 @@ describe("deriveEnabledCategories", () => {
 // Registry invariants (LOCK against future drift)
 //
 // These tests guard the contracts that protect engine.ts from silently
-// dropping findings, prevent duplicate-id dedup collisions, and lock the
-// CHECKS_TOGGLE_MAP shape. The check-related invariants pass trivially
-// in Step 2 because BUILTIN_CHECKS is empty; they become load-bearing
-// in Steps 3-7 as checks join the registry.
+// dropping findings, prevent duplicate-id dedup collisions, and lock
+// the CHECKS_TOGGLE_MAP shape. Step 3 has populated BUILTIN_CHECKS
+// with pathClassifierCheck; the check-related invariants now actively
+// gate registry content. Future step additions ride the same
+// invariants automatically.
 // =============================================================================
 
 describe("Registry invariants", () => {
@@ -223,18 +235,70 @@ describe("Registry invariants", () => {
     expect(new Set(ids).size).toBe(ids.length);
   });
 
-  it("every check's effective emittedCategories includes its primary category", () => {
-    // If a check declares emittedCategories that EXCLUDES its primary
-    // category, the engine's layer-1 pre-run skip can disable the check
-    // while the user's toggle for `category` is enabled — a
-    // counterintuitive failure mode. emittedCategories must be a
-    // SUPERSET of [category].
+  it("every check satisfies the two-pronged category-to-emittedCategories contract (toggleable-primary OR umbrella)", () => {
+    // Per D28 lock + Step 3 umbrella-check support: every registered
+    // check falls into one of TWO categories, and the contract differs
+    // by case:
+    //
+    //   (a) Toggleable-primary case: check.category is itself a value
+    //       in CHECKS_TOGGLE_MAP (i.e., its primary category IS the
+    //       effect of some toggle key). The check's effective
+    //       emittedCategories MUST be a SUPERSET of [check.category].
+    //       Otherwise the engine's layer-1 pre-run skip can disable
+    //       the check while the user's toggle for its primary
+    //       category is enabled — a counterintuitive failure mode.
+    //       Single-category checks satisfy trivially by omitting
+    //       emittedCategories (the field defaults to [category]).
+    //
+    //   (b) Umbrella case: check.category is NOT a value in
+    //       CHECKS_TOGGLE_MAP — it's a check-family LABEL, not a
+    //       toggle key (path-classifier is the canonical example,
+    //       with `category: "path-classifier"`). The umbrella check
+    //       MUST then declare emittedCategories EXPLICITLY (the
+    //       `?? [category]` default would route findings under an
+    //       unmapped category which the engine's post-toggle filter
+    //       would silently drop), MUST be non-empty, and every entry
+    //       MUST itself be a toggle category (present in
+    //       CHECKS_TOGGLE_MAP values).
+    //
+    // The umbrella-case "every entry is mapped" sub-prong converges
+    // with the "every category in every check's emittedCategories
+    // appears in CHECKS_TOGGLE_MAP" test below, but is asserted here
+    // too so an umbrella-contract failure surfaces with a precise
+    // diagnostic message naming the offending umbrella check directly.
+    const allMappedCategories = new Set<string>();
+    for (const categories of Object.values(CHECKS_TOGGLE_MAP)) {
+      for (const c of categories) allMappedCategories.add(c);
+    }
     for (const check of BUILTIN_CHECKS) {
-      const emitted = check.emittedCategories ?? [check.category];
-      expect(
-        emitted.includes(check.category),
-        `Check '${check.id}' primary category '${check.category}' must be included in emittedCategories`,
-      ).toBe(true);
+      const isToggleablePrimary = allMappedCategories.has(check.category);
+      if (isToggleablePrimary) {
+        // Case (a): primary category is itself a toggle category.
+        const emitted = check.emittedCategories ?? [check.category];
+        expect(
+          emitted.includes(check.category),
+          `Toggleable-primary check '${check.id}' must include its primary category '${check.category}' in emittedCategories (or omit emittedCategories to use the [category] default)`,
+        ).toBe(true);
+      } else {
+        // Case (b): umbrella check. emittedCategories MUST be
+        // explicit, non-empty, and entirely composed of toggle
+        // categories.
+        expect(
+          check.emittedCategories,
+          `Umbrella check '${check.id}' primary category '${check.category}' is NOT a CHECKS_TOGGLE_MAP value, so emittedCategories MUST be declared explicitly (the [category] default would route findings to an unmapped category)`,
+        ).toBeDefined();
+        const emitted = check.emittedCategories as readonly string[];
+        expect(
+          emitted.length,
+          `Umbrella check '${check.id}' must declare a non-empty emittedCategories`,
+        ).toBeGreaterThan(0);
+        for (const cat of emitted) {
+          expect(
+            allMappedCategories.has(cat),
+            `Umbrella check '${check.id}' emits category '${cat}' which is not a CHECKS_TOGGLE_MAP value`,
+          ).toBe(true);
+        }
+      }
     }
   });
 
@@ -283,6 +347,12 @@ describe("Registry invariants", () => {
     // "NO registered check emits category 'summary'" test above. Layered
     // defense: if a check accidentally lists "summary" in
     // emittedCategories, BOTH that test AND this one will fail.
+    //
+    // This test ALSO catches the umbrella-default bug (umbrella check
+    // with no emittedCategories declared → defaults to [check.category]
+    // → check.category not in CHECKS_TOGGLE_MAP → fails here). The
+    // two-pronged invariant above catches the same bug with a more
+    // precise diagnostic; this test is the broader catch-all.
     const allMappedCategories = new Set<string>();
     for (const cats of Object.values(CHECKS_TOGGLE_MAP)) {
       for (const c of cats) allMappedCategories.add(c);

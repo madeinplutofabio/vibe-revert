@@ -9,10 +9,13 @@
 // `runChecks` invokes them; the engine then sorts findings deterministically
 // at the end per the locked D40 sort key, so registry order does NOT affect
 // the persisted report's finding order — but it DOES affect:
-//   - which check's `run()` fires first (visible only via test spies)
-//   - the order in which the path-classifier accumulates risk tags during
-//     the pre-cluster aggregation step (path-classifier runs FIRST so its
-//     tags are available before content-detectors emit findings)
+//   - which check's `run()` fires first (visible via test spies and useful
+//     for deterministic diagnostics)
+//   - future composition room: the path-classifier is intentionally first
+//     in the registry, but in the current Step 3 engine, riskTagsByPath is
+//     populated by the engine's direct classifier call, not by this check's
+//     run() side effects. Content detectors do NOT consume prior check
+//     output today.
 //
 // `CHECKS_TOGGLE_MAP` is the SINGLE SOURCE OF TRUTH mapping each
 // `.viberevert.yml` `checks.*` config key to the set of categories that
@@ -23,33 +26,63 @@
 // "deployment"]`) — the lock that prevents the path-classifier's
 // `emittedCategories` from going stale relative to the toggle config.
 //
-// LOCKED EXCEPTION: the literal `"summary"` category is produced ONLY by
-// the D40 cluster post-process pass. It is NOT user-toggleable and is NOT
-// in CHECKS_TOGGLE_MAP. The architectural-invariants test in
-// `registry.test.ts` asserts both directions:
+// LOCKED ENGINE-ONLY CATEGORY: the literal `"summary"` category is
+// produced ONLY by the D40 cluster post-process pass. It is NOT
+// user-toggleable and is NOT in CHECKS_TOGGLE_MAP. The
+// architectural-invariants test in `registry.test.ts` asserts both
+// directions:
 //   (a) every category in every check's emittedCategories appears as a
-//       value in CHECKS_TOGGLE_MAP — EXCEPT "summary"
-//   (b) NO check in BUILTIN_CHECKS has `category === "summary"` (clusters
-//       live in the engine, never in the registry)
+//       value in CHECKS_TOGGLE_MAP
+//   (b) NO check in BUILTIN_CHECKS has `category === "summary"` and NO
+//       check lists "summary" in emittedCategories (clusters live in the
+//       engine, never in the registry)
+//
+// LOCKED UMBRELLA-CHECK EXCEPTION: a check whose primary `category` is a
+// check-family LABEL (not itself a toggle key) — `path-classifier` is
+// the canonical example, with `category: "path-classifier"` and
+// `emittedCategories` fanning out across multiple real toggle keys
+// (auth / payments / database / infra / deployment / secrets /
+// dependencies) — is permitted. The registry.test.ts invariant accepts
+// this umbrella pattern via a TWO-PRONGED branch:
+//   (a) Toggleable-primary case: check.category appears in
+//       CHECKS_TOGGLE_MAP values → emittedCategories must be a superset
+//       of [category] (single-category checks satisfy trivially by
+//       omitting the field).
+//   (b) Umbrella case: check.category does NOT appear in
+//       CHECKS_TOGGLE_MAP values → emittedCategories MUST be declared
+//       explicitly (no [category] default — that would emit findings
+//       under an unmapped category which the engine's post-toggle
+//       filter would silently drop), MUST be non-empty, and every
+//       entry MUST itself be a toggle category.
 
+import { pathClassifierCheck } from "./classifiers/path-classifier-check.js";
 import type { Check, ChecksToggleConfig } from "./types.js";
 
 /**
  * The deterministic list of built-in checks shipped with VibeRevert.
  *
- * Step 2 ships an EMPTY registry (engine + scaffolding only). Subsequent
- * steps populate it:
- *   - Step 3: path-classifier check (front-loaded so its risk_tags are
- *     available before content-detectors run)
+ * Step 3 has landed: `pathClassifierCheck` is at index 0. It emits
+ * path-classifier findings first in registry invocation order and locks
+ * the architectural intent that path classification is the first
+ * built-in analysis family.
+ *
+ * Important: `riskTagsByPath` is populated by the engine's direct call
+ * to the classifier, not as a side effect of
+ * `pathClassifierCheck.run()`. Likewise, content detectors do not
+ * currently consume prior check output. The index-0 placement is still
+ * intentional for deterministic invocation order, diagnostics, and
+ * future composition room.
+ *
+ * Subsequent steps append to this array in order:
  *   - Step 4: secrets detector
  *   - Step 5: dependency detector
  *   - Step 6: migration content detector
  *   - Step 7: test-gap + scope-expansion detectors
  *
- * Order matters per the architectural intent (path-classifier first); the
- * engine preserves array order when invoking `check.run(ctx)`.
+ * Order matters per the architectural intent (path-classifier first);
+ * the engine preserves array order when invoking `check.run(ctx)`.
  */
-export const BUILTIN_CHECKS: readonly Check[] = [];
+export const BUILTIN_CHECKS: readonly Check[] = [pathClassifierCheck];
 
 /**
  * SINGLE SOURCE OF TRUTH for the `.viberevert.yml` `checks.*` key →
@@ -64,11 +97,11 @@ export const BUILTIN_CHECKS: readonly Check[] = [];
  * `network`, `unknown-large-change`) are reserved for later milestones
  * and are NOT emitted by any check in M C.
  *
- * LOCKED EXCEPTION: the literal `"summary"` category produced by D40's
- * cluster post-process pass is NOT in this map. It is NOT
- * user-toggleable. The engine's post-toggle filter (D28 layer 2) runs
- * BEFORE clustering, so cluster summaries always survive regardless of
- * which `checks.*` keys are enabled.
+ * LOCKED ENGINE-ONLY CATEGORY: the literal `"summary"` category
+ * produced by D40's cluster post-process pass is NOT in this map. It
+ * is NOT user-toggleable. The engine's post-toggle filter (D28 layer
+ * 2) runs BEFORE clustering, so cluster summaries always survive
+ * regardless of which `checks.*` keys are enabled.
  */
 export const CHECKS_TOGGLE_MAP: Readonly<Record<string, readonly string[]>> = {
   secrets: ["secrets"],
