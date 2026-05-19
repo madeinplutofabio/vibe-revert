@@ -56,6 +56,7 @@
 //       entry MUST itself be a toggle category.
 
 import { pathClassifierCheck } from "./classifiers/path-classifier-check.js";
+import { secretsCheck } from "./detectors/secrets.js";
 import type { Check, ChecksToggleConfig } from "./types.js";
 
 /**
@@ -66,6 +67,19 @@ import type { Check, ChecksToggleConfig } from "./types.js";
  * the architectural intent that path classification is the first
  * built-in analysis family.
  *
+ * Step 4 has landed: `secretsCheck` at index 1. Single-category
+ * detector with `category: "secrets"` — the toggleable-primary case
+ * (no umbrella exception needed; "secrets" is itself a toggle key in
+ * CHECKS_TOGGLE_MAP). Scans addedLines for the 8 locked regex
+ * patterns from D33; drops matches that fail entropy/placeholder
+ * checks (pattern #7 only) without an audit trail; downgrades
+ * matches in `*.example` / `*.template` files or on lines with
+ * `# pragma: viberevert-allow` / `// viberevert-allow` markers to
+ * `level: "low"` (preserves audit trail). See
+ * `./detectors/secrets-patterns.ts` + `./detectors/secrets.ts` for
+ * full architecture (including the clone-first RegExp discipline
+ * and PEM multi-line handling).
+ *
  * Important: `riskTagsByPath` is populated by the engine's direct call
  * to the classifier, not as a side effect of
  * `pathClassifierCheck.run()`. Likewise, content detectors do not
@@ -74,7 +88,6 @@ import type { Check, ChecksToggleConfig } from "./types.js";
  * future composition room.
  *
  * Subsequent steps append to this array in order:
- *   - Step 4: secrets detector
  *   - Step 5: dependency detector
  *   - Step 6: migration content detector
  *   - Step 7: test-gap + scope-expansion detectors
@@ -82,7 +95,7 @@ import type { Check, ChecksToggleConfig } from "./types.js";
  * Order matters per the architectural intent (path-classifier first);
  * the engine preserves array order when invoking `check.run(ctx)`.
  */
-export const BUILTIN_CHECKS: readonly Check[] = [pathClassifierCheck];
+export const BUILTIN_CHECKS: readonly Check[] = [pathClassifierCheck, secretsCheck];
 
 /**
  * SINGLE SOURCE OF TRUTH for the `.viberevert.yml` `checks.*` key →
