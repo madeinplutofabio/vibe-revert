@@ -56,6 +56,7 @@
 //       entry MUST itself be a toggle category.
 
 import { pathClassifierCheck } from "./classifiers/path-classifier-check.js";
+import { dependenciesCheck } from "./detectors/dependencies.js";
 import { secretsCheck } from "./detectors/secrets.js";
 import type { Check, ChecksToggleConfig } from "./types.js";
 
@@ -80,6 +81,29 @@ import type { Check, ChecksToggleConfig } from "./types.js";
  * full architecture (including the clone-first RegExp discipline
  * and PEM multi-line handling).
  *
+ * Step 5 has landed: `dependenciesCheck` at index 2. Single-category
+ * detector with `category: "dependencies"` — toggleable-primary case
+ * via `checks.dependencies` in `.viberevert.yml`. Emits findings
+ * under THREE distinct per-rule ids per D40's identity-based dedup
+ * convention:
+ *   - `dependencies.lockfile-without-manifest` (medium): a known
+ *     lockfile basename is in the diff but its sibling-directory
+ *     manifest is NOT.
+ *   - `dependencies.install-script` (medium): a known manifest's
+ *     addedLines contain a JSON key matching an install/lifecycle
+ *     hook (preinstall/install/postinstall/prepare for package.json;
+ *     post-install-cmd/post-update-cmd for composer.json).
+ *   - `dependencies.new-dependencies` (low): one consolidated finding
+ *     per manifest file, with up to 5 evidence entries + a "+N more
+ *     added" tail per D34 + the closed Open Question #4.
+ * Transitive manifest/lockfile paths (anything under a transitive
+ * directory in TRANSITIVE_PATH_SEGMENTS: node_modules / vendor /
+ * .venv / venv) are EXCLUDED at every rule's entry. Version strings
+ * are NEVER emitted in evidence detail (REDACTION SAFETY lock). See
+ * `./detectors/dependency-constants.ts` + `./detectors/dependencies.ts`
+ * for the full architecture including section-tracking deferral,
+ * MANIFEST_NON_DEP_KEYS denylist, and module-load invariant.
+ *
  * Important: `riskTagsByPath` is populated by the engine's direct call
  * to the classifier, not as a side effect of
  * `pathClassifierCheck.run()`. Likewise, content detectors do not
@@ -88,14 +112,17 @@ import type { Check, ChecksToggleConfig } from "./types.js";
  * future composition room.
  *
  * Subsequent steps append to this array in order:
- *   - Step 5: dependency detector
  *   - Step 6: migration content detector
  *   - Step 7: test-gap + scope-expansion detectors
  *
  * Order matters per the architectural intent (path-classifier first);
  * the engine preserves array order when invoking `check.run(ctx)`.
  */
-export const BUILTIN_CHECKS: readonly Check[] = [pathClassifierCheck, secretsCheck];
+export const BUILTIN_CHECKS: readonly Check[] = [
+  pathClassifierCheck,
+  secretsCheck,
+  dependenciesCheck,
+];
 
 /**
  * SINGLE SOURCE OF TRUTH for the `.viberevert.yml` `checks.*` key →
