@@ -62,6 +62,7 @@
 // PURITY: this check performs no I/O, makes no Date / random / clock
 // calls, and contains no async code per D29.
 
+import { normalizePathSeparators } from "../path-normalization.js";
 import type { Check, CheckContext, CheckResult } from "../types.js";
 import { classifyPath } from "./match.js";
 import { PATH_RULES } from "./path-rules.js";
@@ -201,14 +202,24 @@ export const pathClassifierCheck: Check = {
   run: (ctx: CheckContext): readonly CheckResult[] => {
     const results: CheckResult[] = [];
     for (const file of ctx.changedFiles) {
-      const matchedRules = classifyPath(file.path, ctx.detectedFrameworks);
+      // POSIX-normalize ONCE at the top of the per-file loop so the
+      // matcher AND the emitted evidence.file + message strings all
+      // see the canonical form. Without this, a Windows-shaped input
+      // path (backslashes — from a Windows CLI, MCP adapter, or
+      // third-party caller) produces a CheckResult whose evidence.file
+      // fails CheckResultSchema's safeStoredRelativePath rule, and the
+      // engine's D28 layer-2 parse step throws a ZodError. Shared
+      // helper from ../path-normalization.ts so this discipline stays
+      // identical across all detectors (D17c single source of truth).
+      const normalizedPath = normalizePathSeparators(file.path);
+      const matchedRules = classifyPath(normalizedPath, ctx.detectedFrameworks);
       for (const rule of matchedRules) {
         const isHighOrCritical = rule.defaultLevel === "high" || rule.defaultLevel === "critical";
         const recommendation = isHighOrCritical
           ? recommendationForCategory(rule.category)
           : undefined;
         const title = TITLES_BY_CATEGORY[rule.category] ?? FALLBACK_TITLE;
-        const message = `File '${file.path}' matches path-classifier rule '${rule.id}' for category '${rule.category}'.`;
+        const message = `File '${normalizedPath}' matches path-classifier rule '${rule.id}' for category '${rule.category}'.`;
         const finding: CheckResult = {
           id: `path-classifier.${rule.id}`,
           category: rule.category,
@@ -216,7 +227,7 @@ export const pathClassifierCheck: Check = {
           confidence: "high",
           title,
           message,
-          evidence: [{ file: file.path, detail: rule.id }],
+          evidence: [{ file: normalizedPath, detail: rule.id }],
           ...(recommendation !== undefined ? { recommendation } : {}),
         };
         results.push(finding);

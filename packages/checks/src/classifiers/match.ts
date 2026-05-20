@@ -8,9 +8,10 @@
 //   - nocase: false    — case-sensitive matching (Linux convention)
 //   - posixSlashes: true — defense-in-depth only. The cross-platform
 //                          guarantee for backslash normalization is
-//                          provided EXPLICITLY by `normalizeClassifierPath`
-//                          (see below) — picomatch's own posixSlashes flag
-//                          is platform-dependent in practice (normalizes
+//                          provided EXPLICITLY by `normalizePathSeparators`
+//                          (imported from ../path-normalization.ts) —
+//                          picomatch's own posixSlashes flag is
+//                          platform-dependent in practice (normalizes
 //                          on Windows; treats `\` as a literal escape
 //                          character on Linux), so the matcher cannot
 //                          rely on it for OS-independent behavior.
@@ -53,6 +54,8 @@
 // calls, and contains no async code per D29.
 
 import picomatch from "picomatch";
+
+import { normalizePathSeparators } from "../path-normalization.js";
 import { PATH_RULES, type PathRule } from "./path-rules.js";
 
 /**
@@ -114,23 +117,6 @@ export function compilePathRules(rules: readonly PathRule[]): readonly CompiledP
 }
 
 /**
- * Normalizes a classifier-input path so the matcher's behavior is OS-
- * independent. Replaces backslash separators with forward slashes (the
- * only valid POSIX separator). picomatch's own `posixSlashes` flag is
- * platform-dependent (works on Windows; treats `\` as a literal escape
- * character on Linux), so the matcher cannot rely on it for cross-platform
- * correctness. Explicit normalization here makes the contract self-
- * enforcing regardless of how callers (the CLI today, MCP / IDE adapters
- * or third-party tooling tomorrow) construct their path inputs.
- *
- * Returns the input unchanged when no backslashes are present (avoids
- * allocating a new string in the common case).
- */
-function normalizeClassifierPath(path: string): string {
-  return path.includes("\\") ? path.replace(/\\/g, "/") : path;
-}
-
-/**
  * Pure matcher: given a path, a framework list, and pre-compiled rules,
  * returns the rules whose match conditions are satisfied. Exposed so
  * tests can drive the matcher with synthetic compiled-rule arrays
@@ -153,7 +139,7 @@ export function classifyPathWithCompiledRules(
   detectedFrameworks: readonly string[],
   compiledRules: readonly CompiledPathRule[],
 ): readonly PathRule[] {
-  const normalizedPath = normalizeClassifierPath(path);
+  const normalizedPath = normalizePathSeparators(path);
   const matched: PathRule[] = [];
   for (const { rule, matchPattern, matchAnyExclude } of compiledRules) {
     if (rule.framework !== undefined && !detectedFrameworks.includes(rule.framework)) {
@@ -183,7 +169,7 @@ const COMPILED_RULES = compilePathRules(PATH_RULES);
  *
  * `path` must be repo-relative, but may contain either `/` or `\`
  * separators. The matcher normalizes backslashes to POSIX slashes
- * before include/exclude matching (see `normalizeClassifierPath`).
+ * before include/exclude matching (see `normalizePathSeparators`).
  * Callers should still avoid absolute paths and `.` / `..` segments —
  * the matcher does not canonicalize those, and patterns are written
  * assuming neither is present.

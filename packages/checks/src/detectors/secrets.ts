@@ -12,8 +12,9 @@
 // Per-file flow inside secretsCheck.run:
 //   1. Skip binary files (no content to scan).
 //   2. Skip files with empty addedLines (no diff content).
-//   3. Normalize file.path ONCE via normalizeDetectorPath, and use the
-//      normalized value EVERYWHERE downstream:
+//   3. Normalize file.path ONCE via normalizePathSeparators (shared
+//      helper from ../path-normalization.js), and use the normalized
+//      value EVERYWHERE downstream:
 //        - picomatch suppression matching (`matchSuppressedFile`),
 //        - emitted `evidence[0].file` (M B's EvidenceSchema validates
 //          via `safeStoredRelativePath` which requires forward slashes),
@@ -125,6 +126,7 @@
 
 import picomatch from "picomatch";
 
+import { normalizePathSeparators } from "../path-normalization.js";
 import type {
   Check,
   CheckContext,
@@ -306,38 +308,6 @@ export function groupContiguousLines(
 // =============================================================================
 
 /**
- * Normalizes Windows-style paths (with backslash separators) to
- * POSIX. The detector calls this ONCE at the start of per-file
- * processing and uses the normalized path EVERYWHERE downstream:
- *   - picomatch suppression matching (`matchSuppressedFile`),
- *   - emitted `evidence[0].file` (M B's EvidenceSchema validates via
- *     `safeStoredRelativePath` which requires forward slashes; a
- *     backslash-containing path would fail schema validation in
- *     engine.ts's CheckResultSchema.parse step),
- *   - user-facing message template.
- *
- * Same defense-in-depth pattern as normalizeClassifierPath in
- * ../classifiers/match.ts — `posixSlashes: true` alone is
- * platform-dependent in practice (works on Windows; treats `\` as a
- * literal escape character on Linux).
- *
- * Although the ChangedFileInput.path contract is "canonical repo-
- * relative POSIX" (per D32/D56) and the CLI's diff-parser always
- * supplies POSIX paths from git, this defensive normalization keeps
- * the detector robust to any future caller (MCP adapter, test
- * fixture, etc.) that might supply a Windows-style path. Without
- * normalization at the emission site, a backslash input would
- * pass suppression matching (which normalizes internally) but fail
- * schema validation downstream.
- *
- * Returns the input unchanged when no backslashes are present
- * (avoids allocating a new string in the common case).
- */
-function normalizeDetectorPath(path: string): string {
-  return path.includes("\\") ? path.replace(/\\/g, "/") : path;
-}
-
-/**
  * Per-line scan record: one match from one regex against one
  * position. `lineIsSuppressed` is pre-computed by the scan layer so
  * the call site doesn't need to know whether the hit came from a
@@ -487,9 +457,10 @@ export const secretsCheck: Check = {
 
       // Normalize file.path ONCE and use throughout: suppression
       // matching, schema-validated evidence.file emission, and the
-      // user-facing message template. See normalizeDetectorPath
-      // JSDoc for the full rationale.
-      const normalizedFilePath = normalizeDetectorPath(file.path);
+      // user-facing message template. Shared helper from
+      // ../path-normalization.js keeps the discipline identical
+      // across all detectors (D17c single source of truth).
+      const normalizedFilePath = normalizePathSeparators(file.path);
       const fileIsSuppressed = matchSuppressedFile(normalizedFilePath);
       // Per-(file, pattern) occurrence counter — satisfies D40's
       // detector-side uniqueness rule for multi-finding-per-file
