@@ -58,6 +58,7 @@
 import { pathClassifierCheck } from "./classifiers/path-classifier-check.js";
 import { dependenciesCheck } from "./detectors/dependencies.js";
 import { migrationsCheck } from "./detectors/migrations.js";
+import { scopeExpansionCheck } from "./detectors/scope-expansion.js";
 import { secretsCheck } from "./detectors/secrets.js";
 import { testGapCheck } from "./detectors/test-gap.js";
 import type { Check, ChecksToggleConfig } from "./types.js";
@@ -166,6 +167,37 @@ import type { Check, ChecksToggleConfig } from "./types.js";
  *     compile to a picomatch matcher exactly ONCE per run()
  *     invocation, reused across every changed file in the diff.
  *
+ * Step 7b has landed: `scopeExpansionCheck` at index 5. Single-category
+ * detector with `category: "scope-expansion"` — toggleable-primary case
+ * via `checks.scope_expansion` in `.viberevert.yml` (note the
+ * underscore-vs-hyphen split between the toggle key `scope_expansion`
+ * and the emitted category `scope-expansion`, mirroring the
+ * tests/test-gap and migrations/database splits). Heuristic detector:
+ * tokenizes `ctx.task` and each changed file's POSIX path, computes
+ * overlap (intersection ÷ |fileTokens|), and emits findings for files
+ * with LOW overlap (< 0.1) that classify into a RISKY_CATEGORY (auth /
+ * payments / database / infra / deployment). Emits findings under ONE
+ * per-category rule type:
+ *   - `scope-expansion.<category>` (high, confidence: medium):
+ *     aggregated finding per affected risky category with up to 5
+ *     file-evidence entries (each carrying `overlap: <0.NN>` detail);
+ *     remainder surfaced as "+N more" in the message tail. Sort key
+ *     `[overlap asc, file asc]` puts the most suspicious files first.
+ * Locked trigger gates (see ./detectors/scope-expansion.ts header):
+ *   - `ctx.task` undefined → skip whole check.
+ *   - trimmed `ctx.task.length < 8` → skip whole check (padded short
+ *     tasks like "   fix   " are rejected by the trim discipline).
+ *   - task tokens empty after tokenization (e.g., "!!!  !!!") → skip
+ *     whole check (zero-token guard).
+ *   - per-file: file tokens empty → skip that file's overlap calc
+ *     (divide-by-zero guard); other detectors still see the file.
+ *   - non-risky-category files (e.g., secrets, dependencies): do NOT
+ *     contribute even at zero overlap; those categories are owned by
+ *     the OTHER detectors.
+ * CamelCase tokens do NOT split (D37 locked separator set: `/`, `_`,
+ * `-`, `.`); known heuristic limitation documented in the detector
+ * header.
+ *
  * Important: `riskTagsByPath` is populated by the engine's direct call
  * to the classifier, not as a side effect of
  * `pathClassifierCheck.run()`. Likewise, content detectors do not
@@ -173,8 +205,10 @@ import type { Check, ChecksToggleConfig } from "./types.js";
  * intentional for deterministic invocation order, diagnostics, and
  * future composition room.
  *
- * Subsequent steps append to this array in order:
- *   - Step 7b: scope-expansion detector
+ * No further detectors are planned for M C. Subsequent M C steps add
+ * the reporters package (Step 8), CLI integration (Step 9), and
+ * golden-fixture coverage (Step 10) — none of which mutate
+ * BUILTIN_CHECKS.
  *
  * Order matters per the architectural intent (path-classifier first);
  * the engine preserves array order when invoking `check.run(ctx)`.
@@ -185,6 +219,7 @@ export const BUILTIN_CHECKS: readonly Check[] = [
   dependenciesCheck,
   migrationsCheck,
   testGapCheck,
+  scopeExpansionCheck,
 ];
 
 /**
