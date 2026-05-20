@@ -59,6 +59,7 @@ import { pathClassifierCheck } from "./classifiers/path-classifier-check.js";
 import { dependenciesCheck } from "./detectors/dependencies.js";
 import { migrationsCheck } from "./detectors/migrations.js";
 import { secretsCheck } from "./detectors/secrets.js";
+import { testGapCheck } from "./detectors/test-gap.js";
 import type { Check, ChecksToggleConfig } from "./types.js";
 
 /**
@@ -133,6 +134,38 @@ import type { Check, ChecksToggleConfig } from "./types.js";
  * multi-condition check). See `./detectors/migrations.ts` +
  * `./detectors/migrations-danger-terms.ts` for full architecture.
  *
+ * Step 7a has landed: `testGapCheck` at index 4. Single-category
+ * detector with `category: "test-gap"` — toggleable-primary case via
+ * `checks.tests` in `.viberevert.yml` (the toggle key and the emitted
+ * category differ by design, mirroring the migrations/database split).
+ * Composition-style detector: uses `classifyPath` to identify changed
+ * files that match a PATH_RULES entry with non-empty
+ * `testSiblingPatterns`, then scans the SAME diff for a sibling test
+ * change matching any of those patterns. Emits findings under ONE rule
+ * type:
+ *   - `test-gap.<rule.id>` (high, confidence: medium): a changed file
+ *     matches a path rule with non-empty testSiblingPatterns AND no
+ *     OTHER path in the same diff matches any of those patterns. The
+ *     per-rule id mirrors path-classifier-check.ts so D40 dedup
+ *     correctly preserves multiple distinct findings when a single
+ *     file matches multiple path rules each with their own
+ *     testSiblingPatterns. Confidence is "medium" because the search
+ *     is diff-scoped — a pre-existing test file in the repo that
+ *     wasn't changed in the diff does NOT count as coverage.
+ * Locked invariants (see ./detectors/test-gap.ts header for full
+ * rationale):
+ *   - Sibling search excludes the file under inspection itself
+ *     (`j === i` skip): a file cannot satisfy its own test-gap by
+ *     coincidentally matching its own testSiblingPattern.
+ *   - "Sibling test change" includes ANY status (add/modify/delete/
+ *     rename/type-changed): a paired test deletion suppresses a
+ *     paired source deletion's finding, etc. The recommendation
+ *     wording says "Add or update" and "paired test changes" to
+ *     match this semantics.
+ *   - Per-run matcher cache keyed by rule.id: testSiblingPatterns
+ *     compile to a picomatch matcher exactly ONCE per run()
+ *     invocation, reused across every changed file in the diff.
+ *
  * Important: `riskTagsByPath` is populated by the engine's direct call
  * to the classifier, not as a side effect of
  * `pathClassifierCheck.run()`. Likewise, content detectors do not
@@ -141,7 +174,7 @@ import type { Check, ChecksToggleConfig } from "./types.js";
  * future composition room.
  *
  * Subsequent steps append to this array in order:
- *   - Step 7: test-gap + scope-expansion detectors
+ *   - Step 7b: scope-expansion detector
  *
  * Order matters per the architectural intent (path-classifier first);
  * the engine preserves array order when invoking `check.run(ctx)`.
@@ -151,6 +184,7 @@ export const BUILTIN_CHECKS: readonly Check[] = [
   secretsCheck,
   dependenciesCheck,
   migrationsCheck,
+  testGapCheck,
 ];
 
 /**
