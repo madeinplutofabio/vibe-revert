@@ -715,9 +715,7 @@ describe("secretsCheck — line suppression (channel B: DOWNGRADE to low)", () =
   });
 
   it("POSITIVE CONTROL: same secret, line without marker → finding at level 'critical'", () => {
-    const file = pathOnly("src/config.ts", [
-      { line: 1, text: `const X = "${STRIPE_FIXTURE}";` },
-    ]);
+    const file = pathOnly("src/config.ts", [{ line: 1, text: `const X = "${STRIPE_FIXTURE}";` }]);
     const result = runChecks([secretsCheck], ctxFor([file]));
     expect(result.results).toHaveLength(1);
     expect(result.results[0]?.level).toBe("critical");
