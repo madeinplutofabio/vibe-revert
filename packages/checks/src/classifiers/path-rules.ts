@@ -13,13 +13,27 @@
 // `laravel.env` rule's exclude of `.env.example` so the secrets-related
 // rule does not double-fire alongside D33 detector suppression).
 //
-// Rule organization (4 tiers):
+// Rule organization (7 tiers):
 //   - Laravel — framework: "laravel" (PHP MVC framework)
 //   - Next.js / Node — framework: "nextjs" (React-based fullstack)
 //   - Rails — framework: "rails" (Ruby on Rails)
+//   - Django — framework: "django" (Python web framework; migration paths
+//     only — broader Django rules are reserved for a future milestone)
+//   - Sequelize — framework: "sequelize" (Node.js ORM; migration paths
+//     only)
+//   - TypeORM — framework: "typeorm" (TypeScript ORM; migration paths
+//     only, including the singular `src/migration/` convention)
 //   - Generic — no framework field; evaluated regardless of detected
 //     frameworks (covers Dockerfile, CI/CD config, IaC, lockfiles,
 //     manifest files, hosting provider config).
+//
+// NOTE: framework auto-detection in @viberevert/core's
+// `framework-detect.ts` does NOT yet recognize `django`, `sequelize`,
+// or `typeorm`. The path rules below are correct at the data layer;
+// in production today these rules only apply when callers explicitly
+// pass the framework name in `ctx.detectedFrameworks` (e.g., via
+// `.viberevert.yml`'s `frameworks: [...]` list). Auto-detection
+// extension is a future-milestone task tracked separately.
 //
 // Locked design points (per D32):
 //   - Patterns are POSIX globs with forward slashes only. The matcher
@@ -52,8 +66,8 @@
 //     explicit root + nested alternatives. GitHub Actions is intentionally
 //     repo-root only (`.github/workflows/**`) because GitHub does not
 //     execute nested `.github/workflows` directories.
-//   - Framework rules (Laravel, Next.js, Rails) AND generic rules with
-//     nested-applicable conventions handle monorepo layouts on day one
+//   - Framework rules AND generic rules with nested-applicable
+//     conventions handle monorepo layouts on day one
 //     (`apps/api/app/Http/Controllers/...`,
 //     `apps/web/next.config.ts`, `packages/api/package.json`,
 //     `services/worker/Dockerfile`, etc.). The verbosity cost of
@@ -95,8 +109,8 @@ import type { RiskLevel } from "@viberevert/session-format";
  * case-SENSITIVELY by picomatch with the locked options
  * `{ dot: true, nocase: false, posixSlashes: true, nonegate: true }` — see
  * `./match.ts`. All paths passed to picomatch are normalized to
- * repo-relative POSIX BEFORE matching by `normalizeClassifierPath` in
- * `./match.ts` (the load-bearing cross-platform guarantee);
+ * repo-relative POSIX BEFORE matching by `normalizePathSeparators` from
+ * `../path-normalization.ts` (the load-bearing cross-platform guarantee);
  * `posixSlashes: true` is a defense-in-depth secondary guard.
  *
  * `category`: the M C risk-category label this rule contributes to. MUST
@@ -143,7 +157,7 @@ export interface PathRule {
 }
 
 /**
- * The classifier rule table. 24 rules across 4 tiers. Every rule whose
+ * The classifier rule table. 27 rules across 7 tiers. Every rule whose
  * target can be operational inside a nested app/package root uses
  * explicit root + nested alternatives. Repo-root-only platform
  * conventions, such as GitHub Actions workflows, stay root-scoped.
@@ -184,6 +198,14 @@ export interface PathRule {
  * The "rails.controllers" rule uses category "auth" because controllers
  * are the auth boundary in Rails MVC; this is intentional even though
  * the rule's id contains "controllers" (a different naming axis).
+ *
+ * The Django/Sequelize/TypeORM migration rules (3 entries between Rails
+ * and Generic) intentionally OMIT `testSiblingPatterns` — migrations are
+ * not unit-tested the way controllers are, and test-gap firing on every
+ * migration would be noise. This matches the `laravel.migrations`
+ * precedent (which also has no testSiblingPatterns). The Rails
+ * `rails.migrations` rule's testSiblingPatterns is an outlier that
+ * predates this convention; out of Step 6 scope to revisit.
  */
 export const PATH_RULES: readonly PathRule[] = [
   // ==================== Laravel (7 rules) ====================
@@ -412,6 +434,73 @@ export const PATH_RULES: readonly PathRule[] = [
       "**/spec/controllers/**",
       "**/test/controllers/**",
     ],
+  },
+
+  // ==================== Django — migrations (1 rule) ====================
+  {
+    // Django migrations follow the strict `<app>/migrations/*.py`
+    // convention. The `**/migrations/*.py` form covers the typical
+    // per-app layout (`accounts/migrations/0001_initial.py`,
+    // `billing/migrations/0002_add_field.py`, etc.) AND monorepo
+    // nesting (`services/api/accounts/migrations/0001_initial.py`).
+    // The root-level `migrations/*.py` form is unusual for Django
+    // but included for single-app projects and consistency with the
+    // `{X, **/X}` alternation discipline.
+    //
+    // NO testSiblingPatterns — migrations are not unit-tested in the
+    // same way as views/serializers. Matches the `laravel.migrations`
+    // precedent.
+    id: "django.migrations",
+    pattern: "{migrations/*.py,**/migrations/*.py}",
+    category: "database",
+    framework: "django",
+    tags: ["database", "migration"],
+    defaultLevel: "high",
+  },
+
+  // ==================== Sequelize — migrations (1 rule) ====================
+  {
+    // Sequelize CLI's default migration directory is `migrations/` at
+    // project root or `src/migrations/` for TypeScript projects. Some
+    // teams use `db/migrations/`. File extensions cover both JS
+    // (`.js`, `.mjs`, `.cjs`) and TS (`.ts`). 6 alternatives total:
+    // 3 directory conventions × root + nested monorepo variants.
+    //
+    // NO testSiblingPatterns — same rationale as Django/Laravel
+    // migrations.
+    id: "sequelize.migrations",
+    pattern:
+      "{migrations/*.{js,ts,mjs,cjs},src/migrations/*.{js,ts,mjs,cjs},db/migrations/*.{js,ts,mjs,cjs},**/migrations/*.{js,ts,mjs,cjs},**/src/migrations/*.{js,ts,mjs,cjs},**/db/migrations/*.{js,ts,mjs,cjs}}",
+    category: "database",
+    framework: "sequelize",
+    tags: ["database", "migration"],
+    defaultLevel: "high",
+  },
+
+  // ==================== TypeORM — migrations (1 rule) ====================
+  {
+    // TypeORM accepts the Sequelize set of conventions AND also uses
+    // the singular `src/migration/` directory (note: "migration" not
+    // "migrations" — TypeORM-specific). 8 alternatives total:
+    // 4 directory conventions × root + nested monorepo variants.
+    //
+    // Pattern OVERLAPS with `sequelize.migrations` on the shared
+    // conventions; that's intentional. When both frameworks are
+    // detected, both rules match the shared paths and emit
+    // distinct path-classifier findings (different `id` =
+    // distinct D40 dedup tuples). The migration detector itself
+    // only needs ONE database-category match to trigger, so the
+    // overlap doesn't double-fire danger-term findings.
+    //
+    // NO testSiblingPatterns — same rationale as Sequelize/Django/
+    // Laravel migrations.
+    id: "typeorm.migrations",
+    pattern:
+      "{migrations/*.{js,ts,mjs,cjs},src/migrations/*.{js,ts,mjs,cjs},src/migration/*.{js,ts,mjs,cjs},db/migrations/*.{js,ts,mjs,cjs},**/migrations/*.{js,ts,mjs,cjs},**/src/migrations/*.{js,ts,mjs,cjs},**/src/migration/*.{js,ts,mjs,cjs},**/db/migrations/*.{js,ts,mjs,cjs}}",
+    category: "database",
+    framework: "typeorm",
+    tags: ["database", "migration"],
+    defaultLevel: "high",
   },
 
   // ==================== Generic / always-on (10 rules) ====================

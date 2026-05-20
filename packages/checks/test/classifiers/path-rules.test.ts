@@ -6,7 +6,7 @@
 // Two-layer testing strategy per the locked test design (Step 3, file 4):
 //
 //   1. PER-RULE POSITIVE COVERAGE: a deterministic table of
-//      (ruleId, path, frameworks) tuples asserts that each of the 24
+//      (ruleId, path, frameworks) tuples asserts that each of the 27
 //      PATH_RULES entries classifies at least one representative path
 //      AS THAT RULE. Assertions target `rule.id` (not category or
 //      tags) because the `path-classifier.<rule.id>` finding id is a
@@ -32,16 +32,20 @@
 //      the deliberately-expanded alternation branches in PATH_RULES.
 //      Coverage discipline differs by rule tier:
 //
-//      - FRAMEWORK rules (laravel.*, next.*, rails.*): EVERY
-//        alternative in each rule's picomatch pattern has at least
-//        one EXACT-match test exercising it. The Laravel controller
-//        rules each have all 4 alternatives covered (root subdir, root
-//        flat-file, nested subdir, nested flat-file). The Next.js
+//      - FRAMEWORK rules (laravel.*, next.*, rails.*, django.*,
+//        sequelize.*, typeorm.*): EVERY alternative in each rule's
+//        picomatch pattern has at least one EXACT-match test
+//        exercising it. The Laravel controller rules each have all 4
+//        alternatives covered (root subdir, root flat-file, nested
+//        subdir, nested flat-file). The Next.js
 //        `next.payment-route-dirs` rule has all 8 alternatives covered
 //        (the cross product of root/nested location × direct/nested
 //        keyword segment × direct/nested route segment).
 //        `next.middleware` has all 4 alternatives covered (root/nested
-//        × middleware/src-middleware).
+//        × middleware/src-middleware). The migration rules added in
+//        Step 6 (django.migrations 2 alts, sequelize.migrations 6
+//        alts, typeorm.migrations 8 alts) follow the same FULL
+//        coverage rule.
 //
 //      - GENERIC rules:
 //          FULL coverage for: dockerfile (4 alts), gh-actions (1 alt
@@ -129,7 +133,17 @@ const NO_FRAMEWORKS: readonly string[] = [];
 const LARAVEL: readonly string[] = ["laravel"];
 const NEXTJS: readonly string[] = ["nextjs"];
 const RAILS: readonly string[] = ["rails"];
-const ALL_FRAMEWORKS: readonly string[] = ["laravel", "nextjs", "rails"];
+const DJANGO: readonly string[] = ["django"];
+const SEQUELIZE: readonly string[] = ["sequelize"];
+const TYPEORM: readonly string[] = ["typeorm"];
+const ALL_FRAMEWORKS: readonly string[] = [
+  "laravel",
+  "nextjs",
+  "rails",
+  "django",
+  "sequelize",
+  "typeorm",
+];
 
 /**
  * Convenience: returns the SORTED list of rule ids that match the
@@ -143,7 +157,7 @@ function matchedIds(path: string, frameworks: readonly string[]): readonly strin
 }
 
 // =============================================================================
-// PER-RULE POSITIVE COVERAGE (24 rules — one entry per rule id)
+// PER-RULE POSITIVE COVERAGE (27 rules — one entry per rule id)
 // =============================================================================
 
 interface PerRulePositive {
@@ -209,6 +223,37 @@ const PER_RULE_POSITIVES: readonly PerRulePositive[] = [
     frameworks: RAILS,
   },
 
+  // ---- Django (1 rule) ----
+  // ALT 1 root `migrations/*.py`. Unusual for Django (typical layout is
+  // `<app>/migrations/...` nested), but per the convention PER_RULE_POSITIVES
+  // exercises the first alternative; nested variants are covered in
+  // MONOREPO_EXACT_POSITIVES.
+  {
+    ruleId: "django.migrations",
+    path: "migrations/0001_initial.py",
+    frameworks: DJANGO,
+  },
+
+  // ---- Sequelize (1 rule) ----
+  // ALT 1 root `migrations/*.{js,ts,mjs,cjs}`. Same shared path shape as
+  // typeorm.migrations ALT 1, but framework=[sequelize] gates this so
+  // only sequelize.migrations fires here.
+  {
+    ruleId: "sequelize.migrations",
+    path: "migrations/2026-01-01-create-users.js",
+    frameworks: SEQUELIZE,
+  },
+
+  // ---- TypeORM (1 rule) ----
+  // ALT 1 root `migrations/*.{js,ts,mjs,cjs}`. Same shared path shape as
+  // sequelize.migrations ALT 1, but framework=[typeorm] gates this so
+  // only typeorm.migrations fires here.
+  {
+    ruleId: "typeorm.migrations",
+    path: "migrations/1700000000000-CreateUsers.ts",
+    frameworks: TYPEORM,
+  },
+
   // ---- Generic / always-on (10 rules) ----
   { ruleId: "generic.dockerfile", path: "Dockerfile", frameworks: NO_FRAMEWORKS },
   { ruleId: "generic.compose", path: "docker-compose.yml", frameworks: NO_FRAMEWORKS },
@@ -226,7 +271,7 @@ const PER_RULE_POSITIVES: readonly PerRulePositive[] = [
   { ruleId: "generic.fly", path: "fly.toml", frameworks: NO_FRAMEWORKS },
 ];
 
-describe("PATH_RULES — per-rule positive coverage (24 rules)", () => {
+describe("PATH_RULES — per-rule positive coverage (27 rules)", () => {
   it.each(PER_RULE_POSITIVES)("'$ruleId' matches '$path' under frameworks=$frameworks", ({
     ruleId,
     path,
@@ -477,6 +522,108 @@ const MONOREPO_EXACT_POSITIVES: readonly ExactMatchCase[] = [
     path: "apps/rails/app/controllers/users_controller.rb",
     frameworks: RAILS,
     expectedIds: ["rails.controllers"],
+  },
+
+  // ---------------------------------------------------------------------------
+  // Django — full 2-alt coverage. ALT 1 is in PER_RULE_POSITIVES.
+  // ---------------------------------------------------------------------------
+
+  // django.migrations — ALT 2 nested (`**/migrations/*.py`). Typical
+  // Django per-app layout: `<app>/migrations/<sequence>_<name>.py`.
+  {
+    path: "accounts/migrations/0001_initial.py",
+    frameworks: DJANGO,
+    expectedIds: ["django.migrations"],
+  },
+
+  // ---------------------------------------------------------------------------
+  // Sequelize — full 6-alt coverage. ALT 1 is in PER_RULE_POSITIVES.
+  // Tests use frameworks=[sequelize] only to isolate from typeorm.
+  // ---------------------------------------------------------------------------
+
+  // sequelize.migrations — ALT 2 root `src/migrations/*.{js,ts,mjs,cjs}`
+  // (TypeScript Sequelize project convention).
+  {
+    path: "src/migrations/2026-01-01-create-users.ts",
+    frameworks: SEQUELIZE,
+    expectedIds: ["sequelize.migrations"],
+  },
+  // sequelize.migrations — ALT 3 root `db/migrations/*.{js,ts,mjs,cjs}`
+  // (alt directory convention).
+  {
+    path: "db/migrations/2026-01-01-create-users.js",
+    frameworks: SEQUELIZE,
+    expectedIds: ["sequelize.migrations"],
+  },
+  // sequelize.migrations — ALT 4 nested `**/migrations/*.{js,ts,mjs,cjs}`.
+  {
+    path: "apps/api/migrations/2026-01-01-create-users.ts",
+    frameworks: SEQUELIZE,
+    expectedIds: ["sequelize.migrations"],
+  },
+  // sequelize.migrations — ALT 5 nested `**/src/migrations/*.{js,ts,mjs,cjs}`.
+  {
+    path: "apps/api/src/migrations/2026-01-01-create-users.ts",
+    frameworks: SEQUELIZE,
+    expectedIds: ["sequelize.migrations"],
+  },
+  // sequelize.migrations — ALT 6 nested `**/db/migrations/*.{js,ts,mjs,cjs}`.
+  {
+    path: "apps/api/db/migrations/2026-01-01-create-users.js",
+    frameworks: SEQUELIZE,
+    expectedIds: ["sequelize.migrations"],
+  },
+
+  // ---------------------------------------------------------------------------
+  // TypeORM — full 8-alt coverage. ALT 1 is in PER_RULE_POSITIVES.
+  // Tests use frameworks=[typeorm] only to isolate from sequelize.
+  // ---------------------------------------------------------------------------
+
+  // typeorm.migrations — ALT 2 root `src/migrations/*.{js,ts,mjs,cjs}`
+  // (shared with Sequelize convention).
+  {
+    path: "src/migrations/1700000000000-CreateUsers.ts",
+    frameworks: TYPEORM,
+    expectedIds: ["typeorm.migrations"],
+  },
+  // typeorm.migrations — ALT 3 root `src/migration/*.{js,ts,mjs,cjs}`
+  // (TypeORM-UNIQUE singular `migration` directory; NOT shared with
+  // Sequelize).
+  {
+    path: "src/migration/1700000000000-CreateUsers.ts",
+    frameworks: TYPEORM,
+    expectedIds: ["typeorm.migrations"],
+  },
+  // typeorm.migrations — ALT 4 root `db/migrations/*.{js,ts,mjs,cjs}`.
+  {
+    path: "db/migrations/1700000000000-CreateUsers.ts",
+    frameworks: TYPEORM,
+    expectedIds: ["typeorm.migrations"],
+  },
+  // typeorm.migrations — ALT 5 nested `**/migrations/*.{js,ts,mjs,cjs}`.
+  {
+    path: "apps/api/migrations/1700000000000-CreateUsers.ts",
+    frameworks: TYPEORM,
+    expectedIds: ["typeorm.migrations"],
+  },
+  // typeorm.migrations — ALT 6 nested `**/src/migrations/*.{js,ts,mjs,cjs}`.
+  {
+    path: "apps/api/src/migrations/1700000000000-CreateUsers.ts",
+    frameworks: TYPEORM,
+    expectedIds: ["typeorm.migrations"],
+  },
+  // typeorm.migrations — ALT 7 nested `**/src/migration/*.{js,ts,mjs,cjs}`
+  // (TypeORM-UNIQUE singular nested variant).
+  {
+    path: "apps/api/src/migration/1700000000000-CreateUsers.ts",
+    frameworks: TYPEORM,
+    expectedIds: ["typeorm.migrations"],
+  },
+  // typeorm.migrations — ALT 8 nested `**/db/migrations/*.{js,ts,mjs,cjs}`.
+  {
+    path: "apps/api/db/migrations/1700000000000-CreateUsers.ts",
+    frameworks: TYPEORM,
+    expectedIds: ["typeorm.migrations"],
   },
 
   // ---------------------------------------------------------------------------
@@ -737,6 +884,30 @@ describe("PATH_RULES — framework gating (negative)", () => {
     expect(matchedIds("app/controllers/users_controller.rb", NEXTJS)).toEqual([]);
   });
 
+  it("Django rules do NOT match when 'django' is absent from detected frameworks", () => {
+    expect(matchedIds("migrations/0001_initial.py", LARAVEL)).toEqual([]);
+    expect(matchedIds("migrations/0001_initial.py", NEXTJS)).toEqual([]);
+    expect(matchedIds("accounts/migrations/0001_initial.py", LARAVEL)).toEqual([]);
+    expect(matchedIds("accounts/migrations/0001_initial.py", RAILS)).toEqual([]);
+  });
+
+  it("Sequelize rules do NOT match when 'sequelize' is absent from detected frameworks", () => {
+    expect(matchedIds("migrations/2026-01-01-create-users.js", LARAVEL)).toEqual([]);
+    expect(matchedIds("migrations/2026-01-01-create-users.js", NEXTJS)).toEqual([]);
+    expect(matchedIds("src/migrations/2026-01-01-create-users.ts", LARAVEL)).toEqual([]);
+    expect(matchedIds("apps/api/db/migrations/2026-01-01-create-users.js", RAILS)).toEqual([]);
+  });
+
+  it("TypeORM rules do NOT match when 'typeorm' is absent from detected frameworks", () => {
+    expect(matchedIds("migrations/1700000000000-CreateUsers.ts", LARAVEL)).toEqual([]);
+    expect(matchedIds("migrations/1700000000000-CreateUsers.ts", NEXTJS)).toEqual([]);
+    // TypeORM-UNIQUE `src/migration/` singular path under [sequelize] —
+    // sequelize.migrations does NOT include the singular convention, so
+    // even with sequelize detected, typeorm-singular paths produce empty.
+    expect(matchedIds("src/migration/1700000000000-CreateUsers.ts", SEQUELIZE)).toEqual([]);
+    expect(matchedIds("src/migration/1700000000000-CreateUsers.ts", LARAVEL)).toEqual([]);
+  });
+
   it("Generic rules ALWAYS match regardless of detectedFrameworks (positive control)", () => {
     // Sanity check: the framework-gating tests above are isolating
     // framework-rule behavior, NOT accidentally rejecting generic
@@ -746,6 +917,9 @@ describe("PATH_RULES — framework gating (negative)", () => {
     expect(matchedIds("Dockerfile", LARAVEL)).toContain("generic.dockerfile");
     expect(matchedIds("Dockerfile", NEXTJS)).toContain("generic.dockerfile");
     expect(matchedIds("Dockerfile", RAILS)).toContain("generic.dockerfile");
+    expect(matchedIds("Dockerfile", DJANGO)).toContain("generic.dockerfile");
+    expect(matchedIds("Dockerfile", SEQUELIZE)).toContain("generic.dockerfile");
+    expect(matchedIds("Dockerfile", TYPEORM)).toContain("generic.dockerfile");
     expect(matchedIds("Dockerfile", ALL_FRAMEWORKS)).toContain("generic.dockerfile");
   });
 });
@@ -940,5 +1114,18 @@ describe("PATH_RULES — multi-rule matcher behavior", () => {
     // Locks that BOTH rules' exclude patterns suppress the match
     // independently when the path matches multiple rules' includes.
     expect(matchedIds(".env.example", ["laravel", "nextjs"])).toEqual([]);
+  });
+
+  it("'migrations/foo.ts' with frameworks=[sequelize, typeorm] matches BOTH sequelize.migrations AND typeorm.migrations", () => {
+    // Sequelize and TypeORM share the `migrations/*.{js,ts,mjs,cjs}`
+    // pattern on ALT 1. When both frameworks are detected, both rules
+    // fire on the same path — the matcher MUST return both ids.
+    // Step 6's migrationsCheck only needs ONE database-category match
+    // to trigger, so the overlap doesn't double-fire danger-term
+    // findings; this test locks the matcher-level precondition.
+    expect(matchedIds("migrations/foo.ts", ["sequelize", "typeorm"])).toEqual([
+      "sequelize.migrations",
+      "typeorm.migrations",
+    ]);
   });
 });

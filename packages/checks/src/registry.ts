@@ -57,6 +57,7 @@
 
 import { pathClassifierCheck } from "./classifiers/path-classifier-check.js";
 import { dependenciesCheck } from "./detectors/dependencies.js";
+import { migrationsCheck } from "./detectors/migrations.js";
 import { secretsCheck } from "./detectors/secrets.js";
 import type { Check, ChecksToggleConfig } from "./types.js";
 
@@ -104,6 +105,34 @@ import type { Check, ChecksToggleConfig } from "./types.js";
  * for the full architecture including section-tracking deferral,
  * MANIFEST_NON_DEP_KEYS denylist, and module-load invariant.
  *
+ * Step 6 has landed: `migrationsCheck` at index 3. Toggleable via
+ * `checks.migrations` in `.viberevert.yml` (which maps to category
+ * "database" per CHECKS_TOGGLE_MAP — the toggle key and the emitted
+ * category differ by design). Scope is database-category files only,
+ * determined by an internal `classifyPath` call (Laravel's
+ * `database/migrations/**`, Rails's `db/migrate/**`, etc., gated by
+ * `ctx.detectedFrameworks`). Emits findings under TWO rule types:
+ *   - `migration.danger-term.<term.id>` (high, confidence: medium):
+ *     an added line matches one of the locked danger terms (SQL
+ *     keywords, SQL idiom regex patterns, or framework function/
+ *     method/command names — see ./detectors/migrations-danger-terms.ts
+ *     for the full 41-term list and the per-term file-extension
+ *     scoping that prevents cross-ecosystem double-fires like
+ *     `dropTable` matching as both Laravel AND Sequelize).
+ *   - `migration.missing-down` (high, confidence: high): a NEW
+ *     migration file (status: "added") contains a danger term and
+ *     no `down()` method definition. ONE finding per file. Gated by
+ *     a 5-condition all-of check (positive-extension gate
+ *     MISSING_DOWN_FILE_EXTENSIONS + defense-in-depth exclusion
+ *     MISSING_DOWN_EXCLUDED_FILE_PATTERNS to suppress on Django
+ *     migrations + status check + matched-term check + no-down-method
+ *     check). DOWN_METHOD_PATTERNS are LINE-ANCHORED to prevent
+ *     comments from false-canceling missing-down.
+ * Confidence is "medium" on danger-term findings (line-grep with
+ * documented FP risk) and "high" on missing-down (structural
+ * multi-condition check). See `./detectors/migrations.ts` +
+ * `./detectors/migrations-danger-terms.ts` for full architecture.
+ *
  * Important: `riskTagsByPath` is populated by the engine's direct call
  * to the classifier, not as a side effect of
  * `pathClassifierCheck.run()`. Likewise, content detectors do not
@@ -112,7 +141,6 @@ import type { Check, ChecksToggleConfig } from "./types.js";
  * future composition room.
  *
  * Subsequent steps append to this array in order:
- *   - Step 6: migration content detector
  *   - Step 7: test-gap + scope-expansion detectors
  *
  * Order matters per the architectural intent (path-classifier first);
@@ -122,6 +150,7 @@ export const BUILTIN_CHECKS: readonly Check[] = [
   pathClassifierCheck,
   secretsCheck,
   dependenciesCheck,
+  migrationsCheck,
 ];
 
 /**
