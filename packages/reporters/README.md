@@ -2,7 +2,7 @@
 
 > Terminal, JSON, and Markdown report renderers.
 
-Renders a `SessionReport` into the format a user or downstream tool expects.
+Renders a `ReportFile` (the on-disk wrapper around `SessionReport`) into terminal, JSON, or Markdown output for human review or downstream tools.
 
 Part of [VibeRevert](https://github.com/madeinplutofabio/vibe-revert) — the safety belt for vibe coding.
 

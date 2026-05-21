@@ -91,7 +91,11 @@ importers:
 
   packages/policies-basic: {}
 
-  packages/reporters: {}
+  packages/reporters:
+    dependencies:
+      '@viberevert/session-format':
+        specifier: workspace:*
+        version: link:../session-format
 
   packages/session-format:
     dependencies:
