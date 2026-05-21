@@ -521,6 +521,55 @@ export async function listCheckpoints(repoRoot: string): Promise<readonly Checkp
 }
 
 // =============================================================================
+// findCheckpointByName
+// =============================================================================
+
+/**
+ * Find the absolute checkpoint dir whose manifest carries `name === <literal>`,
+ * scanning `<repoRoot>/.viberevert/checkpoints/` (D5b name-scan + D56 name
+ * resolution for `viberevert check --since <name>`). Reuses `listCheckpoints`
+ * so all the same safety guards apply:
+ *   - `.tmp-*` and non-`cp_<ULID>` entries skipped at iteration time (D13).
+ *   - symlinked containers silently skipped (lstat + isDirectory).
+ *   - D6 standalone invariant enforced (manifest.session_id === dir id).
+ *
+ * Returns:
+ *   - the absolute checkpoint dir path on a unique match;
+ *   - `null` when zero checkpoints carry that name (NOT an error — the CLI
+ *     surfaces the "not found AND not a valid git ref" message per D56).
+ *
+ * Throws:
+ *   - any error from `listCheckpoints` (corrupt manifest, schema failure,
+ *     standalone-invariant violation) propagates verbatim.
+ *   - plain `Error` if two or more checkpoints share the same name — a D5b
+ *     invariant violation. The CLI is supposed to enforce name uniqueness
+ *     BEFORE checkpoint creation; encountering duplicates at scan time means
+ *     state has drifted (manual filesystem edits, restored backups, etc.).
+ *     Fail loudly with both colliding ids so the user can resolve it.
+ *     `CheckpointCorruptError` is deliberately NOT used here: it scopes
+ *     blame to a single dir, and a duplicate-name issue spans two.
+ */
+export async function findCheckpointByName(repoRoot: string, name: string): Promise<string | null> {
+  const all = await listCheckpoints(repoRoot);
+  const matches = all.filter((s) => s.name === name);
+  if (matches.length === 0) return null;
+  if (matches.length > 1) {
+    const ids = matches.map((m) => m.id).join(", ");
+    throw new Error(
+      `findCheckpointByName: name '${name}' matches multiple checkpoints (ids: ${ids}). ` +
+        `Names should be unique per D5b; resolve the duplicate before retrying.`,
+    );
+  }
+  const onlyMatch = matches[0];
+  if (onlyMatch === undefined) {
+    // Unreachable: matches.length === 1 means [0] is defined. Defensive
+    // narrowing for TS's noUncheckedIndexedAccess.
+    return null;
+  }
+  return join(repoRoot, onlyMatch.path);
+}
+
+// =============================================================================
 // Internal helpers
 // =============================================================================
 

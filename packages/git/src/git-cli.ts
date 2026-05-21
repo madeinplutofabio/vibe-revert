@@ -32,14 +32,20 @@
 //
 // Public surface vs. internal:
 //   - Public: probeGitVersion, getHeadSha, getBranch, getStatusPorcelainText,
-//     getStatusPorcelainZ, plus the StatusEntry type.
+//     getStatusPorcelainZ, getCommitTimestamp, plus the StatusEntry type.
 //   - Internal (re-exported only within this package): gitDiffUnstaged,
 //     gitDiffStaged, gitListUntracked, gitListTrackedDirty, gitApply,
-//     gitApplyWithIndex, gitResetHardHead.
-//   The barrel (./index.ts) re-exports only the public set.
+//     gitApplyWithIndex, gitResetHardHead, runGit, runGitText, splitNulList.
+//   The barrel (./index.ts) re-exports only the public set. The runGit /
+//   runGitText / splitNulList primitives are exposed package-internally
+//   (M C addition) so the diff.ts D56 algorithm can issue varied git
+//   subprocesses without proliferating one-off named helpers here; M B's
+//   named-helper pattern (gitDiffUnstaged, etc.) remains the convention
+//   for the previously-shipped narrow use cases.
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { toIsoSecondString } from "@viberevert/session-format";
 import { GitNotAvailableError } from "./errors.js";
 
 const execFileAsync = promisify(execFile);
@@ -129,23 +135,40 @@ function detail(err: unknown): string {
 /**
  * Run `git <args...>` in `repoRoot`. Returns stdout as Buffer (binary-safe).
  *
+ * **Package-internal helper** — exported only for use by other modules
+ * inside `@viberevert/git` (notably `diff.ts` and future package-internal
+ * helpers that need custom git argv shapes). NOT re-exported from
+ * `./index.ts`; the package's public surface is the specific named
+ * helpers below (gitDiffUnstaged, gitListUntracked, etc.) which build on
+ * this primitive.
+ *
  * `--no-pager` is always prepended. Calls `assertGitAvailable()` first, so
  * the very first git call in the process performs a one-time `git --version`
  * probe; subsequent calls hit the cache.
  *
  * On ENOENT (git binary missing/unusable), throws `GitNotAvailableError`.
- * On non-zero git exits, propagates the original error from execFileAsync —
- * higher layers decide whether to wrap it in a typed error.
+ * **ENOENT always throws, regardless of `allowedExitCodes`** — "git binary
+ * missing" is a different class of failure than "git exited nonzero with
+ * meaningful stdout".
+ *
+ * On non-zero git exit:
+ *   - If `opts.allowedExitCodes` is set AND includes the exit code, returns
+ *     the stdout that git produced. This is specifically needed for
+ *     `git diff --no-index`, which exits `1` when differences exist (NOT a
+ *     fatal error for diff comparison use cases). Other git commands have
+ *     similar "useful nonzero" semantics; opt in per-call.
+ *   - Otherwise, propagates the original error from `execFileAsync` —
+ *     higher layers decide whether to wrap it in a typed error.
  *
  * The `as { stdout: Buffer; stderr: Buffer }` cast on the result reflects
  * Node's documented behavior for `encoding: "buffer"` (stdout/stderr are
  * Buffers). The cast is necessary because `promisify(execFile)` loses the
  * conditional return-type overloads that the synchronous API surfaces.
  */
-async function runGit(
+export async function runGit(
   repoRoot: string,
   args: readonly string[],
-  opts: { maxBuffer?: number } = {},
+  opts: { maxBuffer?: number; allowedExitCodes?: readonly number[] } = {},
 ): Promise<Buffer> {
   await assertGitAvailable();
   try {
@@ -161,15 +184,30 @@ async function runGit(
     if ((err as NodeJS.ErrnoException).code === "ENOENT") {
       throw new GitNotAvailableError(detail(err), err);
     }
+    // Per-call allowance for nonzero exits where stdout is still meaningful
+    // (e.g., `git diff --no-index` exits 1 when differences exist — not a
+    // fatal error for diff comparison use cases). Callers opt in via the
+    // allowedExitCodes option. ENOENT (handled above) ALWAYS throws
+    // GitNotAvailableError regardless of allowedExitCodes; "git binary
+    // missing" is a different class of failure than "git exited nonzero
+    // with meaningful stdout".
+    const exitCode = (err as { code?: number }).code;
+    if (typeof exitCode === "number" && opts.allowedExitCodes?.includes(exitCode)) {
+      return (err as { stdout?: Buffer }).stdout ?? Buffer.alloc(0);
+    }
     throw err;
   }
 }
 
-/** Run git and return stdout as utf8-decoded string. */
-async function runGitText(
+/**
+ * Run git and return stdout as utf8-decoded string. Same package-internal
+ * status, `allowedExitCodes` semantics, and ENOENT-always-throws behavior
+ * as `runGit` (forwards opts unchanged).
+ */
+export async function runGitText(
   repoRoot: string,
   args: readonly string[],
-  opts: { maxBuffer?: number } = {},
+  opts: { maxBuffer?: number; allowedExitCodes?: readonly number[] } = {},
 ): Promise<string> {
   const buf = await runGit(repoRoot, args, opts);
   return buf.toString("utf8");
@@ -385,6 +423,48 @@ export async function getStatusPorcelainZ(repoRoot: string): Promise<readonly St
   return out;
 }
 
+/**
+ * Returns the committer timestamp of `sha` as an ISO 8601 second-precision
+ * string with `Z` offset (e.g., `2026-05-04T10:30:11Z`). Used by
+ * `buildReportFile` to populate `report.started_at` for ad-hoc git-ref
+ * reports per D56.
+ *
+ * Implementation: `git show -s --format=%cI <sha>^{commit}` emits strict
+ * ISO 8601 (committer date — `%cI` = ISO 8601). The output is normalized
+ * through `toIsoSecondString` to strip any sub-second component,
+ * guaranteeing schema validity even if a future git release adds
+ * fractional seconds to `%cI` output.
+ *
+ * Commit-peel defense: the `^{commit}` suffix forces git to resolve `sha`
+ * to a commit object. For a raw commit SHA the peel is a no-op; for an
+ * annotated tag SHA it resolves to the tagged commit; for a tree/blob SHA
+ * (or any non-commit-ish) git errors at the peel rather than producing
+ * nonsense `--format=%cI` output. Mirrors `diff.ts`'s `resolveRef`.
+ *
+ * Option-injection defense: `--end-of-options` terminates option parsing
+ * before the peeled argument, so a SHA-like literal starting with `-`
+ * cannot be interpreted as a git option flag.
+ *
+ * Errors:
+ *   - throws via `execFile` rejection when `sha` is not a valid commit-ish
+ *     reference (git exits nonzero; the original error propagates with
+ *     stderr in the message);
+ *   - throws `RangeError: Invalid time value` if `git show` produces a
+ *     value that `new Date()` cannot parse (impossible for a well-formed
+ *     git release, but the explicit failure mode is better than silent
+ *     schema-invalid output downstream).
+ */
+export async function getCommitTimestamp(repoRoot: string, sha: string): Promise<string> {
+  const stdout = await runGitText(repoRoot, [
+    "show",
+    "-s",
+    "--format=%cI",
+    "--end-of-options",
+    `${sha}^{commit}`,
+  ]);
+  return toIsoSecondString(new Date(stdout.trim()));
+}
+
 // =============================================================================
 // Internal helpers — used by other modules in this package only. NOT
 // re-exported from ./index.ts. snapshots.ts, checkpoint.ts, and restore.ts
@@ -503,7 +583,16 @@ export function _resetAvailabilityCacheForTests(): void {
 // Helpers
 // -----------------------------------------------------------------------------
 
-function splitNulList(buf: Buffer): readonly string[] {
+/**
+ * Split a NUL-separated Buffer (from `git ls-files -z`, `git status -z`,
+ * etc.) into an array of utf-8-decoded path strings. Drops the empty
+ * trailing token that git's trailing NUL produces.
+ *
+ * **Package-internal helper** — exposed for use by other modules inside
+ * `@viberevert/git` (notably M C's `diff.ts` which needs to split
+ * ls-files output). NOT re-exported from `./index.ts`.
+ */
+export function splitNulList(buf: Buffer): readonly string[] {
   if (buf.length === 0) return [];
   const text = buf.toString("utf8");
   const tokens = text.split("\0");

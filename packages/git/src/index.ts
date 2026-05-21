@@ -12,8 +12,10 @@
 // Public surface
 // =============================================================================
 //
-//   Checkpoint primitives (M B):
+//   Checkpoint primitives (M B + M C):
 //     - createCheckpoint, loadCheckpoint, listCheckpoints
+//     - findCheckpointByName (M C — D56 name resolution for
+//       `viberevert check --since <name>`)
 //     - CheckpointSummary (the listCheckpoints return shape)
 //
 //   Git subprocess wrappers (D17c — this package is the single owner of
@@ -22,6 +24,20 @@
 //     - getHeadSha, getBranch
 //     - getStatusPorcelainText (raw v1 for audit storage, per D8)
 //     - getStatusPorcelainZ + StatusEntry (parsed -z for machine logic, D8)
+//     - getCommitTimestamp (M C — committer date for ad-hoc git-ref
+//       report.started_at per D56)
+//
+//   Diff helpers (M C — D30 + D56). Two distinct entry points (NOT a
+//   single dispatcher); CLI selects per the resolved base kind:
+//     - getDiffSinceRef (git-ref base: HEAD, main, SHA, tag; supports --staged)
+//     - getDiffSinceCheckpoint (checkpoint/session base via worktree +
+//       sanitized mirror dirs, with liveExcludePatterns filtering per D3
+//       symmetry)
+//   Plus structured diff types consumed by @viberevert/checks:
+//     - RawDiff, RawDiffEntry, RawDiffHunk, LineChunk, ChangedFileStatus
+//     - DiffResult (the {diff, cleanupWarnings} return shape per D29 +
+//       D17c — cleanup failures populate warnings, never thrown)
+//     - DiffSinceCheckpointOptions
 //
 //   Error classes (all extend Error and set `this.name` per the package's
 //   error convention):
@@ -31,6 +47,7 @@
 //       RestoreExtractionConflictError, RestoreVerificationError,
 //       RestoreTrackedDirtyParityError (restore-side; M B step 13 +
 //       Step 3e)
+//     - DiffRefNotFoundError, DiffParseError (M C — diff helper failures)
 //   Plus structured-payload type aliases consumed by the error classes:
 //     - RestoreExtractionConflict, RestoreHashMismatch,
 //       RestoreTrackedDirtyParityIssue
@@ -44,12 +61,13 @@
 // =============================================================================
 //
 //   - `restoreCheckpoint` and `RestoreCheckpointOptions` (D7): restore is
-//     an INTERNAL helper used only by M B's fixture tests to prove
-//     round-trip correctness. The user-facing `viberevert rollback` CLI is
-//     M D scope (--dry-run, --force, typed-confirmation, emergency
-//     pre-rollback checkpoint). M B tests reach for restoreCheckpoint via
-//     `../src/restore.js` directly. Do NOT widen this barrel to include
-//     it without M D orchestration in place.
+//     an INTERNAL helper used by M B's fixture tests to prove round-trip
+//     correctness AND by M C's `getDiffSinceCheckpoint` to materialize the
+//     checkpoint base inside a scratch worktree. The user-facing
+//     `viberevert rollback` CLI is M D scope (--dry-run, --force,
+//     typed-confirmation, emergency pre-rollback checkpoint). M B tests
+//     reach for restoreCheckpoint via `../src/restore.js` directly. Do NOT
+//     widen this barrel to include it without M D orchestration in place.
 //
 //   - `writeFileAtomic` from `atomic.ts` (D17c): package-private. Each
 //     package owns its own private atomic-write helpers (intentional
@@ -59,8 +77,9 @@
 //
 //   - Internal git-cli helpers (`gitDiffUnstaged`, `gitDiffStaged`,
 //     `gitListUntracked`, `gitListTrackedDirty`, `gitApply`,
-//     `gitApplyWithIndex`, `gitResetHardHead`): used by `snapshots.ts`,
-//     `checkpoint.ts`, and `restore.ts` only. Higher-level primitives
+//     `gitApplyWithIndex`, `gitResetHardHead`, `runGit`, `runGitText`,
+//     `splitNulList`): used by `snapshots.ts`, `checkpoint.ts`,
+//     `restore.ts`, and M C's `diff.ts` only. Higher-level primitives
 //     above are the public surface; internal helpers stay internal so
 //     git CLI conventions (--no-pager, maxBuffer, GIT_OPTIONAL_LOCKS=0,
 //     env vars) live in one place.
@@ -75,6 +94,10 @@
 //     that want snapshot data read it from the materialized manifest
 //     after `loadCheckpoint`.
 //
+//   - Diff parser internals (`_parseUnifiedDiffForTests`,
+//     `_parseNameStatusForTests`, `_assertSafeRepoRelativePathForTests`)
+//     from `diff.ts`: test-only, name-prefixed with `_` per convention.
+//
 //   - `_resetAvailabilityCacheForTests` from `git-cli.ts`: test-only,
 //     name-prefixed with `_` to signal package-internal-test use only.
 
@@ -83,9 +106,29 @@ export type { CheckpointSummary } from "./checkpoint.js";
 // Runtime values: checkpoint primitives.
 export {
   createCheckpoint,
+  findCheckpointByName,
   listCheckpoints,
   loadCheckpoint,
 } from "./checkpoint.js";
+
+// Inferred TypeScript types: diff helpers (M C).
+export type {
+  ChangedFileStatus,
+  DiffResult,
+  DiffSinceCheckpointOptions,
+  LineChunk,
+  RawDiff,
+  RawDiffEntry,
+  RawDiffHunk,
+} from "./diff.js";
+// Runtime values: diff helpers (M C).
+export {
+  DiffParseError,
+  DiffRefNotFoundError,
+  getDiffSinceCheckpoint,
+  getDiffSinceRef,
+} from "./diff.js";
+
 export type {
   RestoreExtractionConflict,
   RestoreHashMismatch,
@@ -107,6 +150,7 @@ export type { StatusEntry } from "./git-cli.js";
 // Runtime values: git subprocess wrappers (D17c single owner).
 export {
   getBranch,
+  getCommitTimestamp,
   getHeadSha,
   getStatusPorcelainText,
   getStatusPorcelainZ,
