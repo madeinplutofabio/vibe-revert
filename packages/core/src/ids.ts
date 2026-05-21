@@ -4,6 +4,7 @@
 import { monotonicFactory } from "ulid";
 
 const nextSessionUlid = monotonicFactory();
+const nextReportUlid = monotonicFactory();
 
 /**
  * Returns a fresh session id of the form `sess_<ULID>` — e.g.
@@ -22,4 +23,26 @@ const nextSessionUlid = monotonicFactory();
  */
 export function generateSessionId(): string {
   return `sess_${nextSessionUlid()}`;
+}
+
+/**
+ * Returns a fresh ad-hoc report id of the form `rpt_<ULID>` — e.g.
+ * `rpt_01JV8Z0N6E9QABCDEFGHIJKLMN`.
+ *
+ * The returned string is the FULL id including the `rpt_` prefix.
+ * Never prepend `rpt_` to the result, or paths and lookups will
+ * double up (`rpt_rpt_...`). Per D26/D27 in the M C plan, ad-hoc
+ * reports are stored at `.viberevert/reports/${reportId}/report.json`
+ * (dir-level atomic temp+rename per D13); session-bound reports reuse
+ * the owning session id and store at
+ * `.viberevert/sessions/${sessionId}/report.json` (file-level atomic).
+ *
+ * Per D27, this factory is INDEPENDENT of `generateSessionId`'s
+ * factory — the two ID spaces share neither monotonic sequence nor
+ * timestamp coordination. Same rule that already keeps git's
+ * `cp_<ULID>` factory independent from core's `sess_<ULID>` factory
+ * (D5/D16).
+ */
+export function generateReportId(): string {
+  return `rpt_${nextReportUlid()}`;
 }

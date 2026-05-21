@@ -19,6 +19,20 @@
 //     - Config (type), ConfigSchema (zod value), loadConfig
 //     - ConfigNotFoundError, ConfigParseError, ConfigValidationError
 //
+//   Framework detection (M A + M C — D42 single source of truth):
+//     - detectFramework (M A): returns the structured DetectionResult
+//       used by init's profile selection and ambiguity-prompt path
+//     - detectFrameworks (M C): returns Promise<readonly string[]> of
+//       matches, consumed by `viberevert check` to populate
+//       ctx.detectedFrameworks and SessionReport.detected_frameworks
+//     - KnownProfile, DetectionResult, Resolution types
+//
+//   Identity generators (M B + M C — D5/D16/D27):
+//     - generateSessionId (M B — `sess_<ULID>`; core owns session IDs;
+//       git owns checkpoint IDs `cp_<ULID>` separately)
+//     - generateReportId (M C — `rpt_<ULID>` for ad-hoc reports;
+//       independent monotonic factory from generateSessionId per D27)
+//
 //   Path helpers + repo-root resolution (M A):
 //     - resolveRepoRoot, viberevertDir, ensureViberevertDirs
 //     - RepoRootNotFoundError
@@ -29,8 +43,6 @@
 //   Session lifecycle (M B Step 4):
 //     - startSession, endSession, loadSession, listSessions,
 //       loadActiveSessionLock
-//     - generateSessionId (D5/D16 — core owns session IDs; git owns
-//       checkpoint IDs separately)
 //     - SessionNotFoundError, SessionAlreadyActiveError, NoActiveSessionError
 //     - Plus types: StartSessionOpts, EndSessionOpts, SessionSummary,
 //       ListSessionsWarning, ListSessionsResult
@@ -62,8 +74,14 @@ export {
   ConfigValidationError,
   loadConfig,
 } from "./config.js";
-// Session lifecycle (M B Step 4).
-export { generateSessionId } from "./ids.js";
+
+// Inferred TypeScript types: framework detection (M A + M C).
+export type { DetectionResult, KnownProfile, Resolution } from "./framework-detect.js";
+// Runtime values: framework detection (D42 single source of truth).
+export { detectFramework, detectFrameworks } from "./framework-detect.js";
+
+// Runtime values: identity generators (M B + M C — D5/D16/D27).
+export { generateReportId, generateSessionId } from "./ids.js";
 // Path helpers + repo-root resolution.
 export {
   ensureViberevertDirs,

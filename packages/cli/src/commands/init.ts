@@ -5,9 +5,14 @@ import { existsSync, statSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { createInterface } from "node:readline/promises";
-import { ensureViberevertDirs, RepoRootNotFoundError, resolveRepoRoot } from "@viberevert/core";
+import {
+  type DetectionResult,
+  detectFramework,
+  ensureViberevertDirs,
+  RepoRootNotFoundError,
+  resolveRepoRoot,
+} from "@viberevert/core";
 import { Command, Option } from "clipanion";
-import { type DetectionResult, detectFramework } from "../detect.js";
 import { ensureViberevertGitignore } from "../gitignore.js";
 import {
   BUILTIN_PROFILES,

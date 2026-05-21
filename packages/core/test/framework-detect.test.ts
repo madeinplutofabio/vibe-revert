@@ -1,21 +1,33 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Fabio Marcello Salvadori
+//
+// framework-detect.ts — coverage moved from packages/cli/test/detect.test.ts
+// as part of M C's D42 single-source-of-truth extraction. All existing M A
+// `detectFramework` cases preserved verbatim (only the import path
+// changed); a new `detectFrameworks` block at the bottom covers the M C
+// async surface used by `viberevert check`.
 
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { detectFramework } from "../src/detect.js";
+
+import { detectFramework, detectFrameworks } from "../src/framework-detect.js";
 
 let tmpRoot: string;
 
 beforeEach(async () => {
-  tmpRoot = await mkdtemp(join(tmpdir(), "viberevert-detect-test-"));
+  tmpRoot = await mkdtemp(join(tmpdir(), "viberevert-frameworkdetect-test-"));
 });
 
 afterEach(async () => {
   await rm(tmpRoot, { recursive: true, force: true });
 });
+
+// =============================================================================
+// detectFramework — M A structured surface (cases moved verbatim from
+// packages/cli/test/detect.test.ts; only the import path changed).
+// =============================================================================
 
 describe("detectFramework — empty repo", () => {
   it("returns generic resolution with no matches", () => {
@@ -174,5 +186,70 @@ describe("detectFramework — single resolution semantics", () => {
     const result = detectFramework(tmpRoot);
     expect(result.resolution).toBe("generic");
     expect(result.recommended).toBeUndefined();
+  });
+});
+
+// =============================================================================
+// detectFrameworks — M C async surface (new, used by `viberevert check`).
+// =============================================================================
+
+describe("detectFrameworks — M C async surface", () => {
+  it("returns an empty array for an empty repo (resolution 'generic')", async () => {
+    const matches = await detectFrameworks(tmpRoot);
+    expect(matches).toEqual([]);
+  });
+
+  it("returns a single-element array when exactly one framework matches", async () => {
+    await writeFile(join(tmpRoot, "composer.json"), "{}");
+    await writeFile(join(tmpRoot, "artisan"), "");
+    const matches = await detectFrameworks(tmpRoot);
+    expect(matches).toEqual(["laravel"]);
+  });
+
+  it("returns sorted-alphabetical matches when multiple frameworks coexist", async () => {
+    await writeFile(join(tmpRoot, "composer.json"), "{}");
+    await writeFile(join(tmpRoot, "artisan"), "");
+    await writeFile(join(tmpRoot, "next.config.js"), "");
+    await writeFile(join(tmpRoot, "pyproject.toml"), "[project]\nname='x'\n");
+    const matches = await detectFrameworks(tmpRoot);
+    expect(matches).toEqual(["laravel", "nextjs", "python"]);
+  });
+
+  it("returns a true Promise (await-able)", async () => {
+    const result = detectFrameworks(tmpRoot);
+    expect(result).toBeInstanceOf(Promise);
+    await result;
+  });
+
+  it("returns ONLY the matches array — no structured Resolution/recommended fields leak through", async () => {
+    await writeFile(join(tmpRoot, "Gemfile"), "");
+    await mkdir(join(tmpRoot, "config"));
+    await writeFile(join(tmpRoot, "config", "routes.rb"), "");
+    await writeFile(join(tmpRoot, "next.config.js"), "");
+    // detectFramework would return { matches, resolution: "ambiguous",
+    // recommended: "rails" } here. detectFrameworks discards everything
+    // except matches — the value MUST be a plain string array, not a
+    // structured object.
+    const matches = await detectFrameworks(tmpRoot);
+    expect(Array.isArray(matches)).toBe(true);
+    expect(matches).toEqual(["nextjs", "rails"]);
+    // Defense-in-depth: shape sanity. If detectFrameworks ever started
+    // returning the DetectionResult by accident, .length would be
+    // undefined-or-wrong AND `matches[0]` would be the field name not a
+    // framework string.
+    expect(matches.length).toBe(2);
+    expect(typeof matches[0]).toBe("string");
+  });
+
+  it("agrees with detectFramework().matches on the same input (single source of truth)", async () => {
+    // Multi-framework repo so the comparison is non-trivial.
+    await writeFile(join(tmpRoot, "composer.json"), "{}");
+    await writeFile(join(tmpRoot, "artisan"), "");
+    await mkdir(join(tmpRoot, ".lovable"));
+    await writeFile(join(tmpRoot, "next.config.ts"), "");
+
+    const structuredMatches = detectFramework(tmpRoot).matches;
+    const flatMatches = await detectFrameworks(tmpRoot);
+    expect(flatMatches).toEqual(structuredMatches);
   });
 });

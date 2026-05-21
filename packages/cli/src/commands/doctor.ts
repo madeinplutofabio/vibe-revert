@@ -7,6 +7,7 @@ import {
   ConfigNotFoundError,
   ConfigParseError,
   ConfigValidationError,
+  detectFramework,
   loadConfig,
   RepoRootNotFoundError,
   resolveRepoRoot,
@@ -15,7 +16,6 @@ import {
 } from "@viberevert/core";
 import { probeGitVersion } from "@viberevert/git";
 import { Command } from "clipanion";
-import { detectFramework } from "../detect.js";
 
 /**
  * Reports environment status as a series of key:value lines.
