@@ -23,9 +23,15 @@
     "incremental": true,
     "baseUrl": ".",
     "paths": {
-      "@viberevert/session-format": ["packages/session-format/src/index.ts"],
+      "@viberevert/adapters": ["packages/adapters/src/index.ts"],
+      "@viberevert/checks": ["packages/checks/src/index.ts"],
       "@viberevert/core": ["packages/core/src/index.ts"],
-      "@viberevert/git": ["packages/git/src/index.ts"]
+      "@viberevert/git": ["packages/git/src/index.ts"],
+      "@viberevert/installers": ["packages/installers/src/index.ts"],
+      "@viberevert/mcp": ["packages/mcp/src/index.ts"],
+      "@viberevert/policies-basic": ["packages/policies-basic/src/index.ts"],
+      "@viberevert/reporters": ["packages/reporters/src/index.ts"],
+      "@viberevert/session-format": ["packages/session-format/src/index.ts"]
     }
   }
 }
