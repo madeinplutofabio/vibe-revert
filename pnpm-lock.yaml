@@ -50,6 +50,9 @@ importers:
       '@viberevert/git':
         specifier: workspace:*
         version: link:../git
+      '@viberevert/reporters':
+        specifier: workspace:*
+        version: link:../reporters
       '@viberevert/session-format':
         specifier: workspace:*
         version: link:../session-format
