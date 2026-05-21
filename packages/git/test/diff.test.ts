@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Fabio Marcello Salvadori
 //
-// diff.ts — A.2 targeted tests.
+// diff.ts — A.2 targeted tests, plus D.1.pre additions for the
+// CommitRefNotFoundError → DiffRefNotFoundError wrap survival and the
+// DiffRefNotFoundError diagnostic-safety hardening.
 //
-// Two layers:
+// Three sections:
 //
 // 1. PURE PARSER TESTS (via _*ForTests exports)
 //    - parseUnifiedDiff: fail-closed contracts; binary marker; GIT binary
@@ -20,13 +22,30 @@
 //    - getDiffSinceRef: modified / added / deleted / renamed / binary;
 //      --cached (staged) scope; untracked enumeration with bounded read;
 //      gitignore-respecting enumeration; unparseable-ref throws
-//      DiffRefNotFoundError; option-injection defense via --end-of-options.
+//      DiffRefNotFoundError; option-injection defense via --end-of-options;
+//      D.1.pre wrap-survival regression: getDiffSinceRef catches the
+//      CommitRefNotFoundError raised by resolveCommitRef (git-cli.ts's
+//      single source of truth post-dedup) and wraps it as a
+//      DiffRefNotFoundError for backward-compat. The test uses an
+//      EXPLICIT try/catch (not repeated `.rejects` matchers) so it
+//      asserts the rejection object DIRECTLY — robust against the
+//      file-2-v2 symmetry fix that made `cause` non-enumerable per the
+//      standard Error cause-options convention.
 //    - getDiffSinceCheckpoint: clean-tree base; post-checkpoint additions;
 //      THE D56 TRUST-CRITICAL ASSERTION — pre-existing dirty work at
 //      capture time is EXCLUDED from findings; liveExcludePatterns
 //      filtering; .viberevert/ misconfiguration THROW (defeat gitignore
 //      AFTER valid checkpoint); scratch worktree cleaned up after success;
 //      loadCheckpoint failure does not allocate internal temp resources.
+//
+// 3. ERROR-CLASS UNIT TESTS (D.1.pre)
+//    - DiffRefNotFoundError diagnostic-safety: the constructor uses
+//      JSON.stringify(ref) so newlines / terminal escapes / git-error-
+//      mimicking text in a user-controlled --since ref cannot corrupt
+//      the diagnostic line. Symmetric to the CommitRefNotFoundError
+//      diagnostic-safety test in git-cli.test.ts; both locks must hold
+//      because both classes carry the same exposure (user-controlled
+//      ref text flowing into stderr and JSON error envelopes).
 
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
@@ -45,6 +64,7 @@ import {
   _parseNameStatusForTests as parseNameStatus,
   _parseUnifiedDiffForTests as parseUnifiedDiff,
 } from "../src/diff.js";
+import { CommitRefNotFoundError } from "../src/git-cli.js";
 
 // =============================================================================
 // Test helpers
@@ -597,6 +617,61 @@ describe("getDiffSinceRef — integration", () => {
     }
   });
 
+  it("D.1.pre wrap-survival: CommitRefNotFoundError → DiffRefNotFoundError at the public boundary", async () => {
+    // Locks the catch+wrap in getDiffSinceRef post-dedup. resolveCommitRef
+    // (the package's single source of truth for ref-to-SHA resolution per
+    // file 1) raises CommitRefNotFoundError directly; getDiffSinceRef
+    // catches it and wraps as DiffRefNotFoundError so M C consumers that
+    // catch the diff-specific error type continue to work without change.
+    //
+    // The existing "unparseable ref throws DiffRefNotFoundError" test above
+    // verifies the surface-level behavior. This test additionally asserts:
+    //   (a) the thrown error is NOT a CommitRefNotFoundError (proves the
+    //       wrap is a genuine class transition, not a rebrand);
+    //   (b) the original ref is preserved on the DiffRefNotFoundError;
+    //   (c) the underlying CommitRefNotFoundError is preserved on
+    //       `error.cause` via the standard Error options API per the
+    //       file-2-v2 symmetry fix;
+    //   (d) the original ref is preserved on the INNER CommitRefNotFoundError
+    //       too — locks both layers of ref preservation.
+    //
+    // Test shape uses an EXPLICIT try/catch (not repeated `.rejects`
+    // matchers) for two reasons. First: it captures the rejection value
+    // ONCE and asserts on the actual object — no dependency on Vitest's
+    // re-await-the-same-promise behavior. Second: direct property access
+    // on `err.cause` works regardless of whether `cause` is enumerable
+    // (it became non-enumerable in file-2-v2 per the standard Error
+    // cause-options convention), and we explicitly want to test the
+    // SPEC-COMPLIANT behavior, not Vitest's matcher heuristics.
+    //
+    // If a future refactor "simplifies" by letting CommitRefNotFoundError
+    // escape unwrapped, assertion (a) fails with a clear message tied to
+    // the wrap rationale. If the symmetry fix is reverted (manual
+    // enumerable assignment), the test still passes — that's the point of
+    // the robust pattern.
+    const repo = await setupRepo();
+    try {
+      const ref = "totally-not-a-ref";
+      let caught: unknown;
+
+      try {
+        await getDiffSinceRef(repo.repoRoot, ref, {});
+      } catch (err) {
+        caught = err;
+      }
+
+      expect(caught).toBeInstanceOf(DiffRefNotFoundError);
+      expect(caught).not.toBeInstanceOf(CommitRefNotFoundError);
+
+      const err = caught as DiffRefNotFoundError & { cause?: unknown };
+      expect(err.ref).toBe(ref);
+      expect(err.cause).toBeInstanceOf(CommitRefNotFoundError);
+      expect((err.cause as CommitRefNotFoundError).ref).toBe(ref);
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
   it("option-injection defense: ref starting with `-` is treated as a literal ref (not an option)", async () => {
     const repo = await setupRepo();
     try {
@@ -800,5 +875,29 @@ describe("getDiffSinceCheckpoint — integration", () => {
     } finally {
       await repo.cleanup();
     }
+  });
+});
+
+// =============================================================================
+// SECTION 6 — D.1.pre direct unit tests for the DiffRefNotFoundError class
+// =============================================================================
+
+describe("DiffRefNotFoundError", () => {
+  it("diagnostic-safety: DiffRefNotFoundError JSON-quotes refs with control characters", () => {
+    // Locks the JSON.stringify(ref) hardening in DiffRefNotFoundError's
+    // constructor. Without it, a user-controlled ref containing a newline
+    // (or terminal escape, or text that mimics another git error
+    // fragment) would corrupt the diagnostic line — the message would
+    // span multiple lines OR be confusable with an unrelated error. The
+    // JSON-quoting wraps the ref in double quotes and escapes the
+    // hazardous characters. Symmetric to the CommitRefNotFoundError
+    // diagnostic-safety test in git-cli.test.ts; both locks must hold
+    // because both classes carry the same exposure (user-controlled ref
+    // text flowing into stderr and JSON error envelopes via the wrap).
+    const err = new DiffRefNotFoundError("bad\nref");
+    expect(err.message).toBe(
+      'Could not resolve ref "bad\\nref". If this is a shallow clone, run `git fetch --unshallow` first.',
+    );
+    expect(err.message).not.toContain("\n");
   });
 });

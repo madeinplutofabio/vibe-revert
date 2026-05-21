@@ -25,7 +25,17 @@
 //     - getStatusPorcelainText (raw v1 for audit storage, per D8)
 //     - getStatusPorcelainZ + StatusEntry (parsed -z for machine logic, D8)
 //     - getCommitTimestamp (M C — committer date for ad-hoc git-ref
-//       report.started_at per D56)
+//       report.started_at per D56; delegates ref-to-SHA resolution to
+//       resolveCommitRef below)
+//     - resolveCommitRef (M C — single source of truth across the package
+//       for resolving a user-supplied ref/SHA to a canonical 40-char
+//       lowercase commit SHA. Combines commit-peel + --end-of-options
+//       option-injection defense + output-shape validation. The
+//       architectural invariant in
+//       `packages/git/test/architectural-invariants.test.ts` enforces
+//       at CI time that no other module in `packages/git/src` carries
+//       the literal commit-peel suffix; every other call site that
+//       needs ref-to-SHA resolution MUST go through this helper.)
 //
 //   Diff helpers (M C — D30 + D56). Two distinct entry points (NOT a
 //   single dispatcher); CLI selects per the resolved base kind:
@@ -47,7 +57,15 @@
 //       RestoreExtractionConflictError, RestoreVerificationError,
 //       RestoreTrackedDirtyParityError (restore-side; M B step 13 +
 //       Step 3e)
-//     - DiffRefNotFoundError, DiffParseError (M C — diff helper failures)
+//     - CommitRefNotFoundError (M C — raised by `resolveCommitRef` when
+//       a ref does not resolve to a commit-ish object, or when git's
+//       `rev-parse` output fails the canonical 40-char-lowercase-hex
+//       SHA-shape validation. `getDiffSinceRef` wraps this as
+//       `DiffRefNotFoundError` for backwards compatibility with M C
+//       callers that catch the diff-specific error type; other callers
+//       see `CommitRefNotFoundError` directly.)
+//     - DiffRefNotFoundError, DiffParseError (M C — diff helper failures;
+//       DiffRefNotFoundError wraps CommitRefNotFoundError per above)
 //   Plus structured-payload type aliases consumed by the error classes:
 //     - RestoreExtractionConflict, RestoreHashMismatch,
 //       RestoreTrackedDirtyParityIssue
@@ -147,14 +165,18 @@ export {
 } from "./errors.js";
 export type { StatusEntry } from "./git-cli.js";
 
-// Runtime values: git subprocess wrappers (D17c single owner).
+// Runtime values: git subprocess wrappers (D17c single owner) +
+// commit-ref resolution single source of truth (resolveCommitRef) and
+// its typed error (CommitRefNotFoundError) — both M C additions.
 export {
+  CommitRefNotFoundError,
   getBranch,
   getCommitTimestamp,
   getHeadSha,
   getStatusPorcelainText,
   getStatusPorcelainZ,
   probeGitVersion,
+  resolveCommitRef,
 } from "./git-cli.js";
 
 // Runtime values: identity generators.

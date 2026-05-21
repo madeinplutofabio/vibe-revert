@@ -74,9 +74,13 @@
 // tokens (R must be R<digits>), on copy tokens (C — not supported in
 // M C), AND on empty status tokens (malformed -z output).
 //
-// Option-injection defense: resolveRef uses `--end-of-options` so a
+// Option-injection defense: getDiffSinceRef delegates ref-to-SHA resolution
+// to resolveCommitRef in git-cli.ts (the package's single source of truth
+// for commit-ref resolution), which uses `--end-of-options` so a
 // user-controlled ref starting with `-` cannot be interpreted as a git
-// option.
+// option. CommitRefNotFoundError thrown by that helper is wrapped back
+// into DiffRefNotFoundError below for backward compatibility with M C
+// callers that catch the diff-specific error type.
 
 import type { Stats } from "node:fs";
 import { copyFile, lstat, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
@@ -86,7 +90,13 @@ import { dirname, join } from "node:path";
 import picomatch from "picomatch";
 
 import { loadCheckpoint } from "./checkpoint.js";
-import { runGit, runGitText, splitNulList } from "./git-cli.js";
+import {
+  CommitRefNotFoundError,
+  resolveCommitRef,
+  runGit,
+  runGitText,
+  splitNulList,
+} from "./git-cli.js";
 import { restoreCheckpoint } from "./restore.js";
 
 // ============================================================================
@@ -142,6 +152,39 @@ export interface DiffResult {
 // Errors
 // ============================================================================
 
+/**
+ * Raised by `getDiffSinceRef` when its ref-to-SHA resolution step fails.
+ * Wraps `CommitRefNotFoundError` (from `resolveCommitRef` in git-cli.ts —
+ * the package's single source of truth for commit-ref resolution) so that
+ * M C callers that catch the diff-specific error type continue to work.
+ *
+ * Diagnostic-safety: the `ref` interpolation uses `JSON.stringify(ref)`
+ * rather than bare `${ref}`. Refs are user-controlled (`--since <ref>`
+ * from the CLI) and the message flows through direct stderr writes plus
+ * structured JSON error envelopes; JSON-quoting prevents embedded
+ * newlines, terminal escape sequences, or text that mimics another git
+ * error fragment from corrupting the diagnostic line.
+ *
+ * Cause preservation: when `getDiffSinceRef` wraps the underlying
+ * `CommitRefNotFoundError`, that original error is preserved
+ * on `this.cause` via the standard `Error` options API (the `{ cause }`
+ * argument to `super`). This is intentionally SYMMETRIC to
+ * `CommitRefNotFoundError`'s own cause handling — both error classes use
+ * the same options-API form. Notably, the options-API form makes
+ * `cause` NON-enumerable (per the standard `Error` cause-options
+ * convention), so `JSON.stringify(err)` does NOT leak the cause chain
+ * into structured output, and `Object.keys(err)` does NOT include
+ * `cause`. Tests that read `err.cause` directly via property access
+ * still work — direct access reads non-enumerable own properties just
+ * fine. The earlier-draft manual `(this as { cause?: unknown }).cause =
+ * cause;` assignment created an ENUMERABLE `cause` and was asymmetric
+ * with `CommitRefNotFoundError`; the symmetry fix (D.1.pre file 2 v2)
+ * standardizes both classes on the same spec-compliant pattern.
+ *
+ * The message also surfaces the shallow-clone hint, which is the single
+ * most common cause of this error in CI (where a clone may not contain
+ * the requested ref in its local history).
+ */
 export class DiffRefNotFoundError extends Error {
   override readonly name = "DiffRefNotFoundError";
   constructor(
@@ -149,9 +192,9 @@ export class DiffRefNotFoundError extends Error {
     cause?: unknown,
   ) {
     super(
-      `Could not resolve ref '${ref}'. If this is a shallow clone, run \`git fetch --unshallow\` first.`,
+      `Could not resolve ref ${JSON.stringify(ref)}. If this is a shallow clone, run \`git fetch --unshallow\` first.`,
+      cause === undefined ? undefined : { cause },
     );
-    if (cause !== undefined) (this as { cause?: unknown }).cause = cause;
   }
 }
 
@@ -649,24 +692,6 @@ function looksBinary(buf: Buffer): boolean {
 }
 
 // ============================================================================
-// Ref resolution (option-injection defense via --end-of-options)
-// ============================================================================
-
-async function resolveRef(repoRoot: string, ref: string): Promise<string> {
-  try {
-    const out = await runGitText(repoRoot, [
-      "rev-parse",
-      "--verify",
-      "--end-of-options",
-      `${ref}^{commit}`,
-    ]);
-    return out.trim();
-  } catch (cause) {
-    throw new DiffRefNotFoundError(ref, cause);
-  }
-}
-
-// ============================================================================
 // Tracked diff (two-call, ref mode)
 // ============================================================================
 
@@ -775,7 +800,20 @@ export async function getDiffSinceRef(
   opts: { staged?: boolean } = {},
 ): Promise<DiffResult> {
   const staged = opts.staged === true;
-  const sha = await resolveRef(repoRoot, ref);
+  // Delegate ref-to-SHA resolution to the single source of truth in
+  // git-cli.ts. CommitRefNotFoundError is wrapped back into
+  // DiffRefNotFoundError for backward compatibility with M C callers that
+  // catch the diff-specific error type. Other error classes (notably
+  // GitNotAvailableError) propagate unchanged.
+  let sha: string;
+  try {
+    sha = await resolveCommitRef(repoRoot, ref);
+  } catch (cause) {
+    if (cause instanceof CommitRefNotFoundError) {
+      throw new DiffRefNotFoundError(ref, cause);
+    }
+    throw cause;
+  }
   const tracked = await getTrackedDiff(repoRoot, sha, staged);
   const untracked = staged ? [] : await getUntrackedEntries(repoRoot);
   // De-dup by path: tracked wins over untracked when both appear (extremely

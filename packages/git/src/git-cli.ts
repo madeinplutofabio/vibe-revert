@@ -32,7 +32,8 @@
 //
 // Public surface vs. internal:
 //   - Public: probeGitVersion, getHeadSha, getBranch, getStatusPorcelainText,
-//     getStatusPorcelainZ, getCommitTimestamp, plus the StatusEntry type.
+//     getStatusPorcelainZ, resolveCommitRef, getCommitTimestamp, plus the
+//     StatusEntry type and the CommitRefNotFoundError class.
 //   - Internal (re-exported only within this package): gitDiffUnstaged,
 //     gitDiffStaged, gitListUntracked, gitListTrackedDirty, gitApply,
 //     gitApplyWithIndex, gitResetHardHead, runGit, runGitText, splitNulList.
@@ -42,6 +43,26 @@
 //   subprocesses without proliferating one-off named helpers here; M B's
 //   named-helper pattern (gitDiffUnstaged, etc.) remains the convention
 //   for the previously-shipped narrow use cases.
+//
+// Commit-ref resolution (single source of truth): `resolveCommitRef` is the
+// ONLY function in the package that turns a user-supplied ref/SHA into a
+// canonical 40-char lowercase commit SHA. The `COMMIT_REF_PEEL_SUFFIX`
+// constant defined below is the ONLY place in `packages/git/src` that
+// contains the literal commit-peel suffix string; every other call site
+// (getCommitTimestamp, diff.ts) delegates to `resolveCommitRef`. The
+// single-source guarantee is grep-enforceable AND test-enforceable: a
+// fixed-string grep over `packages/git/src` for the suffix literal MUST
+// return exactly one match — the `COMMIT_REF_PEEL_SUFFIX` definition in
+// this file. The literal suffix is intentionally NOT repeated in this
+// comment because the invariant scans raw source bytes (no comment
+// stripping), so any second appearance — even in prose — would be a
+// violation. The exact verification command, plus the automated CI gate
+// in `packages/git/test/architectural-invariants.test.ts`, is documented
+// in the test file's own header so the discoverable-from-tooling form of
+// the literal lives there (outside the scanned scope), not here. The
+// fixed-string form of the grep avoids depending on git grep's regex
+// dialect (which can be reconfigured via the `grep.patternType` git
+// config).
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -76,6 +97,33 @@ const GIT_PROBE_MAX_BUFFER = 1024 * 1024;
  * that updates stat-data timestamps for later optimization).
  */
 const GIT_ENV: NodeJS.ProcessEnv = { ...process.env, GIT_OPTIONAL_LOCKS: "0" };
+
+/**
+ * Git's commit-peel suffix. Appended to a ref/SHA argument passed to
+ * `git rev-parse` to force resolution to a commit object: for a raw commit
+ * SHA the peel is a no-op; for an annotated tag SHA it resolves to the
+ * tagged commit; for a tree/blob SHA (or any non-commit-ish) git errors at
+ * the peel rather than producing nonsense downstream output.
+ *
+ * **This constant is the ONLY place in `packages/git/src` that contains the
+ * literal commit-peel suffix string.** Every other module in the package
+ * that needs commit resolution MUST call `resolveCommitRef()` (which uses
+ * this constant internally). The single-source guarantee is
+ * grep-enforceable and test-enforceable — see the header preamble for the
+ * rationale, and `packages/git/test/architectural-invariants.test.ts` for
+ * the runnable verification command and the automated CI gate.
+ */
+const COMMIT_REF_PEEL_SUFFIX = "^{commit}" as const;
+
+/**
+ * Canonical commit SHA shape: 40 lowercase hexadecimal characters.
+ * `git rev-parse --verify <ref>` with the commit-peel suffix appended is
+ * documented to return this shape. `resolveCommitRef` validates the
+ * trimmed output against this regex before returning, surfacing any future
+ * git output drift as a typed `CommitRefNotFoundError` rather than letting
+ * a non-canonical string propagate downstream.
+ */
+const COMMIT_SHA_RE = /^[0-9a-f]{40}$/;
 
 /**
  * One-time availability probe. Resolves to the git version string (the first
@@ -424,44 +472,138 @@ export async function getStatusPorcelainZ(repoRoot: string): Promise<readonly St
 }
 
 /**
- * Returns the committer timestamp of `sha` as an ISO 8601 second-precision
+ * Raised when `resolveCommitRef` cannot resolve a ref to a canonical
+ * commit SHA. Reasons include: the ref does not exist, the ref names a
+ * tree/blob/tag-pointing-at-non-commit (rejected at the commit-peel
+ * suffix), or `git rev-parse` produced output that does not match the
+ * canonical 40-char lowercase hex SHA shape.
+ *
+ * Carries the original `ref` string the caller passed, plus the underlying
+ * git error as `cause` when the failure originated in the git subprocess
+ * (no `cause` set when the failure is the output-shape validation, since
+ * git itself did not error in that case).
+ *
+ * Diagnostic-safety: the `ref` interpolation in the error message uses
+ * `JSON.stringify(ref)` rather than bare `${ref}`. Refs are user-controlled
+ * (`--since <ref>` from the CLI) and the error message flows through
+ * direct stderr writes, structured JSON error envelopes, and (via
+ * `DiffRefNotFoundError`) further wrapped diagnostics. A bare interpolation
+ * would let embedded newlines, terminal escape sequences, or text that
+ * mimics another git error fragment corrupt the diagnostic line. JSON
+ * quoting wraps the value in double quotes and escapes those hazards.
+ *
+ * `diff.ts` wraps this in `DiffRefNotFoundError` for backwards
+ * compatibility with M C callers that catch the diff-specific error.
+ */
+export class CommitRefNotFoundError extends Error {
+  override readonly name = "CommitRefNotFoundError";
+  constructor(
+    readonly ref: string,
+    cause?: unknown,
+  ) {
+    super(
+      `Could not resolve commit ref ${JSON.stringify(ref)}`,
+      cause === undefined ? undefined : { cause },
+    );
+  }
+}
+
+/**
+ * Resolve a ref (branch name, tag name, SHA, or any rev-parse-able
+ * expression) to its canonical 40-char lowercase commit SHA. Single source
+ * of truth for commit-ref resolution across the package; every other
+ * module that needs a commit SHA from a user-supplied ref MUST call this
+ * helper rather than constructing its own `git rev-parse` invocation.
+ *
+ * Implementation: `git rev-parse --verify --end-of-options <ref><peel>`
+ * where `<peel>` is `COMMIT_REF_PEEL_SUFFIX` (the package's ONLY literal
+ * occurrence of the commit-peel suffix).
+ *
+ * Commit-peel defense: appending the commit-peel suffix forces git to
+ * resolve the ref to a commit object. For a raw commit SHA the peel is a
+ * no-op; for an annotated tag SHA it resolves to the tagged commit; for a
+ * tree/blob SHA (or any non-commit-ish) git errors at the peel rather
+ * than returning a non-commit SHA that would cause confusing downstream
+ * failures.
+ *
+ * Option-injection defense: `--end-of-options` terminates option parsing
+ * before the peeled argument, so a ref-like literal starting with `-`
+ * cannot be interpreted as a git option flag.
+ *
+ * Output-shape validation: the trimmed stdout is asserted to match
+ * `COMMIT_SHA_RE` (40 lowercase hex chars). A failed match throws
+ * `CommitRefNotFoundError` with no `cause` — git produced unexpected
+ * output rather than rejecting the ref, which is itself a class of bug we
+ * surface loudly rather than letting nonsense propagate.
+ *
+ * Errors:
+ *   - throws `CommitRefNotFoundError(ref, cause)` when git rejects the
+ *     ref (non-zero exit from `rev-parse --verify`);
+ *   - throws `CommitRefNotFoundError(ref)` (no cause) when git's output
+ *     fails the canonical SHA-shape check;
+ *   - throws `GitNotAvailableError` when the git binary itself is
+ *     missing/unusable (propagated unchanged from `runGitText`).
+ */
+export async function resolveCommitRef(repoRoot: string, ref: string): Promise<string> {
+  let raw: string;
+  try {
+    raw = await runGitText(repoRoot, [
+      "rev-parse",
+      "--verify",
+      "--end-of-options",
+      `${ref}${COMMIT_REF_PEEL_SUFFIX}`,
+    ]);
+  } catch (cause) {
+    if (cause instanceof GitNotAvailableError) throw cause;
+    throw new CommitRefNotFoundError(ref, cause);
+  }
+  const sha = raw.trim();
+  if (!COMMIT_SHA_RE.test(sha)) {
+    throw new CommitRefNotFoundError(ref);
+  }
+  return sha;
+}
+
+/**
+ * Returns the committer timestamp of `ref` as an ISO 8601 second-precision
  * string with `Z` offset (e.g., `2026-05-04T10:30:11Z`). Used by
  * `buildReportFile` to populate `report.started_at` for ad-hoc git-ref
  * reports per D56.
  *
- * Implementation: `git show -s --format=%cI <sha>^{commit}` emits strict
- * ISO 8601 (committer date — `%cI` = ISO 8601). The output is normalized
- * through `toIsoSecondString` to strip any sub-second component,
- * guaranteeing schema validity even if a future git release adds
- * fractional seconds to `%cI` output.
+ * Implementation:
+ *   1. `ref` is canonicalized to a 40-char lowercase commit SHA via
+ *      `resolveCommitRef` (which applies the commit-peel suffix, the
+ *      `--end-of-options` injection guard, and the canonical SHA-shape
+ *      validation — see that function's docs for the full defense chain).
+ *   2. `git show -s --format=%cI <canonicalSha>` emits the committer date
+ *      in strict ISO 8601 (`%cI` = ISO 8601 committer date).
+ *   3. The output is normalized through `toIsoSecondString` to strip any
+ *      sub-second component, guaranteeing schema validity even if a
+ *      future git release adds fractional seconds to `%cI` output.
  *
- * Commit-peel defense: the `^{commit}` suffix forces git to resolve `sha`
- * to a commit object. For a raw commit SHA the peel is a no-op; for an
- * annotated tag SHA it resolves to the tagged commit; for a tree/blob SHA
- * (or any non-commit-ish) git errors at the peel rather than producing
- * nonsense `--format=%cI` output. Mirrors `diff.ts`'s `resolveRef`.
- *
- * Option-injection defense: `--end-of-options` terminates option parsing
- * before the peeled argument, so a SHA-like literal starting with `-`
- * cannot be interpreted as a git option flag.
+ * Single-source guarantee: this helper does NOT append the commit-peel
+ * suffix itself, does NOT pass `--end-of-options` to its own `git show`
+ * invocation, and does NOT contain the literal suffix string anywhere.
+ * All commit-ref resolution flows through `resolveCommitRef` — the
+ * single, grep-enforceable AND test-enforceable source of truth across
+ * the package.
  *
  * Errors:
- *   - throws via `execFile` rejection when `sha` is not a valid commit-ish
- *     reference (git exits nonzero; the original error propagates with
- *     stderr in the message);
+ *   - throws `CommitRefNotFoundError` when `ref` cannot be resolved to a
+ *     commit-ish object (propagated from `resolveCommitRef`);
+ *   - throws via `execFile` rejection when `git show` itself fails
+ *     against an otherwise-valid canonical SHA (extremely rare — would
+ *     indicate repo corruption between the two calls);
  *   - throws `RangeError: Invalid time value` if `git show` produces a
  *     value that `new Date()` cannot parse (impossible for a well-formed
  *     git release, but the explicit failure mode is better than silent
- *     schema-invalid output downstream).
+ *     schema-invalid output downstream);
+ *   - throws `GitNotAvailableError` when the git binary itself is
+ *     missing/unusable (propagated unchanged).
  */
-export async function getCommitTimestamp(repoRoot: string, sha: string): Promise<string> {
-  const stdout = await runGitText(repoRoot, [
-    "show",
-    "-s",
-    "--format=%cI",
-    "--end-of-options",
-    `${sha}^{commit}`,
-  ]);
+export async function getCommitTimestamp(repoRoot: string, ref: string): Promise<string> {
+  const sha = await resolveCommitRef(repoRoot, ref);
+  const stdout = await runGitText(repoRoot, ["show", "-s", "--format=%cI", sha]);
   return toIsoSecondString(new Date(stdout.trim()));
 }
 

@@ -42,6 +42,7 @@
     "@viberevert/checks": "workspace:*",
     "@viberevert/core": "workspace:*",
     "@viberevert/git": "workspace:*",
+    "@viberevert/reporters": "workspace:*",
     "@viberevert/session-format": "workspace:*",
     "clipanion": "3.2.1",
     "picomatch": "4.0.4"
