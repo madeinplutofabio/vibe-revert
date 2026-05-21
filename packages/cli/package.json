@@ -39,9 +39,15 @@
     "access": "public"
   },
   "dependencies": {
+    "@viberevert/checks": "workspace:*",
     "@viberevert/core": "workspace:*",
     "@viberevert/git": "workspace:*",
-    "clipanion": "3.2.1"
+    "@viberevert/session-format": "workspace:*",
+    "clipanion": "3.2.1",
+    "picomatch": "4.0.4"
+  },
+  "devDependencies": {
+    "@types/picomatch": "4.0.2"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json && node scripts/finalize-bin.mjs",

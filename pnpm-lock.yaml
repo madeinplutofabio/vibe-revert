@@ -41,15 +41,28 @@ importers:
 
   packages/cli:
     dependencies:
+      '@viberevert/checks':
+        specifier: workspace:*
+        version: link:../checks
       '@viberevert/core':
         specifier: workspace:*
         version: link:../core
       '@viberevert/git':
         specifier: workspace:*
         version: link:../git
+      '@viberevert/session-format':
+        specifier: workspace:*
+        version: link:../session-format
       clipanion:
         specifier: 3.2.1
         version: 3.2.1
+      picomatch:
+        specifier: 4.0.4
+        version: 4.0.4
+    devDependencies:
+      '@types/picomatch':
+        specifier: 4.0.2
+        version: 4.0.2
 
   packages/core:
     dependencies:
