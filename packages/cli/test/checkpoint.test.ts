@@ -36,6 +36,7 @@ import { Cli } from "clipanion";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { CheckpointCommand } from "../src/commands/checkpoint.js";
+import { VIBEREVERT_TEST_FIXED_NOW } from "../src/runtime-env.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -44,6 +45,17 @@ const execFileAsync = promisify(execFile);
 // listing.test.ts and json-output.test.ts.
 const FIXTURE_CHECKPOINT_ID = "cp_01JV8XQ4H27ABCDEFGHJKMNPQR";
 const FIXTURE_SHA = "a1b2c3d4e5f6789012345678901234567890abcd";
+
+/**
+ * D49 fixture-determinism sentinel. Same shape and same value as
+ * start-end.test.ts's FIXED_NOW (and the M C golden-fixture
+ * harness's locked sentinel from Step 10). Tests that need to prove
+ * `VIBEREVERT_TEST_FIXED_NOW` affects persisted timestamps set
+ * `process.env.VIBEREVERT_TEST_FIXED_NOW = FIXED_NOW` per-test
+ * (with restore-over-delete in `finally`) and assert exact equality
+ * on the resulting persisted manifests.
+ */
+const FIXED_NOW = "2026-01-01T00:00:00Z";
 
 let tmpRoot: string;
 let originalCwd: string;
@@ -328,5 +340,54 @@ describe("checkpoint command", () => {
     const result = await runCheckpoint(["--name", "   "]);
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("--name must not be empty or whitespace-only");
+  });
+
+  it("VIBEREVERT_TEST_FIXED_NOW overrides manifest.captured_at deterministically (D49 precondition)", async () => {
+    await writeMinimalConfig();
+
+    // Per-test scoped env mutation with restore-over-delete in
+    // finally — same pattern as start-end.test.ts. Safe even when a
+    // parent process already pinned the env var.
+    const previous = process.env[VIBEREVERT_TEST_FIXED_NOW];
+    process.env[VIBEREVERT_TEST_FIXED_NOW] = FIXED_NOW;
+    try {
+      // Use --name so the D22 lock path is exercised (checkpoint.ts
+      // only acquires the lock when --name is set). The lock dir is
+      // created+removed during execution, so this integration test
+      // does not inspect its transient lock.json. The persisted
+      // manifest assertion below proves the command-scoped `now`
+      // value reached createCheckpoint({ capturedAt: now }); source
+      // review/typecheck covers the parallel lockInfo.started_at
+      // wiring.
+      const result = await runCheckpoint(["--name", "fixed-clock"]);
+      expect(result.exitCode).toBe(0);
+
+      // The just-created checkpoint is the only one under
+      // .viberevert/checkpoints/ (no fixtures in this test). Read
+      // back its manifest and assert captured_at equals the fixed
+      // sentinel BYTE-FOR-BYTE.
+      //
+      // Parsed via ManifestSchema (NOT a minimal cast) so the test
+      // doubles as a schema-validity check on the just-written
+      // manifest — catches regressions where the CLI threading
+      // `capturedAt: now` could (in some future bug) produce a
+      // manifest broken in OTHER fields entirely. Symmetric with
+      // start-end.test.ts's manifest assertion.
+      const { id, manifest } = await findCreatedCheckpointExcluding([]);
+      expect(manifest.captured_at).toBe(FIXED_NOW);
+      expect(manifest.name).toBe("fixed-clock");
+      expect(manifest.session_id).toBe(id); // D6 standalone invariant
+      // Bonus: rollback_target_description embeds capturedAt per
+      // git/src/checkpoint.ts line 291. Asserting it caught the
+      // value flowed through both manifest slots — same defense as
+      // git/test/checkpoint.test.ts test 1.
+      expect(manifest.rollback_target_description).toContain(FIXED_NOW);
+    } finally {
+      if (previous === undefined) {
+        delete process.env[VIBEREVERT_TEST_FIXED_NOW];
+      } else {
+        process.env[VIBEREVERT_TEST_FIXED_NOW] = previous;
+      }
+    }
   });
 });

@@ -146,6 +146,16 @@ const CHECKPOINT_DIR_NAME_RE = /^cp_[0-9A-HJKMNP-TV-Z]{26}$/;
  *     just-generated `checkpointId` (per D6: "this manifest's parent
  *     record"). For inner-session checkpoints, the caller passes the
  *     owning session's `sess_<ULID>`.
+ *   - `capturedAt`: optional override for `manifest.captured_at` (M C
+ *     addition). When omitted, git samples the wall clock via the private
+ *     `nowIsoSecondPrecision()` helper — preserving the original M B
+ *     library behavior for non-CLI callers. When provided, the caller's
+ *     value is used verbatim and validated by `ManifestSchema` (which
+ *     enforces `precision: 0, offset: true`). The CLI injects
+ *     `resolveNowForCliTimestamp()` here so that
+ *     `VIBEREVERT_TEST_FIXED_NOW` makes checkpoint fixtures byte-
+ *     deterministic. A malformed override surfaces as a clear schema
+ *     error from THIS function, not at restore time.
  *
  * Returns `{ checkpointId }`. The string already includes the `cp_` prefix
  * per D5; do NOT prepend `cp_` again (per D17b's anti-pattern callout).
@@ -156,6 +166,7 @@ export async function createCheckpoint(opts: {
   rollbackExcludePatterns: readonly string[];
   name?: string;
   sessionId?: string;
+  capturedAt?: string;
 }): Promise<{ checkpointId: string }> {
   const checkpointId = generateCheckpointId();
   const manifestSessionId = opts.sessionId ?? checkpointId;
@@ -194,7 +205,17 @@ export async function createCheckpoint(opts: {
   // here, AFTER mkdir but BEFORE any git invocation, so it reflects the
   // moment we begin sampling — close enough to the actual sample time
   // that the seconds-precision manifest field is meaningful.
-  const capturedAt = nowIsoSecondPrecision();
+  //
+  // `opts.capturedAt` (M C addition) lets callers inject an explicit
+  // timestamp value. When omitted, the wall-clock fallback preserves
+  // the original M B library behavior for any non-CLI consumer. The
+  // CLI passes `resolveNowForCliTimestamp()` here so that
+  // `VIBEREVERT_TEST_FIXED_NOW` makes checkpoint fixtures byte-
+  // deterministic. A malformed override is caught by `ManifestSchema`
+  // (precision: 0, offset: true) at the parse call below, so any
+  // override drift surfaces as a clear schema error from this
+  // function, not at restore time.
+  const capturedAt = opts.capturedAt ?? nowIsoSecondPrecision();
   const [headSha, branchOrNull, porcelainText, unstagedPatch, stagedPatch] = await Promise.all([
     getHeadSha(opts.repoRoot),
     getBranch(opts.repoRoot),

@@ -25,11 +25,12 @@
 // 3. **session.ts architectural lock #2: deterministic timestamps.**
 //    `core.endSession` accepts `endedAt` as a plain string input — it
 //    never calls `new Date()` internally. The CLI generates the
-//    timestamp here. `SessionStateSchema.ended_at` validates with
-//    second precision (`z.iso.datetime({offset: true, precision: 0})`)
-//    so we strip the fractional milliseconds from `toISOString()`.
-//    `2026-05-04T11:00:00.000Z` would FAIL schema; we emit
-//    `2026-05-04T11:00:00Z`.
+//    timestamp here via `resolveNowForCliTimestamp()` from
+//    `runtime-env.ts`, which (a) produces second-precision ISO 8601
+//    with Z offset to satisfy `SessionStateSchema.ended_at`'s
+//    `z.iso.datetime({offset: true, precision: 0})` validator, and
+//    (b) honors `VIBEREVERT_TEST_FIXED_NOW` for fixture determinism
+//    per D49 (M C addition). Production behavior is unchanged.
 //
 // 4. **D17c: plain inputs to core.** `core.endSession` receives
 //    `{repoRoot, endedAt, afterStatusText}` only. No config, no git
@@ -61,6 +62,8 @@ import {
 } from "@viberevert/core";
 import { getStatusPorcelainText } from "@viberevert/git";
 import { Command } from "clipanion";
+
+import { RuntimeEnvInvalidError, resolveNowForCliTimestamp } from "../runtime-env.js";
 
 export class EndCommand extends Command {
   static override paths = [["end"]];
@@ -103,12 +106,29 @@ export class EndCommand extends Command {
     // @viberevert/git (single owner of git invocation per D16/D17c).
     const afterStatusText = await getStatusPorcelainText(repoRoot);
 
-    // Step 4: generate ISO timestamp with second precision per
-    // SessionStateSchema's `ended_at` validator. Default
-    // `toISOString()` produces `2026-05-04T11:00:00.000Z` (3 decimals)
-    // which would fail validation; `slice(0, 19) + "Z"` produces
-    // `2026-05-04T11:00:00Z`.
-    const endedAt = `${new Date().toISOString().slice(0, 19)}Z`;
+    // Step 4: generate ISO timestamp via the CLI's runtime-env
+    // resolver. Production path: `resolveNowForCliTimestamp()` returns
+    // `new Date()` normalized to second-precision ISO 8601 with Z
+    // offset (same shape as M B's prior `slice(0, 19) + "Z"` form, but
+    // routed through @viberevert/session-format's `toIsoSecondString`
+    // helper for cross-package consistency). Test path:
+    // `VIBEREVERT_TEST_FIXED_NOW` overrides the value verbatim, making
+    // `session.json.ended_at` byte-deterministic under Step 10's
+    // golden-fixture harness (D49).
+    //
+    // RuntimeEnvInvalidError fires only when the env var is set AND
+    // malformed — a test-only failure mode. Catch and surface as exit 1
+    // with the error's pre-formatted message (envVar=value: reason).
+    let endedAt: string;
+    try {
+      endedAt = resolveNowForCliTimestamp();
+    } catch (err) {
+      if (err instanceof RuntimeEnvInvalidError) {
+        this.context.stderr.write(`${err.message}\n`);
+        return 1;
+      }
+      throw err;
+    }
 
     // Step 5: call core to perform the atomic mutations.
     try {

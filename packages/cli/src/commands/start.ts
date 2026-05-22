@@ -49,9 +49,15 @@
 // 5. **session.ts architectural lock #2: deterministic timestamps.**
 //    `core.startSession` accepts `startedAt` as a plain string input —
 //    it never calls `new Date()` internally. The CLI generates the
-//    timestamp here. SessionStateSchema requires second precision
-//    (no fractional seconds), so we strip the milliseconds from
-//    `toISOString()`.
+//    timestamp here via `resolveNowForCliTimestamp()` from
+//    `runtime-env.ts`, which (a) produces second-precision ISO 8601
+//    with Z offset to satisfy SessionStateSchema, and (b) honors
+//    `VIBEREVERT_TEST_FIXED_NOW` for fixture determinism per D49
+//    (M C addition). The same resolved value is threaded into THREE
+//    slots: persisted session.started_at, inner-checkpoint
+//    manifest.captured_at (via createCheckpoint), and D22 lock
+//    metadata — single timestamp policy per command. Production
+//    behavior is unchanged.
 //
 // 6. **D11 refusal copy is locked verbatim.** When `active-session.json`
 //    already exists, the refusal lists Session / Started at / Task /
@@ -90,6 +96,7 @@ import { Command, Option } from "clipanion";
 
 import { truncateIdForDisplay } from "../format.js";
 import { ConcurrentOperationError, type LockInfo, withExclusiveLock } from "../locks.js";
+import { RuntimeEnvInvalidError, resolveNowForCliTimestamp } from "../runtime-env.js";
 
 const START_LOCK_REL = ".viberevert/.locks/start.lock";
 
@@ -152,6 +159,34 @@ export class StartCommand extends Command {
       throw err;
     }
 
+    // Step 3b: resolve the wall-clock timestamp ONCE for this command
+    // invocation, BEFORE any lock acquisition. Threaded into THREE
+    // slots: (a) the D22 lock metadata (`lockInfo.started_at`), (b) the
+    // persisted session timestamp (`session.json.started_at` AND
+    // `active-session.json.started_at`, via the `startedAt` arg passed
+    // to `core.startSession`), and (c) the inner-session checkpoint's
+    // `manifest.captured_at` (via `createCheckpoint({ capturedAt: now })`).
+    // Single-source policy per the M C precondition lock: "one timestamp
+    // per CLI command, no policy split between persisted state and lock
+    // metadata."
+    //
+    // Production: real wall clock, second-precision ISO. Test:
+    // `VIBEREVERT_TEST_FIXED_NOW` overrides verbatim for fixture
+    // determinism (D49). Computing it here ensures
+    // `RuntimeEnvInvalidError` (test-only failure mode for a malformed
+    // env override) surfaces BEFORE D22 lock acquisition — no wasted
+    // mkdir+rmdir on the refusal path.
+    let now: string;
+    try {
+      now = resolveNowForCliTimestamp();
+    } catch (err) {
+      if (err instanceof RuntimeEnvInvalidError) {
+        this.context.stderr.write(`${err.message}\n`);
+        return 1;
+      }
+      throw err;
+    }
+
     // Step 4: enter the D22 start-lock. All session-state I/O happens
     // inside `protectedFlow` so the lock covers loadActiveSessionLock
     // → createCheckpoint → startSession → active-lock write atomically
@@ -209,6 +244,12 @@ export class StartCommand extends Command {
           checkpointDir: join(tmpSessionDir, "checkpoint"),
           rollbackExcludePatterns,
           sessionId,
+          // capturedAt: thread the command-scoped `now` into the
+          // inner-session checkpoint manifest so VIBEREVERT_TEST_FIXED_NOW
+          // makes session-bound report fixtures byte-deterministic (D49)
+          // — checkpoint-base ad-hoc reports source report.started_at
+          // from this manifest's captured_at value per D31/D56.
+          capturedAt: now,
         });
         checkpointId = checkpointResult.checkpointId;
 
@@ -218,10 +259,11 @@ export class StartCommand extends Command {
         // .viberevert/, never touches the working tree).
         const beforeStatusText = await getStatusPorcelainText(repoRoot);
 
-        // Step 4g: generate startedAt with second precision per
-        // SessionStateSchema. Default toISOString() includes
-        // milliseconds which would fail validation.
-        startedAt = `${new Date().toISOString().slice(0, 19)}Z`;
+        // Step 4g: assign startedAt from the command-scoped `now`
+        // resolved at step 3b. Same wall-clock value used by lockInfo
+        // AND the inner-checkpoint capturedAt — single timestamp
+        // policy per CLI command.
+        startedAt = now;
 
         // Step 4h: hand off to core.startSession. Core writes
         // session-state files, atomically renames the tmp dir to
@@ -260,7 +302,10 @@ export class StartCommand extends Command {
         this.task !== undefined
           ? `viberevert start --task ${JSON.stringify(this.task)}`
           : "viberevert start",
-      started_at: `${new Date().toISOString().slice(0, 19)}Z`,
+      // Same `now` value used for session.started_at AND
+      // manifest.captured_at — single timestamp policy per CLI
+      // command, see step 3b.
+      started_at: now,
       host: hostname(),
     };
 

@@ -93,6 +93,7 @@ import { Command, Option } from "clipanion";
 
 import { renameDirAtomic } from "../atomic.js";
 import { ConcurrentOperationError, type LockInfo, withExclusiveLock } from "../locks.js";
+import { RuntimeEnvInvalidError, resolveNowForCliTimestamp } from "../runtime-env.js";
 
 const CHECKPOINT_NAME_LOCK_REL = ".viberevert/.locks/checkpoint-name.lock";
 
@@ -157,6 +158,29 @@ export class CheckpointCommand extends Command {
       throw err;
     }
 
+    // Step 3b: resolve the wall-clock timestamp ONCE for this command
+    // invocation, BEFORE any lock acquisition. Threaded into both the
+    // D22 lock metadata (`lockInfo.started_at`) AND the new checkpoint's
+    // `manifest.captured_at` (via `createCheckpoint({ capturedAt: now })`)
+    // — single-source policy per the M C precondition lock: "one
+    // timestamp per CLI command, no policy split between persisted
+    // state and lock metadata." Production: real wall clock,
+    // second-precision ISO. Test: `VIBEREVERT_TEST_FIXED_NOW` overrides
+    // verbatim for fixture determinism (D49). Computing it here ensures
+    // `RuntimeEnvInvalidError` (test-only failure mode for a malformed
+    // env override) surfaces BEFORE D22 lock acquisition — no wasted
+    // mkdir+rmdir on the refusal path.
+    let now: string;
+    try {
+      now = resolveNowForCliTimestamp();
+    } catch (err) {
+      if (err instanceof RuntimeEnvInvalidError) {
+        this.context.stderr.write(`${err.message}\n`);
+        return 1;
+      }
+      throw err;
+    }
+
     // Step 4: branch on --name. With a name, acquire the D22 lock
     // and run scan+create inside it. Without a name, skip the lock
     // entirely (no uniqueness invariant to protect).
@@ -196,6 +220,12 @@ export class CheckpointCommand extends Command {
           checkpointDir: tmpDirAbs,
           rollbackExcludePatterns,
           ...(this.name !== undefined ? { name: this.name } : {}),
+          // capturedAt: thread the command-scoped `now` into the
+          // checkpoint manifest so VIBEREVERT_TEST_FIXED_NOW makes
+          // checkpoint goldens byte-deterministic (D49). Production
+          // path: same wall-clock value used by lockInfo above,
+          // single-source policy per the M C precondition lock.
+          capturedAt: now,
           // sessionId intentionally omitted — git defaults to
           // checkpointId for standalone checkpoints (D6: "this
           // manifest's parent record").
@@ -227,7 +257,9 @@ export class CheckpointCommand extends Command {
         const lockInfo: LockInfo = {
           pid: process.pid,
           command: `viberevert checkpoint --name ${JSON.stringify(this.name)}`,
-          started_at: `${new Date().toISOString().slice(0, 19)}Z`,
+          // Same `now` value used for manifest.captured_at — single
+          // timestamp policy per CLI command, see step 3b.
+          started_at: now,
           host: hostname(),
         };
         result = await withExclusiveLock(lockDir, lockInfo, protectedFlow);
