@@ -57,15 +57,31 @@
 //   - viberevert report (Phase D) imports `resolveProductVersionForReport`.
 //   - check-orchestration.ts (Phase C) imports as needed.
 
-import { toIsoSecondString } from "@viberevert/session-format";
+import { toIsoSecondString, VIBEREVERT_TEST_FIXED_NOW } from "@viberevert/session-format";
 import pkg from "../package.json" with { type: "json" };
 
 // =============================================================================
 // Env-var names (exported so tests reference them by name, not by string).
+//
+// NOW is re-exported from @viberevert/session-format because it is also
+// consumed by ID factories in @viberevert/core and @viberevert/git per
+// the shared-contract rule (D49 amendment / Precondition 2 commit).
+// SHA and VERSION remain CLI-only — the CLI is the sole consumer, so
+// they stay defined here. If a future cross-package consumer needs
+// either, migrate it to packages/session-format/src/test-env-names.ts
+// alongside NOW and ULID_SEED.
 // =============================================================================
 
-/** Env var that, when set, fixes the wall-clock now-stamp to its value. */
-export const VIBEREVERT_TEST_FIXED_NOW = "VIBEREVERT_TEST_FIXED_NOW";
+/**
+ * Re-exported from @viberevert/session-format. See that module's
+ * docstring for the full contract — production-unset, test-set
+ * overrides the wall clock with a second-precision ISO 8601 string.
+ * Re-exported here so existing CLI-internal imports
+ * (`import { VIBEREVERT_TEST_FIXED_NOW } from "../runtime-env.js"`)
+ * continue to work without churn — every test file landed in this
+ * package already uses that import path.
+ */
+export { VIBEREVERT_TEST_FIXED_NOW };
 /** Env var that, when set, fixes ReportFile.since_resolved_sha to its value. */
 export const VIBEREVERT_TEST_FIXED_SHA = "VIBEREVERT_TEST_FIXED_SHA";
 /** Env var that, when set, fixes the product version stamp to its value. */

@@ -73,6 +73,7 @@ export {
   SessionStateSchema,
   SinceKindSchema,
 } from "./schemas.js";
+export { VIBEREVERT_TEST_FIXED_NOW, VIBEREVERT_TEST_FIXED_ULID_SEED } from "./test-env-names.js";
 export { toIsoSecondString } from "./time.js";
 export type { SchemaVersion } from "./version.js";
 export { SCHEMA_VERSION } from "./version.js";
