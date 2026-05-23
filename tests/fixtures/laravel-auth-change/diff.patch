@@ -1,0 +1,39 @@
+diff --git a/app/Http/Controllers/Auth/LoginController.php b/app/Http/Controllers/Auth/LoginController.php
+new file mode 100644
+--- /dev/null
++++ b/app/Http/Controllers/Auth/LoginController.php
+@@ -0,0 +1,13 @@
++<?php
++
++namespace App\Http\Controllers\Auth;
++
++use App\Http\Controllers\Controller;
++
++class LoginController extends Controller
++{
++    public function showLoginForm()
++    {
++        return view('auth.login');
++    }
++}
+diff --git a/app/Http/Middleware/EnsureUserIsAdmin.php b/app/Http/Middleware/EnsureUserIsAdmin.php
+new file mode 100644
+--- /dev/null
++++ b/app/Http/Middleware/EnsureUserIsAdmin.php
+@@ -0,0 +1,16 @@
++<?php
++
++namespace App\Http\Middleware;
++
++use Closure;
++
++class EnsureUserIsAdmin
++{
++    public function handle($request, Closure $next)
++    {
++        if (! $request->user() || ! $request->user()->is_admin) {
++            abort(403);
++        }
++        return $next($request);
++    }
++}
