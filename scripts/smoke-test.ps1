@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Fabio Marcello Salvadori
 
-# VibeRevert M B smoke test.
-# Builds + packs the 4 currently pack-tested packages, installs them into a
-# scratch dir under $env:TEMP, and exercises the M B command surface against
+# VibeRevert M B + M C Phase 12a smoke test.
+# Builds + packs the 6 currently publishable packages, installs them into a
+# scratch dir under $env:TEMP, and exercises the M B command surface AND the
+# M C Phase 12a packed-install scenarios (basic check + report flows) against
 # a real `git init` repo.
 #
 # See docs/release-process.md for the workflow rationale and the two known
@@ -128,14 +129,16 @@ try {
         Pop-Location
     }
 
-    # 2. Pack the 4 M B packages into $packDir.
-    Write-Section "Pack M B packages into $packDir"
+    # 2. Pack the 6 publishable packages into $packDir.
+    Write-Section "Pack publishable packages into $packDir"
     New-Item -ItemType Directory -Force $packDir | Out-Null
     Push-Location $repoRoot
     try {
         & pnpm --filter '@viberevert/session-format' `
                --filter '@viberevert/core' `
                --filter '@viberevert/git' `
+               --filter '@viberevert/checks' `
+               --filter '@viberevert/reporters' `
                --filter 'viberevert' `
                pack --pack-destination $packDir
         if ($LASTEXITCODE -ne 0) { throw "pnpm pack failed (exit $LASTEXITCODE)" }
@@ -147,8 +150,11 @@ try {
     $tgzSf = (Get-ChildItem $packDir -Filter 'viberevert-session-format-*.tgz' | Select-Object -First 1).FullName
     $tgzCo = (Get-ChildItem $packDir -Filter 'viberevert-core-*.tgz' | Select-Object -First 1).FullName
     $tgzGi = (Get-ChildItem $packDir -Filter 'viberevert-git-*.tgz' | Select-Object -First 1).FullName
+    $tgzCh = (Get-ChildItem $packDir -Filter 'viberevert-checks-*.tgz' | Select-Object -First 1).FullName
+    $tgzRe = (Get-ChildItem $packDir -Filter 'viberevert-reporters-*.tgz' | Select-Object -First 1).FullName
     # `viberevert-<version>.tgz` — match digit-leading suffix so we don't pick
-    # up viberevert-git/core/session-format tarballs (which also start with `viberevert-`).
+    # up viberevert-git/core/session-format/checks/reporters tarballs (which also
+    # start with `viberevert-`).
     # Note: PowerShell/Windows `-Filter` is filesystem-provider filtering, NOT a bash-style
     # glob — character classes like `[0-9]` do NOT work. Use a `Where-Object` regex (.NET regex)
     # via `-match` instead. Sort-Object for deterministic selection if multiple matches ever exist.
@@ -157,7 +163,7 @@ try {
         Sort-Object Name |
         Select-Object -First 1).FullName
 
-    foreach ($tgz in @($tgzSf, $tgzCo, $tgzGi, $tgzCl)) {
+    foreach ($tgz in @($tgzSf, $tgzCo, $tgzGi, $tgzCh, $tgzRe, $tgzCl)) {
         if (-not $tgz) {
             $listed = (Get-ChildItem $packDir).Name -join ', '
             throw "Expected tarball not found under $packDir (files: $listed)"
@@ -191,6 +197,8 @@ try {
         $pSf = $tgzSf -replace '\\', '/'
         $pCo = $tgzCo -replace '\\', '/'
         $pGi = $tgzGi -replace '\\', '/'
+        $pCh = $tgzCh -replace '\\', '/'
+        $pRe = $tgzRe -replace '\\', '/'
         $pCl = $tgzCl -replace '\\', '/'
 
         $packageJson = @"
@@ -202,13 +210,17 @@ try {
     "@viberevert/session-format": "file:$pSf",
     "@viberevert/core": "file:$pCo",
     "@viberevert/git": "file:$pGi",
+    "@viberevert/checks": "file:$pCh",
+    "@viberevert/reporters": "file:$pRe",
     "viberevert": "file:$pCl"
   },
   "pnpm": {
     "overrides": {
       "@viberevert/session-format": "file:$pSf",
       "@viberevert/core": "file:$pCo",
-      "@viberevert/git": "file:$pGi"
+      "@viberevert/git": "file:$pGi",
+      "@viberevert/checks": "file:$pCh",
+      "@viberevert/reporters": "file:$pRe"
     }
   }
 }
@@ -275,6 +287,43 @@ try {
         Invoke-Cli -CliArgs @('end') -ExpectedExit 1 -StepName 'end-refused-no-session'
         Invoke-Cli -CliArgs @('sessions') -ExpectedExit 0 -StepName 'sessions-ended'
 
+        # 7. M C Phase 12a: basic check + report scenarios from packed install.
+        # These prove the new package graph (checks + reporters added in M C)
+        # works end-to-end against the published CLI binary, against a real
+        # checkpoint base. State at entry: no active session, smoke-baseline
+        # checkpoint exists, working tree is clean.
+
+        Write-Section 'M C 12a: boring edit + check (expect zero findings, exit 0)'
+        # Append a boring documentation line to README.md. README.md matches
+        # no path-classifier rule and contains no detector triggers, so the
+        # check should produce zero findings.
+        Add-Content -Path 'README.md' -Value 'Boring documentation edit.' -Encoding ascii
+        Invoke-Cli -CliArgs @('check', '--since', 'smoke-baseline') -ExpectedExit 0 -StepName 'check-boring-zero-findings'
+
+        Write-Section 'M C 12a: risky edit + check --json (expect critical secret, exit 2)'
+        # Add a Python file with an ENV-style synthetic secret literal. The
+        # TESTFIXTUREONLY_ prefix ensures the value is obviously not a real
+        # credential and won't trip GitHub Push Protection on push. The
+        # detector emits a critical secrets.regex finding which trips the
+        # default block_on=critical gate.
+        New-Item -ItemType Directory -Force 'src' | Out-Null
+        $secretPyContent = @'
+"""Application config."""
+
+APP_API_KEY = "TESTFIXTUREONLY_S9qX8wV7tS6rP5nM4kL3jH2gF1"
+'@
+        $secretPyContent | Out-File -FilePath 'src/config.py' -Encoding ascii
+        Invoke-Cli -CliArgs @('check', '--since', 'smoke-baseline', '--json') -ExpectedExit 2 -StepName 'check-risky-exit-2-json'
+
+        Write-Section 'M C 12a: report variants'
+        # `viberevert report` defaults to terminal output, reads the most
+        # recent persisted report via D47 resolution. Exit 0 for a read-only
+        # render — the report's findings do NOT affect this command's exit
+        # code (only `check` gates).
+        Invoke-Cli -CliArgs @('report') -ExpectedExit 0 -StepName 'report-terminal'
+        Invoke-Cli -CliArgs @('report', '--markdown') -ExpectedExit 0 -StepName 'report-markdown'
+        Invoke-Cli -CliArgs @('report', '--json') -ExpectedExit 0 -StepName 'report-json'
+
     } finally {
         Pop-Location
     }
@@ -282,7 +331,7 @@ try {
     Write-Section 'Summary'
     Write-Host "CLI steps passed: $passCount"
     Write-Host "CLI steps failed: $failCount"
-    Write-Host '[ALL PASS] M B smoke test green.'
+    Write-Host '[ALL PASS] M B + M C Phase 12a smoke test green.'
 
 } catch {
     $aborted = $true
