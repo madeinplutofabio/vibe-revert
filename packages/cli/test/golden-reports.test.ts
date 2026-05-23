@@ -64,12 +64,37 @@
 //    type so symlinked-CLI-binary or symlinked-fixture-dir
 //    pathologies don't slip through.
 //
-// 7. **Platform-conditional `pnpm` binary name.** On Windows, pnpm
-//    installs as `pnpm.cmd` (batch wrapper); `execFile("pnpm", ...)`
-//    without `shell: true` ENOENTs because Node's child_process
-//    does NOT auto-resolve `.cmd` extensions. `pnpm.cmd` explicitly
-//    avoids the issue without inviting `shell: true`'s escaping
-//    hazards.
+// 7. **Platform-conditional pnpm build invocation via explicit
+//    cmd.exe on Windows.** On Windows, `pnpm` ships as `pnpm.cmd`
+//    (a batch wrapper). Node's child_process has TWO failure modes
+//    against batch files that the Step 10.1 design did not catch:
+//      - `execFile("pnpm", ...)` ENOENTs because Node does not
+//        auto-resolve the `.cmd` extension.
+//      - `execFile("pnpm.cmd", ...)` (Step 10.1's original choice)
+//        fails with `spawn EINVAL` because Node's spawn syscall
+//        cannot directly invoke `.cmd`/`.bat` files on Windows —
+//        the OS requires a command interpreter to parse batch
+//        syntax. The Step 10.1 lock claimed `pnpm.cmd` "avoids
+//        shell true without inviting escaping hazards"; that
+//        claim is now known false on this code path.
+//
+//    The fix is to invoke `cmd.exe /d /s /c pnpm.cmd ...`
+//    explicitly:
+//      - `/d` disables AutoRun registry commands (no surprise
+//        side effects from user-local registry tweaks).
+//      - `/s` modifies string handling after /c (more predictable
+//        quoting behavior).
+//      - `/c` execute the command and terminate.
+//    This is the same internal pattern Node uses when
+//    `{ shell: true }` is set on Windows, but invoked explicitly
+//    so the spawn options stay focused (no broad `shell: true`
+//    toggle, which would also alter argument escaping for the
+//    rest of the call). POSIX behavior is unchanged — Linux/macOS
+//    still invokes `pnpm` directly.
+//
+//    The bug was masked until Step 11's clean-state verification
+//    deleted `dist/` and forced the auto-build path to run for the
+//    first time on Windows.
 
 import { execFile } from "node:child_process";
 import { lstat, readdir } from "node:fs/promises";
@@ -94,12 +119,18 @@ const FIXTURES_DIR = join(REPO_ROOT, "tests", "fixtures");
 const CLI_BIN_ABS_PATH = join(REPO_ROOT, "packages", "cli", "dist", "index.js");
 
 /**
- * Platform-conditional pnpm binary name. On Windows, pnpm installs
- * as `pnpm.cmd`; Node's child_process won't resolve the `.cmd`
- * extension automatically for `execFile`. Hardcoding the right name
- * per-platform avoids `shell: true` (which has escaping hazards).
+ * Platform-conditional build invocation. See lock #7 for the full
+ * rationale on why Windows needs explicit `cmd.exe /d /s /c pnpm.cmd
+ * ...` rather than `execFile("pnpm.cmd", ...)` directly. POSIX
+ * platforms invoke `pnpm` directly because `pnpm` is a real script
+ * (or symlink to one) that Node's spawn handles correctly.
  */
-const PNPM_BIN = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
+const PNPM_BUILD_COMMAND = process.platform === "win32" ? "cmd.exe" : "pnpm";
+
+const PNPM_BUILD_ARGS =
+  process.platform === "win32"
+    ? ["/d", "/s", "/c", "pnpm.cmd", "--filter", "viberevert...", "build"]
+    : ["--filter", "viberevert...", "build"];
 
 /**
  * Build-step subprocess timeout passed to `execFile`. CLI's tsc +
@@ -204,7 +235,7 @@ async function ensureCliBuilt(): Promise<void> {
   }
   if (needBuild) {
     try {
-      await execFileAsync(PNPM_BIN, ["--filter", "viberevert...", "build"], {
+      await execFileAsync(PNPM_BUILD_COMMAND, PNPM_BUILD_ARGS, {
         cwd: REPO_ROOT,
         windowsHide: true,
         timeout: BUILD_TIMEOUT_MS,
@@ -218,7 +249,7 @@ async function ensureCliBuilt(): Promise<void> {
       };
       throw new Error(
         `Failed to auto-build CLI for golden fixture tests.\n` +
-          `Command: ${PNPM_BIN} --filter viberevert... build\n` +
+          `Command: ${PNPM_BUILD_COMMAND} ${PNPM_BUILD_ARGS.join(" ")}\n` +
           `stdout:\n${String(e.stdout ?? "")}\n` +
           `stderr:\n${String(e.stderr ?? e.message ?? "")}`,
       );
