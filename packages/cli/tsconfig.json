@@ -4,6 +4,6 @@
     "noEmit": true,
     "tsBuildInfoFile": "./.tsbuildinfo"
   },
-  "include": ["src", "test"],
+  "include": ["src", "test", "../../tests/fixtures/**/*.ts"],
   "exclude": ["dist", "node_modules"]
 }
