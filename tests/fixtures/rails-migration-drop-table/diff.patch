@@ -1,0 +1,10 @@
+diff --git a/db/migrate/20260101000000_drop_old_table.rb b/db/migrate/20260101000000_drop_old_table.rb
+new file mode 100644
+--- /dev/null
++++ b/db/migrate/20260101000000_drop_old_table.rb
+@@ -0,0 +1,5 @@
++class DropOldTable < ActiveRecord::Migration[7.0]
++  def up
++    drop_table :old_data
++  end
++end

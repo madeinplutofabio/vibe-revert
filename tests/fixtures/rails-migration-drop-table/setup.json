@@ -1,0 +1,21 @@
+{
+  "files": [
+    {
+      "path": "Gemfile",
+      "content": "source \"https://rubygems.org\"\n\ngem \"rails\", \"~> 7.1.0\"\n"
+    },
+    {
+      "path": "config/routes.rb",
+      "content": "Rails.application.routes.draw do\n  root \"home#index\"\nend\n"
+    },
+    {
+      "path": "README.md",
+      "content": "# Rails test project\n\nMinimal baseline for the rails-migration-drop-table golden fixture.\n"
+    }
+  ],
+  "git_init": true,
+  "checkpoint": true,
+  "checkpoint_name": "baseline",
+  "frameworks": ["rails"],
+  "expected_check_exit_code": 0
+}

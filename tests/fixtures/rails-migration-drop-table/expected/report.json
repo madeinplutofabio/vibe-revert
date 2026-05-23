@@ -1,0 +1,95 @@
+{
+  "schema_version": "1.0",
+  "kind": "ad_hoc",
+  "report_id": "rpt_01KDVDNA0095SW7YMNXPZ1R2H7",
+  "since_kind": "checkpoint_name",
+  "since_ref": "baseline",
+  "since_resolved_sha": "0000000000000000000000000000000000000000",
+  "written_at": "2026-01-01T00:00:00Z",
+  "report": {
+    "schema_version": "1.0",
+    "session_id": "rpt_01KDVDNA0095SW7YMNXPZ1R2H7",
+    "started_at": "2026-01-01T00:00:00Z",
+    "ended_at": "2026-01-01T00:00:00Z",
+    "detected_frameworks": [
+      "rails"
+    ],
+    "risk_level": "high",
+    "changed_files": [
+      {
+        "path": "db/migrate/20260101000000_drop_old_table.rb",
+        "status": "added",
+        "risk_tags": [
+          "database",
+          "migration"
+        ],
+        "risk_level": "high"
+      }
+    ],
+    "results": [
+      {
+        "id": "migration.danger-term.rails.drop-table",
+        "title": "Destructive migration: Rails drop_table",
+        "level": "high",
+        "confidence": "medium",
+        "category": "database",
+        "message": "Rails drop_table detected at db/migrate/20260101000000_drop_old_table.rb:3",
+        "evidence": [
+          {
+            "detail": "danger-term: rails.drop-table",
+            "file": "db/migrate/20260101000000_drop_old_table.rb",
+            "line": 3
+          }
+        ],
+        "recommendation": "Run the migration locally before deploying. Confirm a rollback path exists. Consider splitting destructive operations into a forward-only deploy + a separate cleanup migration."
+      },
+      {
+        "id": "migration.missing-down",
+        "title": "New migration has destructive operation without down() method",
+        "level": "high",
+        "confidence": "high",
+        "category": "database",
+        "message": "New migration db/migrate/20260101000000_drop_old_table.rb contains a destructive operation but has no down() method for rollback",
+        "evidence": [
+          {
+            "detail": "missing-down",
+            "file": "db/migrate/20260101000000_drop_old_table.rb"
+          }
+        ],
+        "recommendation": "Add a down() method to enable rollback of this migration. If the destructive operation is intentional and irreversible, document the no-rollback decision in the migration body and confirm with the team before deploying."
+      },
+      {
+        "id": "path-classifier.rails.migrations",
+        "title": "Database/migration path changed",
+        "level": "high",
+        "confidence": "high",
+        "category": "database",
+        "message": "File 'db/migrate/20260101000000_drop_old_table.rb' matches path-classifier rule 'rails.migrations' for category 'database'.",
+        "evidence": [
+          {
+            "detail": "rails.migrations",
+            "file": "db/migrate/20260101000000_drop_old_table.rb"
+          }
+        ],
+        "recommendation": "Database/migration changes can be destructive and hard to roll back. Run the migration locally, confirm a rollback path exists, and consider splitting destructive operations into a forward-only deploy plus a separate cleanup migration."
+      },
+      {
+        "id": "test-gap.rails.migrations",
+        "title": "Risky change without paired test: rails.migrations",
+        "level": "high",
+        "confidence": "medium",
+        "category": "test-gap",
+        "message": "Changes to db/migrate/20260101000000_drop_old_table.rb were not paired with a sibling test change in the same diff",
+        "evidence": [
+          {
+            "detail": "path-rule: rails.migrations",
+            "file": "db/migrate/20260101000000_drop_old_table.rb"
+          }
+        ],
+        "recommendation": "Add or update sibling tests for this change in the same diff. Risky-area changes without paired test changes are difficult to verify and easy to regress. If the change is intentionally test-exempt (e.g., a pure config tweak), document the exemption in the change description."
+      }
+    ],
+    "rollback_available": true,
+    "summary": "4 findings: database (3), test-gap (1)"
+  }
+}
