@@ -1,0 +1,12 @@
+{
+  "files": [
+    {
+      "path": "README.md",
+      "content": "# Test project\n\nMinimal baseline for the dirty-tree-rollback clean-check fixture.\n"
+    }
+  ],
+  "git_init": true,
+  "checkpoint": true,
+  "checkpoint_name": "baseline",
+  "expected_check_exit_code": 0
+}
