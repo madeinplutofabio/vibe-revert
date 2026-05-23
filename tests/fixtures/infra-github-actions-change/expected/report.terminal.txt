@@ -1,0 +1,29 @@
+================================================================================
+VibeRevert Report
+================================================================================
+
+Report ID:    rpt_01KDVDNA0095SW7YMNXPZ1R2H7
+Kind:         ad_hoc
+Since:        baseline (kind: checkpoint_name)
+Resolved SHA: 0000000000000000000000000000000000000000
+Written at:   2026-01-01T00:00:00Z
+Frameworks:   (none)
+
+Risk Level:   HIGH
+Summary:      1 findings: deployment (1)
+
+--------------------------------------------------------------------------------
+Findings (1)
+--------------------------------------------------------------------------------
+
+[HIGH] deployment: Deployment path changed
+  Message: File '.github/workflows/deploy.yml' matches path-classifier rule 'generic.gh-actions' for category 'deployment'.
+  File: .github/workflows/deploy.yml
+  Detail: generic.gh-actions
+  Recommendation: Deployment configuration changes affect how and where the app runs. Verify the change in a non-production environment first, and confirm CI gates still pass before merging.
+
+--------------------------------------------------------------------------------
+Changed Files (1)
+--------------------------------------------------------------------------------
+
+A  .github/workflows/deploy.yml  [ci]  HIGH

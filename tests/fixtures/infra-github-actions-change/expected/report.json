@@ -1,0 +1,46 @@
+{
+  "schema_version": "1.0",
+  "kind": "ad_hoc",
+  "report_id": "rpt_01KDVDNA0095SW7YMNXPZ1R2H7",
+  "since_kind": "checkpoint_name",
+  "since_ref": "baseline",
+  "since_resolved_sha": "0000000000000000000000000000000000000000",
+  "written_at": "2026-01-01T00:00:00Z",
+  "report": {
+    "schema_version": "1.0",
+    "session_id": "rpt_01KDVDNA0095SW7YMNXPZ1R2H7",
+    "started_at": "2026-01-01T00:00:00Z",
+    "ended_at": "2026-01-01T00:00:00Z",
+    "detected_frameworks": [],
+    "risk_level": "high",
+    "changed_files": [
+      {
+        "path": ".github/workflows/deploy.yml",
+        "status": "added",
+        "risk_tags": [
+          "ci"
+        ],
+        "risk_level": "high"
+      }
+    ],
+    "results": [
+      {
+        "id": "path-classifier.generic.gh-actions",
+        "title": "Deployment path changed",
+        "level": "high",
+        "confidence": "high",
+        "category": "deployment",
+        "message": "File '.github/workflows/deploy.yml' matches path-classifier rule 'generic.gh-actions' for category 'deployment'.",
+        "evidence": [
+          {
+            "detail": "generic.gh-actions",
+            "file": ".github/workflows/deploy.yml"
+          }
+        ],
+        "recommendation": "Deployment configuration changes affect how and where the app runs. Verify the change in a non-production environment first, and confirm CI gates still pass before merging."
+      }
+    ],
+    "rollback_available": true,
+    "summary": "1 findings: deployment (1)"
+  }
+}
