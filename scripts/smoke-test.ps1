@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Fabio Marcello Salvadori
 
-# VibeRevert M B + M C Phase 12a smoke test.
+# VibeRevert M B + M C Phase 12a + 12b smoke test.
 # Builds + packs the 6 currently publishable packages, installs them into a
 # scratch dir under $env:TEMP, and exercises the M B command surface AND the
-# M C Phase 12a packed-install scenarios (basic check + report flows) against
-# a real `git init` repo.
+# M C Phase 12a + 12b packed-install scenarios (basic check + report flows
+# plus targeted package-boundary proofs) against a real `git init` repo.
 #
 # See docs/release-process.md for the workflow rationale and the two known
 # release-packaging issues (pnpm.overrides workaround; PowerShell 5.1 BOM).
@@ -324,6 +324,40 @@ APP_API_KEY = "TESTFIXTUREONLY_S9qX8wV7tS6rP5nM4kL3jH2gF1"
         Invoke-Cli -CliArgs @('report', '--markdown') -ExpectedExit 0 -StepName 'report-markdown'
         Invoke-Cli -CliArgs @('report', '--json') -ExpectedExit 0 -StepName 'report-json'
 
+        # 8. M C Phase 12b: targeted packed-install proofs for high-value
+        # M C package-boundary paths. Smoke tests cover package-boundary
+        # failure modes, NOT duplicate behavioral coverage proven byte-stably
+        # in golden fixtures.
+
+        Write-Section 'M C 12b: report --threshold packed filter'
+        # Run this before the D56 zero-finding check overwrites the latest
+        # persisted report. The latest report is still the Phase 12a critical
+        # secrets report, so threshold filtering is exercised on meaningful data.
+        Invoke-Cli -CliArgs @('report', '--threshold', 'high') -ExpectedExit 0 -StepName 'report-threshold-high'
+
+        Write-Section 'M C 12b: D56 dirty-checkpoint packed proof'
+        # Capture the current dirty working tree: README.md modified and
+        # src/config.py untracked with a critical synthetic secret from Phase 12a.
+        Invoke-Cli -CliArgs @('checkpoint', '--name', 'dirty-base') -ExpectedExit 0 -StepName 'checkpoint-create-with-dirt'
+
+        # Add a boring post-checkpoint change. Correct D56 behavior excludes
+        # the pre-existing dirty secret, so this check exits 0. If the dirty
+        # checkpoint machinery regresses and src/config.py leaks into the diff,
+        # the critical secret finding makes this exit 2 and the smoke test fails.
+        New-Item -ItemType Directory -Force 'docs' | Out-Null
+        'Post-checkpoint boring documentation change.' | Out-File -FilePath 'docs/d56-note.md' -Encoding ascii
+        Invoke-Cli -CliArgs @('check', '--since', 'dirty-base') -ExpectedExit 0 -StepName 'check-d56-dirty-base-excludes-preexisting-dirt'
+
+        Write-Section 'M C 12b: D58 --staged + checkpoint mutual exclusion'
+        Invoke-Cli -CliArgs @('check', '--staged', '--since', 'smoke-baseline') -ExpectedExit 1 -StepName 'check-staged-plus-checkpoint-name-refused'
+
+        Write-Section 'M C 12b: missing config (LAST scenario - corrupts state for any later steps)'
+        Remove-Item -Force '.viberevert.yml'
+        if (Test-Path '.viberevert.yml') {
+            throw '.viberevert.yml deletion failed; required precondition for missing-config check'
+        }
+        Invoke-Cli -CliArgs @('check', '--since', 'dirty-base') -ExpectedExit 1 -StepName 'check-missing-config-refused'
+
     } finally {
         Pop-Location
     }
@@ -331,7 +365,7 @@ APP_API_KEY = "TESTFIXTUREONLY_S9qX8wV7tS6rP5nM4kL3jH2gF1"
     Write-Section 'Summary'
     Write-Host "CLI steps passed: $passCount"
     Write-Host "CLI steps failed: $failCount"
-    Write-Host '[ALL PASS] M B + M C Phase 12a smoke test green.'
+    Write-Host '[ALL PASS] M B + M C Phase 12a + 12b smoke test green.'
 
 } catch {
     $aborted = $true
