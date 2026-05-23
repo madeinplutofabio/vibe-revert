@@ -1,0 +1,35 @@
+================================================================================
+VibeRevert Report
+================================================================================
+
+Report ID:    rpt_01KDVDNA0095SW7YMNXPZ1R2H7
+Kind:         ad_hoc
+Since:        baseline (kind: checkpoint_name)
+Resolved SHA: 0000000000000000000000000000000000000000
+Written at:   2026-01-01T00:00:00Z
+Frameworks:   laravel
+
+Risk Level:   CRITICAL
+Summary:      2 findings: payments (1), test-gap (1)
+
+--------------------------------------------------------------------------------
+Findings (2)
+--------------------------------------------------------------------------------
+
+[CRITICAL] payments: Payments-related path changed
+  Message: File 'app/Http/Controllers/Webhooks/StripeWebhookController.php' matches path-classifier rule 'laravel.webhook-controllers' for category 'payments'.
+  File: app/Http/Controllers/Webhooks/StripeWebhookController.php
+  Detail: laravel.webhook-controllers
+  Recommendation: Payment-related code is high-impact: bugs here can charge or refund the wrong amounts. Review the change against the payment-flow spec, verify with a sandbox transaction, and confirm webhook idempotency where relevant.
+
+[HIGH] test-gap: Risky change without paired test: laravel.webhook-controllers
+  Message: Changes to app/Http/Controllers/Webhooks/StripeWebhookController.php were not paired with a sibling test change in the same diff
+  File: app/Http/Controllers/Webhooks/StripeWebhookController.php
+  Detail: path-rule: laravel.webhook-controllers
+  Recommendation: Add or update sibling tests for this change in the same diff. Risky-area changes without paired test changes are difficult to verify and easy to regress. If the change is intentionally test-exempt (e.g., a pure config tweak), document the exemption in the change description.
+
+--------------------------------------------------------------------------------
+Changed Files (1)
+--------------------------------------------------------------------------------
+
+A  app/Http/Controllers/Webhooks/StripeWebhookController.php  [payments, webhook]  CRITICAL

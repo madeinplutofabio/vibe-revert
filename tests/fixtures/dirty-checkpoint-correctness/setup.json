@@ -1,0 +1,40 @@
+{
+  "files": [
+    {
+      "path": "composer.json",
+      "content": "{\n  \"name\": \"test/laravel-project\",\n  \"type\": \"project\",\n  \"require\": {\n    \"php\": \"^8.2\",\n    \"laravel/framework\": \"^11.0\"\n  }\n}\n"
+    },
+    {
+      "path": "artisan",
+      "content": "#!/usr/bin/env php\n<?php\n// Test placeholder for Laravel framework detection.\n"
+    },
+    {
+      "path": "app/Http/Controllers/Auth/LoginController.php",
+      "content": "<?php\n\nnamespace App\\Http\\Controllers\\Auth;\n\nuse App\\Http\\Controllers\\Controller;\n\nclass LoginController extends Controller\n{\n    public function showLoginForm()\n    {\n        return view('auth.login');\n    }\n}\n"
+    },
+    {
+      "path": ".gitignore",
+      "content": "!.env\n"
+    },
+    {
+      "path": "README.md",
+      "content": "# Dirty-checkpoint correctness proof\n\nTrust-critical D56 fixture: pre-existing dirty tracked + untracked state\nat checkpoint capture must NOT appear in post-checkpoint check findings.\n"
+    }
+  ],
+  "pre_checkpoint_changes": [
+    {
+      "path": "app/Http/Controllers/Auth/LoginController.php",
+      "content": "<?php\n\nnamespace App\\Http\\Controllers\\Auth;\n\nuse App\\Http\\Controllers\\Controller;\n\nclass LoginController extends Controller\n{\n    public function showLoginForm()\n    {\n        return view('auth.login');\n    }\n\n    public function logout()\n    {\n        return redirect('/');\n    }\n}\n"
+    }
+  ],
+  "pre_checkpoint_untracked_files": [
+    {
+      "path": ".env",
+      "content": "SOME_API_KEY=TESTFIXTUREONLY_Y9qX8wV7tS6rP5nM4kL3jH2gF1\n"
+    }
+  ],
+  "git_init": true,
+  "checkpoint": true,
+  "checkpoint_name": "baseline",
+  "expected_check_exit_code": 2
+}
