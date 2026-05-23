@@ -21,7 +21,8 @@
       "!!**/.viberevert",
       "!!**/coverage",
       "!!LICENSE",
-      "!!NOTICE"
+      "!!NOTICE",
+      "!!tests/fixtures/**/expected"
     ]
   },
   "formatter": {
