@@ -1,0 +1,24 @@
+{
+  "files": [
+    {
+      "path": "next.config.js",
+      "content": "module.exports = {};\n"
+    },
+    {
+      "path": "package.json",
+      "content": "{\n  \"name\": \"test-nextjs-project\",\n  \"version\": \"1.0.0\",\n  \"private\": true,\n  \"scripts\": {\n    \"build\": \"next build\"\n  },\n  \"dependencies\": {\n    \"next\": \"14.0.0\",\n    \"react\": \"18.0.0\",\n    \"react-dom\": \"18.0.0\"\n  }\n}\n"
+    },
+    {
+      "path": "package-lock.json",
+      "content": "{\n  \"name\": \"test-nextjs-project\",\n  \"version\": \"1.0.0\",\n  \"lockfileVersion\": 3,\n  \"requires\": true,\n  \"packages\": {\n    \"\": {\n      \"name\": \"test-nextjs-project\",\n      \"version\": \"1.0.0\"\n    }\n  }\n}\n"
+    },
+    {
+      "path": "README.md",
+      "content": "# Next.js test project\n"
+    }
+  ],
+  "git_init": true,
+  "checkpoint": true,
+  "checkpoint_name": "baseline",
+  "expected_check_exit_code": 2
+}

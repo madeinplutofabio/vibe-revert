@@ -1,0 +1,139 @@
+{
+  "schema_version": "1.0",
+  "kind": "ad_hoc",
+  "report_id": "rpt_01KDVDNA0095SW7YMNXPZ1R2H7",
+  "since_kind": "checkpoint_name",
+  "since_ref": "baseline",
+  "since_resolved_sha": "0000000000000000000000000000000000000000",
+  "written_at": "2026-01-01T00:00:00Z",
+  "report": {
+    "schema_version": "1.0",
+    "session_id": "rpt_01KDVDNA0095SW7YMNXPZ1R2H7",
+    "started_at": "2026-01-01T00:00:00Z",
+    "ended_at": "2026-01-01T00:00:00Z",
+    "detected_frameworks": [
+      "nextjs"
+    ],
+    "risk_level": "critical",
+    "changed_files": [
+      {
+        "path": "package-lock.json",
+        "status": "modified",
+        "risk_tags": [
+          "lockfile"
+        ],
+        "risk_level": "medium"
+      },
+      {
+        "path": "package.json",
+        "status": "modified",
+        "risk_tags": [
+          "manifest"
+        ],
+        "risk_level": "medium"
+      },
+      {
+        "path": "pages/api/payment.ts",
+        "status": "added",
+        "risk_tags": [
+          "api",
+          "payments"
+        ],
+        "risk_level": "critical"
+      }
+    ],
+    "results": [
+      {
+        "id": "path-classifier.next.payment-api-files",
+        "title": "Payments-related path changed",
+        "level": "critical",
+        "confidence": "high",
+        "category": "payments",
+        "message": "File 'pages/api/payment.ts' matches path-classifier rule 'next.payment-api-files' for category 'payments'.",
+        "evidence": [
+          {
+            "detail": "next.payment-api-files",
+            "file": "pages/api/payment.ts"
+          }
+        ],
+        "recommendation": "Payment-related code is high-impact: bugs here can charge or refund the wrong amounts. Review the change against the payment-flow spec, verify with a sandbox transaction, and confirm webhook idempotency where relevant."
+      },
+      {
+        "id": "test-gap.next.payment-api-files",
+        "title": "Risky change without paired test: next.payment-api-files",
+        "level": "high",
+        "confidence": "medium",
+        "category": "test-gap",
+        "message": "Changes to pages/api/payment.ts were not paired with a sibling test change in the same diff",
+        "evidence": [
+          {
+            "detail": "path-rule: next.payment-api-files",
+            "file": "pages/api/payment.ts"
+          }
+        ],
+        "recommendation": "Add or update sibling tests for this change in the same diff. Risky-area changes without paired test changes are difficult to verify and easy to regress. If the change is intentionally test-exempt (e.g., a pure config tweak), document the exemption in the change description."
+      },
+      {
+        "id": "dependencies.install-script",
+        "title": "Install script added",
+        "level": "medium",
+        "confidence": "medium",
+        "category": "dependencies",
+        "message": "Install/lifecycle script 'postinstall' added to package.json:6",
+        "evidence": [
+          {
+            "detail": "install-script: postinstall [occurrence 1]",
+            "file": "package.json",
+            "line": 6
+          }
+        ],
+        "recommendation": "Install scripts execute on every consumer machine that runs `npm install` (or equivalent). Verify the script body is intentional and doesn't shell out to untrusted commands, network calls, or filesystem writes."
+      },
+      {
+        "id": "path-classifier.generic.lockfiles",
+        "title": "Dependency path changed",
+        "level": "medium",
+        "confidence": "high",
+        "category": "dependencies",
+        "message": "File 'package-lock.json' matches path-classifier rule 'generic.lockfiles' for category 'dependencies'.",
+        "evidence": [
+          {
+            "detail": "generic.lockfiles",
+            "file": "package-lock.json"
+          }
+        ]
+      },
+      {
+        "id": "path-classifier.generic.manifests",
+        "title": "Dependency path changed",
+        "level": "medium",
+        "confidence": "high",
+        "category": "dependencies",
+        "message": "File 'package.json' matches path-classifier rule 'generic.manifests' for category 'dependencies'.",
+        "evidence": [
+          {
+            "detail": "generic.manifests",
+            "file": "package.json"
+          }
+        ]
+      },
+      {
+        "id": "dependencies.new-dependencies",
+        "title": "New dependencies added",
+        "level": "low",
+        "confidence": "medium",
+        "category": "dependencies",
+        "message": "1 new dependency added to package.json",
+        "evidence": [
+          {
+            "detail": "new-dependency: stripe",
+            "file": "package.json",
+            "line": 10
+          }
+        ]
+      }
+    ],
+    "rollback_available": true,
+    "summary": "6 findings: dependencies (4), payments (1), test-gap (1)"
+  }
+}

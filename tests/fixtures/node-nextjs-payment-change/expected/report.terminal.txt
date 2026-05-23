@@ -1,0 +1,58 @@
+================================================================================
+VibeRevert Report
+================================================================================
+
+Report ID:    rpt_01KDVDNA0095SW7YMNXPZ1R2H7
+Kind:         ad_hoc
+Since:        baseline (kind: checkpoint_name)
+Resolved SHA: 0000000000000000000000000000000000000000
+Written at:   2026-01-01T00:00:00Z
+Frameworks:   nextjs
+
+Risk Level:   CRITICAL
+Summary:      6 findings: dependencies (4), payments (1), test-gap (1)
+
+--------------------------------------------------------------------------------
+Findings (6)
+--------------------------------------------------------------------------------
+
+[CRITICAL] payments: Payments-related path changed
+  Message: File 'pages/api/payment.ts' matches path-classifier rule 'next.payment-api-files' for category 'payments'.
+  File: pages/api/payment.ts
+  Detail: next.payment-api-files
+  Recommendation: Payment-related code is high-impact: bugs here can charge or refund the wrong amounts. Review the change against the payment-flow spec, verify with a sandbox transaction, and confirm webhook idempotency where relevant.
+
+[HIGH] test-gap: Risky change without paired test: next.payment-api-files
+  Message: Changes to pages/api/payment.ts were not paired with a sibling test change in the same diff
+  File: pages/api/payment.ts
+  Detail: path-rule: next.payment-api-files
+  Recommendation: Add or update sibling tests for this change in the same diff. Risky-area changes without paired test changes are difficult to verify and easy to regress. If the change is intentionally test-exempt (e.g., a pure config tweak), document the exemption in the change description.
+
+[MEDIUM] dependencies: Install script added
+  Message: Install/lifecycle script 'postinstall' added to package.json:6
+  File: package.json:6
+  Detail: install-script: postinstall [occurrence 1]
+  Recommendation: Install scripts execute on every consumer machine that runs `npm install` (or equivalent). Verify the script body is intentional and doesn't shell out to untrusted commands, network calls, or filesystem writes.
+
+[MEDIUM] dependencies: Dependency path changed
+  Message: File 'package-lock.json' matches path-classifier rule 'generic.lockfiles' for category 'dependencies'.
+  File: package-lock.json
+  Detail: generic.lockfiles
+
+[MEDIUM] dependencies: Dependency path changed
+  Message: File 'package.json' matches path-classifier rule 'generic.manifests' for category 'dependencies'.
+  File: package.json
+  Detail: generic.manifests
+
+[LOW] dependencies: New dependencies added
+  Message: 1 new dependency added to package.json
+  File: package.json:10
+  Detail: new-dependency: stripe
+
+--------------------------------------------------------------------------------
+Changed Files (3)
+--------------------------------------------------------------------------------
+
+M  package-lock.json  [lockfile]  MEDIUM
+M  package.json  [manifest]  MEDIUM
+A  pages/api/payment.ts  [api, payments]  CRITICAL

@@ -1,0 +1,41 @@
+diff --git a/package.json b/package.json
+--- a/package.json
++++ b/package.json
+@@ -3,11 +3,13 @@
+   "version": "1.0.0",
+   "private": true,
+   "scripts": {
++    "postinstall": "node setup.js",
+     "build": "next build"
+   },
+   "dependencies": {
++    "stripe": "^14.0.0",
+     "next": "14.0.0",
+     "react": "18.0.0",
+     "react-dom": "18.0.0"
+   }
+ }
+diff --git a/package-lock.json b/package-lock.json
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -3,7 +3,10 @@
+   "version": "1.0.0",
+   "lockfileVersion": 3,
+   "requires": true,
+   "packages": {
++    "node_modules/stripe": {
++      "version": "14.0.0"
++    },
+     "": {
+       "name": "test-nextjs-project",
+       "version": "1.0.0"
+diff --git a/pages/api/payment.ts b/pages/api/payment.ts
+new file mode 100644
+--- /dev/null
++++ b/pages/api/payment.ts
+@@ -0,0 +1,5 @@
++import type { NextApiRequest, NextApiResponse } from "next";
++
++export default function handler(req: NextApiRequest, res: NextApiResponse) {
++  res.status(200).json({ ok: true });
++}
