@@ -1,0 +1,24 @@
+diff --git a/app/Http/Controllers/Webhooks/StripeWebhookController.php b/app/Http/Controllers/Webhooks/StripeWebhookController.php
+new file mode 100644
+--- /dev/null
++++ b/app/Http/Controllers/Webhooks/StripeWebhookController.php
+@@ -0,0 +1,19 @@
++<?php
++
++namespace App\Http\Controllers\Webhooks;
++
++use App\Http\Controllers\Controller;
++use Illuminate\Http\Request;
++
++class StripeWebhookController extends Controller
++{
++    public function handle(Request $request)
++    {
++        $payload = $request->getContent();
++        $signature = $request->header('Stripe-Signature');
++
++        // Webhook verification would go here.
++
++        return response()->json(['received' => true]);
++    }
++}

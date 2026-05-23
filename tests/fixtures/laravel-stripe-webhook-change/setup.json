@@ -1,0 +1,20 @@
+{
+  "files": [
+    {
+      "path": "composer.json",
+      "content": "{\n  \"name\": \"test/laravel-project\",\n  \"type\": \"project\",\n  \"require\": {\n    \"php\": \"^8.2\",\n    \"laravel/framework\": \"^11.0\"\n  }\n}\n"
+    },
+    {
+      "path": "artisan",
+      "content": "#!/usr/bin/env php\n<?php\n// Test placeholder for Laravel framework detection.\n"
+    },
+    {
+      "path": "README.md",
+      "content": "# Laravel Stripe webhook demo\n\nFlagship golden fixture: webhook controller change without paired test.\n"
+    }
+  ],
+  "git_init": true,
+  "checkpoint": true,
+  "checkpoint_name": "baseline",
+  "expected_check_exit_code": 2
+}

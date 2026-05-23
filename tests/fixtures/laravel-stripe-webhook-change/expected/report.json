@@ -1,0 +1,64 @@
+{
+  "schema_version": "1.0",
+  "kind": "ad_hoc",
+  "report_id": "rpt_01KDVDNA0095SW7YMNXPZ1R2H7",
+  "since_kind": "checkpoint_name",
+  "since_ref": "baseline",
+  "since_resolved_sha": "0000000000000000000000000000000000000000",
+  "written_at": "2026-01-01T00:00:00Z",
+  "report": {
+    "schema_version": "1.0",
+    "session_id": "rpt_01KDVDNA0095SW7YMNXPZ1R2H7",
+    "started_at": "2026-01-01T00:00:00Z",
+    "ended_at": "2026-01-01T00:00:00Z",
+    "detected_frameworks": [
+      "laravel"
+    ],
+    "risk_level": "critical",
+    "changed_files": [
+      {
+        "path": "app/Http/Controllers/Webhooks/StripeWebhookController.php",
+        "status": "added",
+        "risk_tags": [
+          "payments",
+          "webhook"
+        ],
+        "risk_level": "critical"
+      }
+    ],
+    "results": [
+      {
+        "id": "path-classifier.laravel.webhook-controllers",
+        "title": "Payments-related path changed",
+        "level": "critical",
+        "confidence": "high",
+        "category": "payments",
+        "message": "File 'app/Http/Controllers/Webhooks/StripeWebhookController.php' matches path-classifier rule 'laravel.webhook-controllers' for category 'payments'.",
+        "evidence": [
+          {
+            "detail": "laravel.webhook-controllers",
+            "file": "app/Http/Controllers/Webhooks/StripeWebhookController.php"
+          }
+        ],
+        "recommendation": "Payment-related code is high-impact: bugs here can charge or refund the wrong amounts. Review the change against the payment-flow spec, verify with a sandbox transaction, and confirm webhook idempotency where relevant."
+      },
+      {
+        "id": "test-gap.laravel.webhook-controllers",
+        "title": "Risky change without paired test: laravel.webhook-controllers",
+        "level": "high",
+        "confidence": "medium",
+        "category": "test-gap",
+        "message": "Changes to app/Http/Controllers/Webhooks/StripeWebhookController.php were not paired with a sibling test change in the same diff",
+        "evidence": [
+          {
+            "detail": "path-rule: laravel.webhook-controllers",
+            "file": "app/Http/Controllers/Webhooks/StripeWebhookController.php"
+          }
+        ],
+        "recommendation": "Add or update sibling tests for this change in the same diff. Risky-area changes without paired test changes are difficult to verify and easy to regress. If the change is intentionally test-exempt (e.g., a pure config tweak), document the exemption in the change description."
+      }
+    ],
+    "rollback_available": true,
+    "summary": "2 findings: payments (1), test-gap (1)"
+  }
+}
