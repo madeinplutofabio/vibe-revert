@@ -1,0 +1,29 @@
+================================================================================
+VibeRevert Report
+================================================================================
+
+Report ID:    rpt_01KDVDNA0095SW7YMNXPZ1R2H7
+Kind:         ad_hoc
+Since:        baseline (kind: checkpoint_name)
+Resolved SHA: 0000000000000000000000000000000000000000
+Written at:   2026-01-01T00:00:00Z
+Frameworks:   python
+
+Risk Level:   CRITICAL
+Summary:      1 findings: secrets (1)
+
+--------------------------------------------------------------------------------
+Findings (1)
+--------------------------------------------------------------------------------
+
+[CRITICAL] secrets: Possible secret committed
+  Message: Possible ENV-style secret assignment at app/config.py:3
+  File: app/config.py:3
+  Detail: ENV-style secret assignment [occurrence 1, col 1]
+  Recommendation: Rotate the credential immediately if real. Remove from git history (git filter-repo / BFG). If this is a test fixture, move it to a `.example`/`.template` file or add `# pragma: viberevert-allow` / `// viberevert-allow` to the line.
+
+--------------------------------------------------------------------------------
+Changed Files (1)
+--------------------------------------------------------------------------------
+
+A  app/config.py  []  CRITICAL

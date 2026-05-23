@@ -1,0 +1,20 @@
+{
+  "files": [
+    {
+      "path": "requirements.txt",
+      "content": "fastapi==0.115.0\nuvicorn==0.32.0\n"
+    },
+    {
+      "path": "app.py",
+      "content": "from fastapi import FastAPI\n\napp = FastAPI()\n\n@app.get(\"/\")\ndef root():\n    return {\"hello\": \"world\"}\n"
+    },
+    {
+      "path": "README.md",
+      "content": "# Python FastAPI test project\n\nMinimal baseline for the python-fastapi-secret-leak golden fixture.\n"
+    }
+  ],
+  "git_init": true,
+  "checkpoint": true,
+  "checkpoint_name": "baseline",
+  "expected_check_exit_code": 2
+}

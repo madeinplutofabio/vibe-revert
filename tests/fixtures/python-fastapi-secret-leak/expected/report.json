@@ -1,0 +1,47 @@
+{
+  "schema_version": "1.0",
+  "kind": "ad_hoc",
+  "report_id": "rpt_01KDVDNA0095SW7YMNXPZ1R2H7",
+  "since_kind": "checkpoint_name",
+  "since_ref": "baseline",
+  "since_resolved_sha": "0000000000000000000000000000000000000000",
+  "written_at": "2026-01-01T00:00:00Z",
+  "report": {
+    "schema_version": "1.0",
+    "session_id": "rpt_01KDVDNA0095SW7YMNXPZ1R2H7",
+    "started_at": "2026-01-01T00:00:00Z",
+    "ended_at": "2026-01-01T00:00:00Z",
+    "detected_frameworks": [
+      "python"
+    ],
+    "risk_level": "critical",
+    "changed_files": [
+      {
+        "path": "app/config.py",
+        "status": "added",
+        "risk_tags": [],
+        "risk_level": "critical"
+      }
+    ],
+    "results": [
+      {
+        "id": "secrets.regex",
+        "title": "Possible secret committed",
+        "level": "critical",
+        "confidence": "medium",
+        "category": "secrets",
+        "message": "Possible ENV-style secret assignment at app/config.py:3",
+        "evidence": [
+          {
+            "detail": "ENV-style secret assignment [occurrence 1, col 1]",
+            "file": "app/config.py",
+            "line": 3
+          }
+        ],
+        "recommendation": "Rotate the credential immediately if real. Remove from git history (git filter-repo / BFG). If this is a test fixture, move it to a `.example`/`.template` file or add `# pragma: viberevert-allow` / `// viberevert-allow` to the line."
+      }
+    ],
+    "rollback_available": true,
+    "summary": "1 findings: secrets (1)"
+  }
+}

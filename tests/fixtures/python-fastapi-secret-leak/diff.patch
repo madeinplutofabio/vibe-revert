@@ -1,0 +1,10 @@
+diff --git a/app/config.py b/app/config.py
+new file mode 100644
+--- /dev/null
++++ b/app/config.py
+@@ -0,0 +1,5 @@
++"""Application configuration."""
++
++APP_API_KEY = "TESTFIXTUREONLY_Z9qX8wV7tS6rP5nM4kL3jH2gF1"
++
++DEBUG = False
