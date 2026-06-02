@@ -18,7 +18,14 @@
 // noise-budget caps on SessionReport; the M C ReportFile wrapper's
 // kind/since_kind consistency, ULID-shape regex on report_id, staged_only
 // ↔ kind consistency, and the identity invariant tying report_id to the
-// embedded report.session_id); those stay enforced only at the zod level.
+// embedded report.session_id; the M D ReceiptFile wrapper's 10 refines
+// including 3 ULID-shape regexes (rb_/sess_/cp_), pre_rollback_checkpoint_id
+// ULID format when non-null, mode/pre_rollback_checkpoint_id coupling,
+// active_session_warning ↔ dry_run, D61b warning/check coupling,
+// forced_unrelated_dirty_paths audit refine, skipped_unrelated_dirt
+// dry-run-only enforcement, and forced=true apply-only enforcement; the M D
+// SessionState additive after_status_z_path → ended one-way coupling refine);
+// those stay enforced only at the zod level.
 //
 // D21 invariant: every persisted-artifact zod schema in ./schemas.ts MUST have
 // a corresponding *JsonSchema export here, re-exported from ./index.ts.
@@ -30,6 +37,7 @@ import {
   CheckResultSchema,
   EvidenceSchema,
   ManifestSchema,
+  ReceiptFileSchema,
   ReportFileSchema,
   SessionReportSchema,
   SessionStateSchema,
@@ -48,3 +56,4 @@ export const ActiveSessionLockJsonSchema = z.toJSONSchema(
   JSON_SCHEMA_OPTIONS,
 );
 export const ReportFileJsonSchema = z.toJSONSchema(ReportFileSchema, JSON_SCHEMA_OPTIONS);
+export const ReceiptFileJsonSchema = z.toJSONSchema(ReceiptFileSchema, JSON_SCHEMA_OPTIONS);

@@ -556,6 +556,13 @@ const SessionStateBaseSchema = z.strictObject({
   agent_command: nonBlankString.optional(),
   before_status_path: safeStoredRelativePath,
   after_status_path: safeStoredRelativePath.optional(),
+  // M D Option A (D79): machine-readable end-of-session snapshot path.
+  // Written by `endSession` alongside `after-status.txt` (which remains
+  // audit-only per D8). Optional in the schema so legacy M B/M C sessions
+  // ending without this field stay schema-valid; M D's
+  // `loadEndOfSessionChangedPaths` treats undefined as `{ kind: "missing" }`
+  // and routes through D61b's --force escape hatch.
+  after_status_z_path: safeStoredRelativePath.optional(),
   commands_log_path: safeStoredRelativePath,
 });
 
@@ -565,6 +572,20 @@ export const SessionStateSchema = SessionStateBaseSchema.refine(
     message:
       "ended_at and after_status_path must both be present (session ended) or both absent (session in-flight)",
     path: ["after_status_path"],
+  },
+).refine(
+  // M D Option A one-way coupling: presence of after_status_z_path implies
+  // the session has ended (ended_at + after_status_path also present). The
+  // reverse is NOT required — legacy sessions ended without the z-snapshot
+  // still validate. Prevents corrupt session.json from carrying a z-snapshot
+  // path on an in-flight session, which would be incoherent (the snapshot
+  // is written exclusively by endSession).
+  (s) =>
+    s.after_status_z_path === undefined ||
+    (s.ended_at !== undefined && s.after_status_path !== undefined),
+  {
+    message: "after_status_z_path is valid only on ended sessions with after_status_path",
+    path: ["after_status_z_path"],
   },
 );
 export type SessionState = z.infer<typeof SessionStateSchema>;
@@ -713,3 +734,236 @@ export const ReportFileSchema = z
     path: ["report", "session_id"],
   });
 export type ReportFile = z.infer<typeof ReportFileSchema>;
+
+// =============================================================================
+// ReceiptFile (strict; M D on-disk wrapper for a rollback receipt artifact)
+//
+// Per D69 in the M D plan. One schema covers BOTH `mode: "dry_run"` and
+// `mode: "apply"`; the storage path differs per D68:
+//   - apply    →  .viberevert/sessions/<sess>/rollback-receipt.json
+//   - dry_run  →  .viberevert/sessions/<sess>/rollback-dry-run-receipt.json
+// The split prevents dry-run from overwriting the apply audit record
+// (which would break D70's re-apply refusal).
+//
+// 10 refines enforced:
+//   1-3. ULID format (rb_/sess_/cp_<26-char Crockford>)
+//   4.   mode ↔ pre_rollback_checkpoint_id coupling
+//   5.   active_session_warning only valid in dry_run mode
+//   6.   D61b: un_ended_session_warning ↔ dirty_tree_check coupling;
+//        forced=true required only for apply mode (decoupled from dry-run)
+//   7.   forced_unrelated_dirty_paths is non-empty only when --apply --force
+//        overrode unrelated dirt AND the dirty-tree check actually ran
+//   8.   skipped_unrelated_dirt results valid only in dry_run mode
+//   9.   pre_rollback_checkpoint_id, when non-null, is a real cp_<ULID>
+//  10.   forced=true valid only in apply mode (keeps `forced: true`
+//        semantically clean: always means "destructive operation
+//        acknowledged real safety risk")
+//
+// `out_of_scope_notice` is a locked LITERAL — every receipt carries the
+// exact same text. Code referencing it (renderer, this schema,
+// docs/rollback-contract.md) MUST stay in sync.
+// =============================================================================
+
+export const RECEIPT_FILE_SCHEMA_VERSION = "1.0" as const;
+export type ReceiptFileSchemaVersion = typeof RECEIPT_FILE_SCHEMA_VERSION;
+
+/**
+ * Locked literal text per D62. The exact string the receipt's
+ * `out_of_scope_notice` field MUST contain. Reproduced verbatim in
+ * `docs/rollback-contract.md` (in the "Out-of-scope boundary" section)
+ * and in `@viberevert/reporters`'s human renderer. All three locations
+ * MUST stay byte-identical.
+ */
+export const ROLLBACK_OUT_OF_SCOPE_NOTICE =
+  "Vibe-revert restores tracked file content, untracked file content, and the git index. It does NOT restore: database schemas/data, deployed artifacts, package registry publishes (npm/pypi/etc.), external API state, environment variable mutations in the parent shell, OS-level state outside the repo, or any process-side effects. Recover those manually." as const;
+
+export const RollbackModeSchema = z.enum(["dry_run", "apply"]);
+export type RollbackMode = z.infer<typeof RollbackModeSchema>;
+
+/**
+ * Outcome of the D61 dirty-tree check.
+ *   - "performed"               : the comparison ran (snapshot was present)
+ *   - "skipped_no_after_state"  : snapshot was missing; check was skipped per D61b
+ */
+export const DirtyTreeCheckOutcomeSchema = z.enum(["performed", "skipped_no_after_state"]);
+export type DirtyTreeCheckOutcome = z.infer<typeof DirtyTreeCheckOutcomeSchema>;
+
+/**
+ * Per-file outcome classifier for receipt `results[]` entries.
+ *
+ * `skipped_unrelated_dirt` is DRY-RUN ONLY — surfaces paths that `--apply`
+ * would refuse on (per D61). In apply mode, unrelated dirt is either
+ * refused (no receipt written) or accepted via `--force` and recorded in
+ * the receipt's `forced_unrelated_dirty_paths` field instead.
+ */
+export const RollbackFileOutcomeSchema = z.enum([
+  "tracked_restored",
+  "untracked_restored",
+  "untracked_deleted",
+  "skipped_excluded",
+  "skipped_unchanged",
+  "skipped_unrelated_dirt",
+  "failed",
+]);
+export type RollbackFileOutcome = z.infer<typeof RollbackFileOutcomeSchema>;
+
+export const RollbackFileResultSchema = z.strictObject({
+  path: nonBlankString,
+  outcome: RollbackFileOutcomeSchema,
+  reason: nonBlankString.optional(),
+});
+export type RollbackFileResult = z.infer<typeof RollbackFileResultSchema>;
+
+/**
+ * Per-failure record for receipt `failures[]` entries. `error_code` maps
+ * each of `restoreCheckpoint`'s typed errors (M B) to a stable string:
+ *   - head_mismatch          : RestoreHeadMismatchError
+ *   - exclude_drift          : RestoreExcludeDriftError
+ *   - extraction_conflict    : RestoreExtractionConflictError
+ *   - tracked_dirty_parity   : RestoreTrackedDirtyParityError
+ *   - verification           : RestoreVerificationError
+ *   - internal               : anything else (unmapped error)
+ */
+export const RollbackFailureSchema = z.strictObject({
+  error_code: z.enum([
+    "head_mismatch",
+    "exclude_drift",
+    "extraction_conflict",
+    "tracked_dirty_parity",
+    "verification",
+    "internal",
+  ]),
+  message: nonBlankString,
+  // sortedUniquePathArray (defined at top of file, line ~161) enforces both
+  // sorted-unique ordering AND safeStoredRelativePath canonicality (forward
+  // slashes, no leading/trailing slash, no '.'/'..'). Protects A9 byte
+  // stability of the persisted receipt AND catches producer bugs that pass
+  // non-canonical path strings.
+  affected_paths: sortedUniquePathArray.default([]),
+});
+export type RollbackFailure = z.infer<typeof RollbackFailureSchema>;
+
+// ULID regexes for the receipt's three ID fields. Crockford alphabet
+// (excludes I, L, O, U); 26-char body after the prefix.
+const RB_ULID_REGEX = /^rb_[0-9A-HJKMNP-TV-Z]{26}$/;
+const CP_ULID_REGEX = /^cp_[0-9A-HJKMNP-TV-Z]{26}$/;
+
+export const ReceiptFileSchema = z
+  .strictObject({
+    schema_version: z.literal(RECEIPT_FILE_SCHEMA_VERSION),
+    rollback_id: nonBlankString,
+    session_id: nonBlankString,
+    checkpoint_id: nonBlankString,
+    mode: RollbackModeSchema,
+    forced: z.boolean(),
+    written_at: z.iso.datetime({ offset: true, precision: 0 }),
+    pre_rollback_checkpoint_id: nonBlankString.nullable(),
+    results: z.array(RollbackFileResultSchema).default([]),
+    failures: z.array(RollbackFailureSchema).default([]),
+    // sortedUniquePathArray: sorted-unique + path-canonical (see RollbackFailureSchema for rationale).
+    forced_unrelated_dirty_paths: sortedUniquePathArray.default([]),
+    dirty_tree_check: DirtyTreeCheckOutcomeSchema,
+    out_of_scope_notice: z.literal(ROLLBACK_OUT_OF_SCOPE_NOTICE),
+    active_session_warning: z.literal(true).optional(),
+    un_ended_session_warning: z.literal(true).optional(),
+  })
+  // (1) rollback_id must be a real rb_<26-char Crockford ULID>.
+  .refine((r) => RB_ULID_REGEX.test(r.rollback_id), {
+    message: "rollback_id must be a rb_<26-char Crockford ULID>",
+    path: ["rollback_id"],
+  })
+  // (2) session_id must be a real sess_<26-char Crockford ULID>.
+  .refine((r) => SESS_ULID_REGEX.test(r.session_id), {
+    message: "session_id must be a sess_<26-char Crockford ULID>",
+    path: ["session_id"],
+  })
+  // (3) checkpoint_id must be a real cp_<26-char Crockford ULID>.
+  .refine((r) => CP_ULID_REGEX.test(r.checkpoint_id), {
+    message: "checkpoint_id must be a cp_<26-char Crockford ULID>",
+    path: ["checkpoint_id"],
+  })
+  // (4) apply mode requires a pre-rollback checkpoint (D65); dry-run
+  //     requires null. Schema enforces what D68's storage-path split
+  //     assumes about presence-vs-absence.
+  .refine((r) => (r.mode === "apply") === (r.pre_rollback_checkpoint_id !== null), {
+    message: "pre_rollback_checkpoint_id must be set iff mode === 'apply'",
+    path: ["pre_rollback_checkpoint_id"],
+  })
+  // (9) pre_rollback_checkpoint_id, when non-null, must be a real
+  //     cp_<26-char Crockford ULID>. Prevents producer bugs from writing
+  //     "lol" or similar into a field meant to be a recovery handle.
+  .refine(
+    (r) =>
+      r.pre_rollback_checkpoint_id === null || CP_ULID_REGEX.test(r.pre_rollback_checkpoint_id),
+    {
+      message: "pre_rollback_checkpoint_id must be null or a cp_<26-char Crockford ULID>",
+      path: ["pre_rollback_checkpoint_id"],
+    },
+  )
+  // (5) active_session_warning is informational; only valid in dry-run.
+  //     Apply refuses on active session (D63), so an apply receipt with
+  //     this flag set is a producer bug.
+  .refine((r) => r.active_session_warning !== true || r.mode === "dry_run", {
+    message: "active_session_warning is valid only in dry_run mode",
+    path: ["active_session_warning"],
+  })
+  // (6) D61b coupling: un_ended_session_warning ↔ dirty_tree_check.
+  //     forced=true required ONLY for apply mode (the escape-hatch case);
+  //     dry-run on un-ended session has forced=false but still records
+  //     the warning + skipped marker (informational).
+  .refine(
+    (r) => {
+      if (r.dirty_tree_check === "skipped_no_after_state") {
+        if (r.un_ended_session_warning !== true) return false;
+        if (r.mode === "apply" && r.forced !== true) return false;
+      }
+      if (r.un_ended_session_warning === true) {
+        return r.dirty_tree_check === "skipped_no_after_state";
+      }
+      return true;
+    },
+    {
+      message:
+        "un_ended_session_warning ↔ dirty_tree_check='skipped_no_after_state' must be coupled; forced=true required only for apply mode (D61b)",
+      path: ["un_ended_session_warning"],
+    },
+  )
+  // (7) forced_unrelated_dirty_paths audit field: non-empty only when
+  //     --apply --force overrode unrelated dirt AND the dirty-tree check
+  //     actually ran. D61b's skipped branch never populates this field.
+  .refine(
+    (r) => {
+      if (r.forced_unrelated_dirty_paths.length === 0) return true;
+      if (r.mode !== "apply") return false;
+      if (r.forced !== true) return false;
+      if (r.dirty_tree_check !== "performed") return false;
+      return true;
+    },
+    {
+      message:
+        "forced_unrelated_dirty_paths is non-empty only when mode='apply' AND forced=true AND dirty_tree_check='performed'",
+      path: ["forced_unrelated_dirty_paths"],
+    },
+  )
+  // (8) skipped_unrelated_dirt outcome is dry-run-only. In apply mode,
+  //     unrelated dirt is recorded in forced_unrelated_dirty_paths (the
+  //     audit field), NOT in results[].
+  .refine(
+    (r) =>
+      r.mode === "dry_run" ||
+      r.results.every((result) => result.outcome !== "skipped_unrelated_dirt"),
+    {
+      message: "skipped_unrelated_dirt results are valid only in dry_run mode",
+      path: ["results"],
+    },
+  )
+  // (10) forced=true is valid only in apply mode. The CLI rejects --force
+  //      without --apply (D61b), and the persisted artifact schema rejects
+  //      the same impossible state so `forced: true` stays semantically
+  //      clean across all readers (always means "destructive operation
+  //      acknowledged real safety risk").
+  .refine((r) => r.mode === "apply" || r.forced === false, {
+    message: "forced=true is valid only in apply mode",
+    path: ["forced"],
+  });
+export type ReceiptFile = z.infer<typeof ReceiptFileSchema>;
