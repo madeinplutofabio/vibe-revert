@@ -1,26 +1,55 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Fabio Marcello Salvadori
 
-// restoreCheckpoint — internal byte-identical-restore helper (D7).
+// restoreCheckpoint + planRestoreCheckpoint — controlled package APIs for
+// CLI rollback orchestration (D73, D77).
 //
-// **M B scope (locked):** this function is INTERNAL, used only by M B's
-// fixture tests to prove round-trip correctness against the rollback test
-// matrix. The user-facing `viberevert rollback` CLI command is M D scope —
-// including --dry-run, --force, typed-confirmation, the emergency
-// pre-rollback checkpoint, and all UX wording. Do NOT export this function
-// from the package barrel; consumers reach for it via internal-only paths
-// during M B testing.
+// **M B history:** restoreCheckpoint was introduced as an internal helper
+// for M B fixture tests proving round-trip correctness against the rollback
+// test matrix. The "do not export" rule was an M B-scope lock; M D
+// promotes BOTH restoreCheckpoint AND the new planRestoreCheckpoint to
+// controlled package APIs consumed by CLI rollback orchestration via
+// @viberevert/git's barrel export.
+//
+// **M D scope (locked):** these are NOT general end-user APIs. They are
+// package-bound restore primitives consumed only by CLI rollback
+// orchestration, enforced by D77 architectural invariants. UX concerns
+// (--apply, --force, typed-confirmation, emergency pre-rollback
+// checkpoint, refusal copy, exit codes) all live in the CLI layer per
+// D60-D75.
+//
+// **Trust-validation centralization (M D Step 3):** the non-mutating
+// trust-validation pipeline (manifest load, manifest path-policy,
+// archive shape, patch path-policy, HEAD comparison, exclude-drift)
+// lives in `./restore-preflight.ts` so both the mutation path
+// (restoreCheckpoint) and the dry-run path (planRestoreCheckpoint)
+// consume the SAME validation logic. The `.viberevert/**` predicate +
+// patch-header scanner live one layer deeper in
+// `./restore-internal-path-policy.ts` — the single source of truth
+// across BOTH the evidence side (preflight) and the mutation side
+// (this file). See those modules' headers for throws-vs-info contract
+// + normalization rationale.
 //
 // =============================================================================
 // Trust-critical invariants
 // =============================================================================
 //
 // 1. **Non-mutating trust validation pre-mutation; safe extraction-path
-//    cleanup post-mutation.** Every check that can be performed without
-//    touching the working tree (HEAD verification, archive shape parsing,
-//    exclude-pattern drift detection) runs BEFORE any mutation. A failure
-//    in any of those checks leaves the working tree EXACTLY as it was
-//    found.
+//    cleanup post-mutation.** All trust validation runs via
+//    `loadRestorePreflight` (in restore-preflight.ts) BEFORE any
+//    mutation. A failure there leaves the working tree EXACTLY as it
+//    was found.
+//
+//    Preflight validates in this order: manifest → manifest path-policy
+//    (`.viberevert/**` corruption check) → artifact buffers → archive
+//    shape → patch path-policy → HEAD → exclude drift. Note: this
+//    REVERSES M B's original "HEAD before archives, fail cheap" order.
+//    The reason (per M D Step 3 lock): corrupt evidence is a hard
+//    failure regardless of mode (no receipt, throw). HEAD mismatch is
+//    a preflight signal that apply-with-force may proceed against.
+//    Reporting "your HEAD differs" on a checkpoint whose archives are
+//    actually corrupt would be misleading — the corruption is the real
+//    story. See restore-preflight.ts's header for the full rationale.
 //
 //    The one carve-out from "validate before mutate":
 //    **extraction-path cleanup runs AFTER patch replay +
@@ -43,19 +72,19 @@
 //    Everything else is collected as a structured conflict:
 //      - non-empty directory at a final file path,
 //      - regular file at an intermediate path component,
-//      - FIFO / socket / block- or character-device anywhere relevant.
+//      - FIFO / socket / block- or character-device anywhere relevant,
+//      - `.viberevert/**` paths (TRIPWIRE — see invariant #6 below).
 //    Conflicts throw `RestoreExtractionConflictError` AFTER the mutation
 //    phase has run. The working tree is in a "patches replayed,
 //    untracked half-restored" state at that point, and the user must
 //    resolve manually before re-running restore.
 //
-// 2. **Read-once-use-bytes-thereafter.** Both archives and both patches are
-//    read into in-memory Buffers ONCE, before any mutation. All subsequent
-//    operations (preflight, extract, hash compare, parity check) operate on
-//    those Buffers — never re-read from disk. This kills the TOCTOU window
-//    where an attacker could swap the file between preflight and extract.
-//    The path strings inside the manifest are validated by `loadCheckpoint`'s
-//    schema check; the bytes inside the archives are validated here.
+// 2. **Read-once-use-bytes-thereafter.** Archive + patch bytes are read
+//    into in-memory Buffers ONCE by `loadRestorePreflight`, then carried
+//    forward via `preflight.artifacts`. The mutation phase here (patch
+//    replay, archive extraction) consumes the same Buffers — never
+//    re-reads from disk. This kills the TOCTOU window where an attacker
+//    could swap the file between preflight and extract.
 //
 //    Stream-feeding rule: `Readable.from([buf])` (NOT `Readable.from(buf)`).
 //    A bare Buffer is iterable as bytes — passing it without the array
@@ -101,33 +130,17 @@
 //    exclusion: an untracked file matched by `rollback.exclude` is
 //    invisible to vibe-revert's safety net.
 //
-//    To keep the contract honest, restore enforces a **pre-mutation
-//    precondition** (`assertNoExcludeDrift`, M B Step 3e — bidirectional
-//    drift detection) that compares capture-time `rollback.exclude`
-//    policy (persisted in `manifest.untracked.exclude_patterns`)
-//    against restore-time policy (`opts.rollbackExcludePatterns`).
-//    Any drift in either direction throws `RestoreExcludeDriftError`
-//    BEFORE any mutation, with a structured 5-field payload:
-//      - **Pattern-set drift:** the SET of patterns differs between
-//        capture and restore — catches both tightening (patterns added
-//        since checkpoint, populated in `tighteningPatterns`) and
-//        loosening (patterns removed, populated in
-//        `looseningPatterns`). Even when no captured manifest path is
-//        currently affected, a policy mismatch is itself a refusal-
-//        worthy signal that the user's notion of what's safe to touch
-//        has drifted between the two events.
-//      - **Path-vs-matcher drift (tightening consequences):** manifest
-//        untracked paths that match the current restore-time matcher
-//        (populated in `tighteningPaths`). Names exactly which captured
-//        files would be silently skipped or overwritten if restore
-//        proceeded. Most user-actionable signal.
-//    Both checks fire from the same throw. Silently filtering excluded
-//    paths out of extraction would lose captured files (breaks byte-
-//    identical), silently extracting over excluded paths would violate
-//    the never-touch contract, and silently respecting capture-time
-//    policy when it differs from current would make the "current
-//    `.viberevert.yml` is the source of truth" mental model unreliable.
-//    Hard refusal beats all three.
+//    Drift between capture-time policy
+//    (`manifest.untracked.exclude_patterns`) and restore-time policy
+//    (`opts.rollbackExcludePatterns`) is detected by
+//    `loadRestorePreflight` and surfaced as `preflight.excludeDrift`.
+//    `restoreCheckpoint` converts non-null drift to
+//    `RestoreExcludeDriftError` (D75 locks that `--force` does NOT
+//    bypass drift — restoring against a different exclude policy than
+//    capture would silently lose captured files or violate the never-
+//    touch contract). `planRestoreCheckpoint` surfaces drift via a
+//    `preflight_failures[]` entry on the plan so dry-run can report it
+//    in the receipt.
 //
 //    **NOT applied to the tracked surface.** Tracked-dirty paths are fully
 //    visible to vibe-revert regardless of `rollback.exclude`. Patch replay
@@ -141,18 +154,83 @@
 //    the untracked surface; tracked-dirty exclusion is not in M B scope.
 //
 // 5. **Strict tarball entry validation.** Both archives are validated entry-
-//    by-entry against:
+//    by-entry inside `loadRestorePreflight`:
+//      - No `.viberevert/**` entry (corrupt evidence per file header
+//        invariant #6 and restore-preflight.ts's matching lock).
 //      - Canonical relative POSIX path (no `..`, no absolute, no `\\`).
-//        This is the same predicate as `isSafeStoredRelativePath` from
+//        Same predicate as `isSafeStoredRelativePath` from
 //        `@viberevert/session-format`.
 //      - Regular-file entry type only. Symlinks, hardlinks, directories,
-//        block/char devices, FIFOs are rejected. Symlink tampering inside a
-//        tarball is a known traversal/hijack vector and is the reason
-//        `snapshots.ts` only captures regular files in the first place.
+//        block/char devices, FIFOs are rejected.
 //      - Exact set parity with `file_hashes` keys. Both archives are
 //        required to contain EXACTLY the paths the manifest says they
 //        contain — extras or missing entries are corruption (a truncated
 //        archive is not "still partially trustworthy").
+//    `extractUntrackedTarball` keeps a per-entry `filter` callback as
+//    defense-in-depth — tar.extract has its own filter pass and we keep
+//    BOTH layers in agreement, INCLUDING the `.viberevert/**` reject.
+//    The filter is not the primary guarantee (preflight is) but prevents
+//    future preflight drift from becoming an extraction bug.
+//
+// 6. **VibeRevert's own storage (`.viberevert/**`) is HARD-EXCLUDED from
+//    deletion AND extraction-path cleanup AND extraction (M D Step 3
+//    Blocker 2 lock, mutation-side application).** Per the M D Step 3
+//    lock: `.viberevert/` is the rollback control plane (receipts,
+//    sessions, locks, checkpoints, reports, future GC metadata). Once
+//    rollback is running, NONE of it should be deleted/cleaned/overwritten
+//    by restore logic — INCLUDING the emergency pre-rollback checkpoint
+//    that the CLI creates RIGHT BEFORE invoking restoreCheckpoint.
+//
+//    `.viberevert/` is gitignored after `viberevert init` (M B Step 1
+//    hard precondition), so `gitListUntracked` shouldn't surface it.
+//    But that's not a guarantee — a manually-edited `.gitignore`, a
+//    `--no-init` workflow, or a future package that creates
+//    `.viberevert/` paths outside init could break it. Defense-in-depth
+//    via the policy module's `isVibeRevertInternalPath` predicate at
+//    FOUR mutation-side call sites:
+//
+//      (a) `deleteUncapturedUntracked` — SILENT SKIP. `.viberevert/**`
+//          paths surfaced by `gitListUntracked` are filtered out of
+//          the deletion candidate list. The mutation never happens;
+//          no error, no record. Rationale: ungitignored
+//          `.viberevert/**` content is a misconfiguration, not corrupt
+//          evidence; the user can fix `.gitignore` and re-run.
+//
+//      (b) `planRestoreCheckpoint`'s deletion enumeration — SILENT
+//          SKIP. Same rationale as (a); the plan's
+//          `untracked_deleted` field correctly omits `.viberevert/**`
+//          paths.
+//
+//      (c) `clearExtractionPathConflicts`'s `allPaths` builder — LOUD
+//          TRIPWIRE CONFLICT. Cleanup seeing `.viberevert/**` in
+//          `expectedPaths` means preflight DRIFTED — the path-policy
+//          rejection in `restore-preflight.ts` (manifest +
+//          tracked_dirty_paths + archive entries + patch headers all
+//          reject `.viberevert/**`) should have caught this BEFORE
+//          we got here. Silently skipping would hide the drift; the
+//          tripwire pushes a structured conflict that bubbles up
+//          through `RestoreExtractionConflictError` with the locked
+//          message "restore refused to clean extraction path under
+//          VibeRevert internal storage (.viberevert/**)". Non-
+//          mutating either way; the tripwire makes the impossible
+//          condition visible at the throw point so the regression
+//          gets fixed instead of accumulating.
+//
+//      (d) `extractUntrackedTarball`'s tar filter — SILENT FILTER
+//          REJECT. Tar.extract drops the entry; the surrounding
+//          preflight archive-validation already rejected the entry
+//          earlier, so this is belt-and-braces against the same
+//          drift class as (c).
+//
+//    **Two faces of the same lock.** This file applies the rule on the
+//    DELETION + EXTRACTION-CLEANUP + EXTRACTION sides.
+//    `restore-preflight.ts` applies it on the EVIDENCE side (rejecting
+//    `.viberevert/**` from manifest file_hashes, tracked_dirty_paths,
+//    archive entries, AND patch headers as hard corruption). Both
+//    pull from the same predicate
+//    (`./restore-internal-path-policy.ts`) so the case-insensitive +
+//    separator-insensitive + slash-collapse + root-dot-segment-strip
+//    normalization is identical across all six application points.
 //
 // =============================================================================
 // What does NOT happen in M B (deferred to later milestones)
@@ -168,29 +246,27 @@
 //     fallback when patches fail to replay.
 //
 //   - The tracked-dirty tarball IS still validated for shape (exact entry-
-//     set parity with `file_hashes` keys, regular-file entries, safe paths).
-//     Pure tampering detection — even though we don't extract it, a
-//     manifest declaring a tampered archive is itself suspicious.
+//     set parity with `file_hashes` keys, regular-file entries, safe paths,
+//     no `.viberevert/**`). Pure tampering detection — even though we
+//     don't extract it, a manifest declaring a tampered archive is itself
+//     suspicious.
 //
 //   - mtime / permissions metadata is NOT asserted by hash verification.
 //     Acceptance is byte-content identical only. (Documented in the M B
 //     plan's Risks section.)
 
 import type { Stats } from "node:fs";
-import { lstat, readFile, rm, rmdir } from "node:fs/promises";
+import { lstat, rm, rmdir } from "node:fs/promises";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import {
   isSafeStoredRelativePath,
   type Manifest,
-  normalizeStringArray,
+  normalizePathArray,
 } from "@viberevert/session-format";
-import picomatch from "picomatch";
 import * as tar from "tar";
-import { loadCheckpoint } from "./checkpoint.js";
 import {
-  CheckpointCorruptError,
   RestoreExcludeDriftError,
   type RestoreExtractionConflict,
   RestoreExtractionConflictError,
@@ -201,7 +277,6 @@ import {
   RestoreVerificationError,
 } from "./errors.js";
 import {
-  getHeadSha,
   gitApply,
   gitApplyWithIndex,
   gitListTrackedDirty,
@@ -209,14 +284,16 @@ import {
   gitResetHardHead,
 } from "./git-cli.js";
 import { sha256File } from "./hashes.js";
+import { isVibeRevertInternalPath } from "./restore-internal-path-policy.js";
+import { loadRestorePreflight } from "./restore-preflight.js";
 
 // =============================================================================
-// Public API
+// Public API — restoreCheckpoint
 // =============================================================================
 
 /**
  * Options for `restoreCheckpoint`. Mirrors the fields the CLI orchestration
- * layer (M D) will resolve from `.viberevert.yml` and pass through.
+ * layer (M D) resolves from `.viberevert.yml` and passes through.
  *
  * - `repoRoot`: absolute path to the git repo root.
  * - `rollbackExcludePatterns`: the SAME pattern list passed to
@@ -228,187 +305,140 @@ import { sha256File } from "./hashes.js";
  *   replay and the tracked-dirty parity check operate on the full
  *   tracked-dirty surface regardless of this list.
  *
- *   The precondition `assertNoExcludeDrift` (M B Step 3e) compares
- *   capture-time patterns (persisted in
+ *   `loadRestorePreflight` compares capture-time patterns (persisted in
  *   `manifest.untracked.exclude_patterns`) against the patterns supplied
- *   here, and throws `RestoreExcludeDriftError` on any drift in either
- *   direction (tightening or loosening) plus a path-vs-matcher arm
- *   that populates `tighteningPaths` when drift would immediately damage
- *   this specific manifest. See file header invariant #4 for the full
- *   contract.
+ *   here and returns `excludeDrift: ExcludeDriftDetail | null`.
+ *   `restoreCheckpoint` throws `RestoreExcludeDriftError` on non-null
+ *   drift BEFORE any mutation. See file header invariant #4.
  */
 export type RestoreCheckpointOptions = {
   readonly repoRoot: string;
   readonly rollbackExcludePatterns: readonly string[];
+  /**
+   * M D D64 escape-hatch: when `true`, skip the `RestoreHeadMismatchError`
+   * pre-check and proceed with restore against a DIFFERENT HEAD than the
+   * checkpoint captured. Default `false` (preserves M B behavior).
+   *
+   * Locked: `allowHeadMismatch` bypasses ONLY the HEAD pre-check. It does
+   * NOT bypass `RestoreExcludeDriftError`, post-restore parity, or hash
+   * verification — those are restore-correctness invariants, not user-
+   * consent decisions. CLI's `--force` propagates this option per D75's
+   * locked override table.
+   *
+   * Risk acknowledged by the caller: captured patches were taken relative
+   * to the checkpoint's HEAD; applying them on a different baseline may
+   * produce mid-restore failures (extraction conflicts, parity drift, or
+   * verification failures) which the receipt surfaces in `failures[]`.
+   */
+  readonly allowHeadMismatch?: boolean;
 };
 
 /**
  * Restore the working tree + index to the state captured by the checkpoint
- * at `checkpointDir`. Internal M B helper (per D7); exposed for fixture
- * tests, NOT for end-user CLI use.
+ * at `checkpointDir`. M D-promoted package API per D73 / D77; consumed by
+ * CLI rollback orchestration (and reused by M B fixture tests).
  *
- * Throws (all are typed errors from `./errors.js`):
+ * Throws (all are typed errors from `./errors.js` or `./restore-preflight`):
  *   - `CheckpointNotFoundError` / `CheckpointCorruptError`: from
- *     `loadCheckpoint`. The error message identifies the failing artifact.
+ *     `loadRestorePreflight`. Bad evidence is a hard failure regardless of
+ *     `allowHeadMismatch`.
  *   - `RestoreHeadMismatchError`: HEAD does not match
- *     `manifest.git.head_sha`. Restore cannot proceed safely on a different
- *     baseline; the captured patches were taken relative to the checkpoint's
- *     HEAD and would produce undefined results otherwise.
+ *     `manifest.git.head_sha`. Suppressed when `opts.allowHeadMismatch`
+ *     is `true` (CLI's `--force` propagates this per D75).
  *   - `RestoreExcludeDriftError`: capture-time and restore-time
- *     `rollback.exclude` policies have drifted (in either direction —
- *     pattern-set comparison covers tightening AND loosening; path-vs-
- *     matcher comparison populates `tighteningPaths` when drift would
- *     immediately affect this manifest). Restore refuses BEFORE any
- *     mutation. See the error class's docstring for the structured
- *     5-field payload.
+ *     `rollback.exclude` policies have drifted. Always throws on non-null
+ *     drift — `--force` does NOT bypass per D75.
  *   - `RestoreExtractionConflictError`: AFTER patch replay +
  *     uncaptured-untracked deletion, the working tree still has
- *     unresolvable blockers at extraction paths (non-empty directory at a
- *     final path, regular file at an intermediate component, or
- *     FIFO/socket/device anywhere relevant). Safe blockers (empty dir at
- *     final path, symlink at final path, symlink at intermediate
- *     component) were already auto-cleared by
- *     `clearExtractionPathConflicts`. The working tree is in a "patches
- *     replayed, untracked half-restored" state when this fires; the user
- *     must resolve manually before re-running.
+ *     unresolvable blockers at extraction paths. The working tree is in
+ *     a "patches replayed, untracked half-restored" state when this
+ *     fires; the user must resolve manually before re-running.
  *   - `RestoreTrackedDirtyParityError`: post-restore tracked-dirty path
  *     set does not exactly equal `manifest.snapshots.tracked_dirty_paths`.
- *     Issues are split into `unexpected_dirty` (the patch introduced a
- *     dirty path NOT captured at checkpoint) and `missing_dirty` (a
- *     captured dirty path is no longer dirty post-restore). Thrown AFTER
- *     mutation and BEFORE hash verification (set-level errors precede
- *     byte-level errors per invariant #3).
- *   - `RestoreVerificationError`: post-restore hash check found one or more
- *     paths whose on-disk SHA-256 does not match the manifest's
- *     `file_hashes` entry. Thrown AFTER mutation and AFTER parity, so it
- *     surfaces only if the path-set is correct but bytes are not.
+ *     Thrown AFTER mutation and BEFORE hash verification (set-level
+ *     errors precede byte-level errors per invariant #3).
+ *   - `RestoreVerificationError`: post-restore hash check found one or
+ *     more paths whose on-disk SHA-256 does not match the manifest's
+ *     `file_hashes` entry. Thrown AFTER mutation and AFTER parity.
  *
  * Order of guarantees:
- *   1. Non-mutating trust validation first (HEAD, archive shape, exclude
- *      drift) — failures here leave the working tree untouched.
+ *   1. Non-mutating trust validation first (via `loadRestorePreflight`:
+ *      manifest, manifest path-policy, archive read + shape, patch
+ *      path-policy, HEAD, exclude drift) — failures here leave the
+ *      working tree untouched.
  *   2. Mutation phase: reset → patches → delete uncaptured untracked →
  *      auto-clear safe extraction-path blockers → THROW
  *      `RestoreExtractionConflictError` if unresolvable blockers remain
  *      (working tree IS already in the patches-replayed,
  *      untracked-half-restored state at this point) → tarball extraction.
- *   3. Post-mutation set-parity, THEN hash verification. If any step here
- *      fails, the working tree IS in the restore-attempted state — the
- *      caller decides whether to retry, abandon, or do further recovery.
- *      Restore does NOT try to roll BACK from a verification failure;
- *      that's a separate emergency-recovery concern and an actively
- *      dangerous design space (a buggy auto-rollback could destroy the
- *      restore attempt's evidence).
+ *   3. Post-mutation set-parity, THEN hash verification. If any step
+ *      here fails, the working tree IS in the restore-attempted state —
+ *      the caller decides whether to retry, abandon, or do further
+ *      recovery. Restore does NOT try to roll BACK from a verification
+ *      failure; that's a separate emergency-recovery concern and an
+ *      actively dangerous design space (a buggy auto-rollback could
+ *      destroy the restore attempt's evidence).
  */
 export async function restoreCheckpoint(
   checkpointDir: string,
   opts: RestoreCheckpointOptions,
 ): Promise<void> {
-  const manifest = await loadCheckpoint(checkpointDir);
-
   // ===========================================================================
-  // Non-mutating trust validation phase
+  // Non-mutating trust validation phase (centralized in loadRestorePreflight)
   // ===========================================================================
 
-  // 1. HEAD must match. Restore cannot safely operate on a different commit;
-  //    the captured patches are relative to the checkpoint's HEAD. Compare
-  //    against the manifest BEFORE reading any archives — fail cheap.
-  const actualHeadSha = await getHeadSha(opts.repoRoot);
-  if (actualHeadSha !== manifest.git.head_sha) {
-    throw new RestoreHeadMismatchError(manifest.git.head_sha, actualHeadSha);
+  const pre = await loadRestorePreflight(checkpointDir, {
+    repoRoot: opts.repoRoot,
+    rollbackExcludePatterns: opts.rollbackExcludePatterns,
+    includeArtifactBuffers: true,
+  });
+
+  // HEAD must match unless explicitly overridden. Preflight returns
+  // headMatch as INFO; this is where we convert to the typed throw per
+  // M D D64. `opts.allowHeadMismatch === true` skips the throw and
+  // proceeds best-effort — restore-correctness verification still fires
+  // unconditionally.
+  if (!pre.headMatch && !opts.allowHeadMismatch) {
+    throw new RestoreHeadMismatchError(pre.manifest.git.head_sha, pre.actualHeadSha);
   }
 
-  // 2. Read all artifact bytes ONCE, into in-memory Buffers. From here on,
-  //    every operation that needs archive/patch contents reads the Buffer
-  //    rather than re-reading the file. Read-once invariant; kills TOCTOU.
-  const trackedArchiveAbs = join(checkpointDir, manifest.snapshots.tracked_dirty_archive_path);
-  const untrackedArchiveAbs = join(checkpointDir, manifest.untracked.archive_path);
-  const stagedPatchAbs = join(checkpointDir, manifest.diffs.staged_patch_path);
-  const unstagedPatchAbs = join(checkpointDir, manifest.diffs.unstaged_patch_path);
-
-  let trackedArchiveBuf: Buffer;
-  let untrackedArchiveBuf: Buffer;
-  let stagedPatch: Buffer;
-  let unstagedPatch: Buffer;
-  try {
-    [trackedArchiveBuf, untrackedArchiveBuf, stagedPatch, unstagedPatch] = await Promise.all([
-      readFile(trackedArchiveAbs),
-      readFile(untrackedArchiveAbs),
-      readFile(stagedPatchAbs),
-      readFile(unstagedPatchAbs),
-    ]);
-  } catch (err) {
-    // loadCheckpoint already lstat'd these paths, but we re-surface a read
-    // failure as CheckpointCorruptError for symmetry: an artifact that
-    // existed at lstat time but is unreadable now is corrupt-equivalent.
-    throw new CheckpointCorruptError(
-      checkpointDir,
-      `failed to read referenced artifact: ${(err as Error).message}`,
-      err,
-    );
+  // Exclude drift always throws. Per D75: `--force` does NOT override
+  // drift; restoring against a different exclude policy than capture
+  // would silently lose captured files or violate the never-touch
+  // contract.
+  if (pre.excludeDrift !== null) {
+    throw new RestoreExcludeDriftError(pre.excludeDrift);
   }
 
-  // 3. Validate archive shape. BOTH archives must contain only regular-file
-  //    entries with safe canonical paths AND have entry-sets that EXACTLY
-  //    equal their respective `file_hashes` keys. A truncated archive
-  //    missing entries is corruption, not "partially trustworthy".
-  await assertArchiveEntries(
-    checkpointDir,
+  const {
+    trackedArchiveBuf: _unusedTrackedBuf,
     untrackedArchiveBuf,
-    "untracked",
-    Object.keys(manifest.untracked.file_hashes),
-  );
-  await assertArchiveEntries(
-    checkpointDir,
-    trackedArchiveBuf,
-    "tracked-dirty",
-    Object.keys(manifest.snapshots.file_hashes),
-  );
-
-  // 4. Exclude-pattern precondition (D3 narrowed, file header invariant #4).
-  //    Normalize the current restore-time patterns once (via
-  //    normalizeStringArray — same shape as capture-time persisted in
-  //    manifest.untracked.exclude_patterns). All downstream uses of the
-  //    exclude policy (this precondition, deleteUncapturedUntracked,
-  //    clearExtractionPathConflicts) consume the normalized form so
-  //    behavior stays consistent with the captured contract — a user
-  //    pattern like "  dist/**  " (stray whitespace) becomes "dist/**"
-  //    here AND was "dist/**" at capture time, so matching is symmetric.
-  //
-  //    The precondition itself (assertNoExcludeDrift, M B Step 3e) does
-  //    bidirectional drift detection between capture-time policy
-  //    (manifest.untracked.exclude_patterns) and restore-time policy.
-  //    Throws RestoreExcludeDriftError on any drift in either direction
-  //    (tightening = patterns added since checkpoint, loosening =
-  //    patterns removed) plus a path-vs-matcher arm that populates
-  //    tighteningPaths when drift would immediately damage this manifest.
-  const normalizedExcludePatterns = normalizeStringArray([...opts.rollbackExcludePatterns]);
-  const isExcluded = compileExcludeMatcher(normalizedExcludePatterns);
-  const expectedUntrackedSet = Object.keys(manifest.untracked.file_hashes);
-  assertNoExcludeDrift(
-    manifest.untracked.exclude_patterns,
-    normalizedExcludePatterns,
-    expectedUntrackedSet,
-  );
+    stagedPatch,
+    unstagedPatch,
+  } = pre.artifacts;
+  void _unusedTrackedBuf; // tracked archive is shape-validated but never extracted in M B (see file header "what does NOT happen in M B").
+  const expectedUntrackedSet = pre.expectedUntrackedSet;
+  const isExcluded = pre.isExcluded;
 
   // ===========================================================================
   // Mutation phase
   // ===========================================================================
 
-  // 5. Wipe tracked-side state to a clean HEAD. Discards ALL tracked
-  //    changes (staged AND unstaged) and clears the index. Does NOT touch
-  //    untracked files — those are handled separately below.
+  // Wipe tracked-side state to a clean HEAD. Discards ALL tracked changes
+  // (staged AND unstaged) and clears the index. Does NOT touch untracked
+  // files — those are handled separately below.
   await gitResetHardHead(opts.repoRoot);
 
-  // 6. Replay the captured patches. Order matters:
-  //    - staged.patch FIRST with --index: re-stages exactly what was staged
-  //      at checkpoint time. Both index AND working tree advance to the
-  //      "post-staged" state.
-  //    - unstaged.patch SECOND without --index: applies only to the working
-  //      tree, layering the unstaged delta on top of the staged-and-applied
-  //      state. Index stays as the captured staged content; working tree
-  //      now matches the captured working tree exactly.
-  //    Empty patch buffers are no-ops in git apply, so a clean-tracked-tree
-  //    checkpoint replays correctly without special-casing.
+  // Replay the captured patches. Order matters:
+  //   - staged.patch FIRST with --index: re-stages exactly what was staged
+  //     at checkpoint time. Both index AND working tree advance to the
+  //     "post-staged" state.
+  //   - unstaged.patch SECOND without --index: applies only to the working
+  //     tree, layering the unstaged delta on top of the staged-and-applied
+  //     state. Index stays as the captured staged content; working tree
+  //     now matches the captured working tree exactly.
+  // Empty patch buffers are no-ops in git apply, so a clean-tracked-tree
+  // checkpoint replays correctly without special-casing.
   if (stagedPatch.length > 0) {
     await gitApplyWithIndex(opts.repoRoot, stagedPatch);
   }
@@ -416,47 +446,59 @@ export async function restoreCheckpoint(
     await gitApply(opts.repoRoot, unstagedPatch);
   }
 
-  // 7. Untracked side: the current working tree may have files created
-  //    during the session that aren't in the manifest. Enumerate
-  //    untracked-not-excluded paths NOT in the captured set and remove
-  //    them. Files in the manifest are left alone — `extractUntrackedTarball`
-  //    will overwrite them with the captured bytes after path cleanup.
-  await deleteUncapturedUntracked(opts.repoRoot, new Set(expectedUntrackedSet), isExcluded);
+  // Untracked side: the current working tree may have files created
+  // during the session that aren't in the manifest. Enumerate
+  // untracked-not-excluded paths NOT in the captured set and remove them.
+  // Files in the manifest are left alone — `extractUntrackedTarball` will
+  // overwrite them with the captured bytes after path cleanup.
+  //
+  // The deletion helper hard-excludes `.viberevert/**` per file header
+  // invariant #6 — defense-in-depth so the emergency pre-rollback
+  // checkpoint (created by the CLI immediately before this call) can
+  // never be deleted by restore, regardless of `.gitignore` state.
+  const expectedUntrackedPaths = [...expectedUntrackedSet];
+  await deleteUncapturedUntracked(opts.repoRoot, expectedUntrackedSet, isExcluded);
 
-  // 8. Extraction-path cleanup. AFTER the delete pass: some blockers that
-  //    looked unresolvable pre-mutation are now safely cleanable (e.g., a
-  //    directory at a manifest file path that contained only uncaptured
-  //    untracked content is now empty and rmdir-able). The helper
-  //    auto-resolves the safe set (empty dir at final path, symlink at
-  //    final path, symlink at intermediate component) and collects the
-  //    rest as conflicts. If any unresolvable blockers remain, throw
-  //    BEFORE extraction so tar.extract never runs against a hostile
-  //    state. The working tree is already in a patches-replayed state at
-  //    this point — the throw timing is post-mutation but
-  //    pre-extract-mutation.
+  // Extraction-path cleanup. AFTER the delete pass: some blockers that
+  // looked unresolvable pre-mutation are now safely cleanable (e.g., a
+  // directory at a manifest file path that contained only uncaptured
+  // untracked content is now empty and rmdir-able). The helper
+  // auto-resolves the safe set (empty dir at final path, symlink at
+  // final path, symlink at intermediate component) and collects the
+  // rest as conflicts. If any unresolvable blockers remain, throw
+  // BEFORE extraction so tar.extract never runs against a hostile
+  // state. The working tree is already in a patches-replayed state at
+  // this point — the throw timing is post-mutation but
+  // pre-extract-mutation.
+  //
+  // The cleanup helper applies the `.viberevert/**` policy as a LOUD
+  // TRIPWIRE per file header invariant #6 (call site (c)) — preflight
+  // should reject such paths from evidence, but a tripwire here makes
+  // the impossible-condition visible at the throw point so the drift
+  // surfaces rather than getting silently absorbed.
   const conflicts = await clearExtractionPathConflicts(
     opts.repoRoot,
-    expectedUntrackedSet,
+    expectedUntrackedPaths,
     isExcluded,
   );
   if (conflicts.length > 0) {
     throw new RestoreExtractionConflictError(conflicts);
   }
 
-  // 9. Extract the untracked tarball from the in-memory Buffer. Strict
-  //    filters reject non-regular entries (defense in depth — already
-  //    asserted in archive validation, but tar.extract has its own filter
-  //    pass and we keep both layers in agreement).
+  // Extract the untracked tarball from the in-memory Buffer. Strict
+  // filters reject non-regular entries AND `.viberevert/**` paths
+  // (defense in depth — already asserted in archive validation by
+  // preflight, but tar.extract has its own filter pass and we keep
+  // both layers in agreement).
   //
-  //    Skipped when the captured untracked set is empty — there's
-  //    nothing to extract, and tar.extract on a minimal empty archive
-  //    (snapshots.ts writes 2x 512-byte zero blocks gzipped, the
-  //    standard tar EOF marker) fails with TAR_BAD_ARCHIVE on
-  //    node-tar v7.x. assertArchiveEntries above already verified that
-  //    an empty archive matches empty file_hashes (set parity), so
-  //    skipping extraction is sound — the buffer is provably empty by
-  //    the time we get here when expectedUntrackedSet is empty.
-  if (expectedUntrackedSet.length > 0) {
+  // Skipped when the captured untracked set is empty — there's nothing
+  // to extract, and tar.extract on a minimal empty archive (snapshots.ts
+  // writes 2x 512-byte zero blocks gzipped, the standard tar EOF marker)
+  // fails with TAR_BAD_ARCHIVE on node-tar v7.x. Preflight already
+  // verified that an empty archive matches empty file_hashes (set
+  // parity), so skipping extraction is sound — the buffer is provably
+  // empty by the time we get here when expectedUntrackedSet is empty.
+  if (expectedUntrackedSet.size > 0) {
     await extractUntrackedTarball(untrackedArchiveBuf, opts.repoRoot);
   }
 
@@ -464,217 +506,365 @@ export async function restoreCheckpoint(
   // Post-mutation verification (parity FIRST, hashes SECOND)
   // ===========================================================================
 
-  // 10. Raw set-parity verification (closes the tracked-deletion soundness
-  //     hole). Compare the post-restore working tree's `gitListTrackedDirty`
-  //     output against `manifest.snapshots.tracked_dirty_paths` VERBATIM.
-  //     No lstat narrowing, no regular-file filtering, no `rollback.exclude`
-  //     filtering — full set equality. Set-level signal precedes byte-level.
-  await verifyTrackedDirtyParity(opts.repoRoot, manifest);
+  // Raw set-parity verification (closes the tracked-deletion soundness
+  // hole). Compare the post-restore working tree's `gitListTrackedDirty`
+  // output against `manifest.snapshots.tracked_dirty_paths` VERBATIM.
+  // No lstat narrowing, no regular-file filtering, no `rollback.exclude`
+  // filtering — full set equality. Set-level signal precedes byte-level.
+  await verifyTrackedDirtyParity(opts.repoRoot, pre.manifest);
 
-  // 11. Hash-verify every captured file. Both `manifest.snapshots.file_hashes`
-  //     (tracked-dirty regular-file subset) and `manifest.untracked.file_hashes`
-  //     (untracked subset) are checked. Each on-disk SHA-256 must match.
-  //     Collected per-path mismatches are thrown as a single structured
-  //     error (matches RestoreVerificationError's contract).
+  // Hash-verify every captured file. Both `manifest.snapshots.file_hashes`
+  // (tracked-dirty regular-file subset) and `manifest.untracked.file_hashes`
+  // (untracked subset) are checked. Each on-disk SHA-256 must match.
+  // Collected per-path mismatches are thrown as a single structured
+  // error (matches RestoreVerificationError's contract).
   const mismatches: RestoreHashMismatch[] = [];
-  await collectHashMismatches(opts.repoRoot, manifest.snapshots.file_hashes, mismatches);
-  await collectHashMismatches(opts.repoRoot, manifest.untracked.file_hashes, mismatches);
+  await collectHashMismatches(opts.repoRoot, pre.manifest.snapshots.file_hashes, mismatches);
+  await collectHashMismatches(opts.repoRoot, pre.manifest.untracked.file_hashes, mismatches);
   if (mismatches.length > 0) {
     throw new RestoreVerificationError(mismatches);
   }
 }
 
 // =============================================================================
-// Internal helpers — non-mutating trust validation
+// Public API — planRestoreCheckpoint (M D dry-run sibling)
+//
+// Returns a structured classification of what `restoreCheckpoint` WOULD
+// do against the same checkpoint + opts. Read-only — no mutation, no
+// patch application, no archive extraction. Used by the CLI's
+// `viberevert rollback` dry-run path to populate the receipt's
+// `results[]` field; reused by the apply path as the pre-mutation
+// classification source (single source of truth, no second algorithm).
+//
+// Honest classification per the M D Step 3 lock — NEVER overclaims:
+//   - `tracked_restored`: paths in `manifest.snapshots.tracked_dirty_paths`
+//     whose current bytes differ from captured (hash-compared for the
+//     `file_hashes` subset; conservative-include for paths that have no
+//     captured hash — deletions, mode-only changes, symlinks, type changes
+//     — since we can't predict patch no-op without simulating).
+//   - `untracked_restored`: captured untracked paths whose current bytes
+//     differ from captured (hash-compared).
+//   - `untracked_deleted`: current untracked paths NOT in the manifest
+//     AND NOT excluded AND a REGULAR FILE (mirrors
+//     `deleteUncapturedUntracked`'s filtering — symlinks/FIFOs/sockets
+//     are preserved). `.viberevert/**` paths are hard-excluded
+//     defense-in-depth per file header invariant #6.
+//   - `skipped_excluded`: current untracked paths matching the resolved
+//     exclude matcher — restricted to paths NOT also in the captured
+//     set (captured paths are classified by the manifest-side loops
+//     above; the disjoint-bucket invariant prevents double-classification
+//     during exclude drift).
+//   - `skipped_unchanged`: captured paths whose current FILE BYTES match
+//     the captured bytes. Content-level only — for tracked paths, apply
+//     may still affect index state even when bytes match.
+//
+// Preflight failures (HEAD mismatch, exclude drift) surface as
+// `preflight_failures[]` entries on the plan. The CLI maps each to a
+// receipt `failures[]` entry per the M D D69 schema. The plan helper
+// itself never throws on HEAD/drift — the CLI decides whether dry-run
+// surfaces (writes receipt with failures[]) or apply refuses (throws).
+//
+// When `opts.allowHeadMismatch` is `true`, the `head_mismatch`
+// `preflight_failures[]` entry is SUPPRESSED (caller has explicitly
+// accepted the mismatch — emitting it would contradict A6's "receipt
+// has `failures: []`" on force-success). `head_match` still reports
+// the actual state for callers that want to inspect it.
 // =============================================================================
 
 /**
- * Compile an excluder function from `rollback.exclude` patterns. Identical
- * shape to snapshots.ts's helper (intentional duplication — both files own
- * their independent capture/restore policy enforcement; sharing a helper
- * would couple them in a way that obscures the symmetry).
- *
- * Empty list → matcher that excludes nothing. `nonegate: true` disables `!`
- * re-include semantics, matching the M B `rollback.exclude` contract.
- *
- * Used ONLY on the untracked surface (D3 narrowed — see file header
- * invariant #4).
+ * The classification of what `restoreCheckpoint` would do if invoked
+ * with the same checkpoint + opts. All path arrays are normalized via
+ * `normalizePathArray` (sorted ASCII-ascending, deduped, canonical
+ * relative POSIX) so the plan is byte-stable across runs — A9 protection
+ * for the persisted receipt's `results[]` field.
  */
-function compileExcludeMatcher(patterns: readonly string[]): (path: string) => boolean {
-  if (patterns.length === 0) return () => false;
-  const matcher = picomatch(patterns as string[], { nonegate: true });
-  return (path: string) => matcher(path);
+export interface RestorePlan {
+  /**
+   * `true` iff current HEAD equals `manifest.git.head_sha`. Reported as
+   * the actual state regardless of `opts.allowHeadMismatch` — the
+   * suppression only affects whether the mismatch surfaces as a
+   * `preflight_failures[]` entry.
+   */
+  readonly head_match: boolean;
+  /** Captured paths whose current content differs from captured (would be patched). */
+  readonly tracked_restored: readonly string[];
+  /** Captured untracked paths whose current content differs from captured (would be extracted). */
+  readonly untracked_restored: readonly string[];
+  /** Current untracked regular files not in the manifest and not excluded (would be deleted). */
+  readonly untracked_deleted: readonly string[];
+  /**
+   * Current untracked paths matching the resolved exclude matcher
+   * (preserved). Restricted to paths NOT also in the captured set —
+   * captured paths are classified by the manifest-side loops; this
+   * bucket is disjoint from `tracked_restored`, `untracked_restored`,
+   * and `skipped_unchanged` even when exclude drift exists.
+   */
+  readonly skipped_excluded: readonly string[];
+  /**
+   * Captured paths whose current FILE BYTES already match the captured
+   * bytes. Content-level only — for tracked paths, restore may still
+   * affect index state (e.g., the path is currently staged with the
+   * same bytes but in a different index entry) even when this
+   * classifier names them as unchanged. This is acceptable for receipt
+   * surfacing: the receipt is a user-facing summary of file-content
+   * outcomes, not an index-state diff.
+   */
+  readonly skipped_unchanged: readonly string[];
+  /**
+   * Soft-failure signals surfaced by preflight (HEAD mismatch and/or
+   * exclude drift). CLI maps these to receipt `failures[]` entries.
+   * Empty when both preflight info fields indicate no problem. When
+   * `opts.allowHeadMismatch` is `true`, the `head_mismatch` entry is
+   * suppressed even if HEAD actually mismatches.
+   */
+  readonly preflight_failures: readonly RestorePreflightFailure[];
 }
 
 /**
- * Pre-mutation precondition (M B Step 3e — bidirectional drift detection):
- * compares the manifest's captured `rollback.exclude` patterns against
- * the current restore-time patterns AND checks whether the current
- * matcher hits any captured manifest path. Throws
- * `RestoreExcludeDriftError` with the full 5-field structured payload
- * if either check finds drift. Implements file header invariant #4.
+ * A soft-failure detail surfaced by `planRestoreCheckpoint` for receipt
+ * persistence. The CLI converts each entry to a receipt `failures[]`
+ * entry per the M D D69 schema.
  *
- * **Both pattern lists are normalized inside this helper** (via
- * `normalizeStringArray` from session-format) before comparison —
- * defense-in-depth: producers SHOULD pre-normalize (`checkpoint.ts`
- * does at capture time; `restoreCheckpoint`'s body does at the call
- * site), but the helper canonicalizes both sides so hand-edited
- * manifests, recovery flows, future non-checkpoint producers, and
- * direct test callers all get a sound comparison without caller-side
- * preconditions. Idempotent on already-normalized input.
- *
- * The unordered-deny-list assumption that makes set comparison sound
- * (sort + dedup are lossless transformations) is documented load-
- * bearingly in `@viberevert/session-format`'s `schemas.ts > Manifest >
- * untracked.exclude_patterns` section.
- *
- * Drift surfaces as a SINGLE throw carrying all five fields:
- *   - `capturedPatterns` — normalized manifest patterns
- *   - `currentPatterns` — normalized opts.rollbackExcludePatterns
- *   - `tighteningPatterns` — in current ∖ captured (newly added)
- *   - `looseningPatterns` — in captured ∖ current (newly removed)
- *   - `tighteningPaths` — manifest untracked paths matching the
- *     current matcher (the consequences of tightening drift on THIS
- *     specific manifest)
- * All arrays sorted ASCII-ascending (pattern arrays inherit their sort
- * from `normalizeStringArray`; `tighteningPaths` is sorted defensively
- * since `manifestUntrackedPaths` order is producer-dependent). Empty
- * arrays where the corresponding direction has no drift, never
- * undefined — predictable shape for JSON consumers.
+ * `affected_paths` is normalized via `normalizePathArray` for byte
+ * stability (matches the receipt schema's `sortedUniquePathArray`
+ * enforcement on the persisted field).
  */
-function assertNoExcludeDrift(
-  capturedPatternsInput: readonly string[],
-  currentPatternsInput: readonly string[],
-  manifestUntrackedPaths: readonly string[],
-): void {
-  // Defensive normalization on both sides — see docstring. Idempotent
-  // when callers have already normalized; sound when they haven't.
-  const capturedPatterns = normalizeStringArray([...capturedPatternsInput]);
-  const currentPatterns = normalizeStringArray([...currentPatternsInput]);
-
-  const capturedSet = new Set(capturedPatterns);
-  const currentSet = new Set(currentPatterns);
-
-  // Pattern-set drift: symmetric difference between the two normalized
-  // sets. Inherits sort order from the normalized inputs (filter is
-  // order-preserving), so no additional .sort() needed.
-  const tighteningPatterns = currentPatterns.filter((p) => !capturedSet.has(p));
-  const looseningPatterns = capturedPatterns.filter((p) => !currentSet.has(p));
-
-  // Path-vs-matcher drift: which manifest paths does the current matcher
-  // hit? Build the matcher from the normalized current patterns so
-  // matching is symmetric with how snapshotUntracked saw paths at
-  // capture time (snapshotUntracked also matches against trimmed
-  // patterns via the same picomatch + nonegate setup).
-  const isExcluded = compileExcludeMatcher(currentPatterns);
-  const tighteningPaths = manifestUntrackedPaths.filter(isExcluded).sort();
-
-  if (
-    tighteningPatterns.length === 0 &&
-    looseningPatterns.length === 0 &&
-    tighteningPaths.length === 0
-  ) {
-    return;
-  }
-
-  throw new RestoreExcludeDriftError({
-    capturedPatterns,
-    currentPatterns,
-    tighteningPatterns,
-    looseningPatterns,
-    tighteningPaths,
-  });
+export interface RestorePreflightFailure {
+  readonly error_code: "head_mismatch" | "exclude_drift";
+  readonly message: string;
+  readonly affected_paths: readonly string[];
 }
 
+export type PlanRestoreCheckpointOptions = {
+  readonly repoRoot: string;
+  readonly rollbackExcludePatterns: readonly string[];
+  /**
+   * Mirrors `RestoreCheckpointOptions.allowHeadMismatch` so the apply
+   * and dry-run code paths can be driven by the same `--force` flag.
+   *
+   * **Effect on `RestorePlan.preflight_failures[]`:** when `true`,
+   * suppresses the `head_mismatch` entry. The user has explicitly
+   * accepted the mismatch via `--force`; emitting a `head_mismatch`
+   * failure in the receipt would contradict A6's "receipt has
+   * `failures: []`" guarantee on force-success.
+   *
+   * **No effect on `RestorePlan.head_match`:** that field always
+   * reports the actual HEAD comparison result (`true` if matching,
+   * `false` if not). Callers that need to inspect the actual state
+   * read `head_match` directly; callers that drive receipt
+   * `failures[]` honor the suppression via `preflight_failures[]`.
+   *
+   * **No effect on classification buckets** (`tracked_restored`,
+   * `untracked_restored`, etc.). Plan computation runs identically;
+   * only the preflight-failure surfacing changes.
+   */
+  readonly allowHeadMismatch?: boolean;
+};
+
 /**
- * List entries in a gzipped tarball Buffer, validate each entry's path and
- * type, and assert exact set parity against `expectedPaths`.
+ * Compute a `RestorePlan` describing what `restoreCheckpoint` would do
+ * against the same `checkpointDir` + `opts`. Read-only — no mutation, no
+ * patch application, no archive extraction.
  *
- * Throws `CheckpointCorruptError` on:
- *   - Non-canonical path (fails `isSafeStoredRelativePath`).
- *   - Non-regular entry type (symlink, hardlink, directory, device, FIFO).
- *   - Duplicate entries (same path twice — tarballs we generate never have
- *     duplicates, so seeing one is a tampering signal).
- *   - Entry-set diverges from expected (extras present OR captured paths
- *     missing).
+ * Throws on bad evidence (CheckpointNotFoundError / CheckpointCorruptError
+ * from `loadRestorePreflight`). Per the M D Step 3 lock: corrupt evidence
+ * = no plan, same as `restoreCheckpoint`. CLI exits 1 without writing a
+ * dry-run receipt — the receipt would imply there was a valid rollback
+ * target.
  *
- * Iterates the archive ONCE via `tar.list`'s stream form, which auto-
- * decompresses gzip. Entries are collected in the `onentry` callback (just
- * header info — entry bodies are auto-drained by node-tar's default
- * `noResume: false`); validation is performed synchronously after the
- * stream completes. Collect-then-validate is simpler than throwing from
- * inside the stream callback.
+ * Does NOT throw on HEAD mismatch or exclude drift — those surface via
+ * `RestorePlan.preflight_failures[]` so the CLI can write a dry-run
+ * receipt with structured `failures[]`. `opts.allowHeadMismatch`
+ * suppresses the `head_mismatch` entry (see option JSDoc).
  *
- * Buffer is fed via `Readable.from([buf])` (NOT `Readable.from(buf)`) to
- * yield the entire Buffer as a single chunk — see file header invariant #2.
+ * Pure-functional + idempotent: safe to call multiple times consecutively
+ * (the apply path calls it BEFORE invoking `restoreCheckpoint` to capture
+ * the success classification per D76 step 17).
  */
-async function assertArchiveEntries(
+export async function planRestoreCheckpoint(
   checkpointDir: string,
-  buf: Buffer,
-  archiveLabel: "tracked-dirty" | "untracked",
-  expectedPaths: readonly string[],
-): Promise<void> {
-  const seen: { path: string; type: string }[] = [];
+  opts: PlanRestoreCheckpointOptions,
+): Promise<RestorePlan> {
+  const pre = await loadRestorePreflight(checkpointDir, {
+    repoRoot: opts.repoRoot,
+    rollbackExcludePatterns: opts.rollbackExcludePatterns,
+    includeArtifactBuffers: false,
+  });
 
+  // ---------------------------------------------------------------------------
+  // Tracked classification: hash-compare for paths with captured hashes;
+  // conservative-include for the rest.
+  // ---------------------------------------------------------------------------
+
+  const tracked_restored: string[] = [];
+  const skipped_unchanged: string[] = [];
+
+  // Subset with captured hashes (regular files). Compare current bytes
+  // against captured hash.
+  for (const [path, expectedHash] of Object.entries(pre.manifest.snapshots.file_hashes)) {
+    const abs = join(opts.repoRoot, path);
+    const actualHash = await hashFileIfRegular(abs);
+    if (actualHash === expectedHash) {
+      skipped_unchanged.push(path);
+    } else {
+      tracked_restored.push(path);
+    }
+  }
+
+  // Tracked-dirty paths NOT in file_hashes (deletions, mode-only,
+  // symlinks, type changes). Can't predict patch no-op without
+  // simulating; classify conservatively as tracked_restored. This is
+  // the locked "would be patched" interpretation per the M D Step 3
+  // contract.
+  const trackedFileHashKeys = new Set(Object.keys(pre.manifest.snapshots.file_hashes));
+  for (const path of pre.manifest.snapshots.tracked_dirty_paths) {
+    if (!trackedFileHashKeys.has(path)) {
+      tracked_restored.push(path);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Untracked classification: hash-compare every captured entry.
+  // ---------------------------------------------------------------------------
+
+  const untracked_restored: string[] = [];
+  for (const [path, expectedHash] of Object.entries(pre.manifest.untracked.file_hashes)) {
+    const abs = join(opts.repoRoot, path);
+    const actualHash = await hashFileIfRegular(abs);
+    if (actualHash === expectedHash) {
+      skipped_unchanged.push(path);
+    } else {
+      untracked_restored.push(path);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Current untracked enumeration → untracked_deleted + skipped_excluded.
+  // Mirrors `deleteUncapturedUntracked`'s exact filtering: regular files
+  // only, ENOENT-tolerant, .viberevert/** hard-excluded (silent skip per
+  // file header invariant #6 call site (b)).
+  //
+  // DISJOINT-BUCKET INVARIANT: captured paths are classified above
+  // (untracked_restored / skipped_unchanged). The captured-check fires
+  // BEFORE the exclude-check so a captured path that now matches an
+  // excluded pattern (exclude drift) is NOT double-classified. Exclude
+  // drift still surfaces via preflight_failures[] — see
+  // restore-preflight.ts.
+  // ---------------------------------------------------------------------------
+
+  const currentUntracked = await gitListUntracked(opts.repoRoot);
+  const untracked_deleted: string[] = [];
+  const skipped_excluded: string[] = [];
+
+  for (const p of currentUntracked) {
+    if (isVibeRevertInternalPath(p)) continue; // never delete VibeRevert's own storage
+
+    // Captured paths are classified by the manifest-side loops above.
+    // Skip here BEFORE the exclude-check so exclude drift doesn't
+    // double-classify them into skipped_excluded.
+    if (pre.expectedUntrackedSet.has(p)) continue;
+
+    if (pre.isExcluded(p)) {
+      skipped_excluded.push(p);
+      continue;
+    }
+
+    // Match deleteUncapturedUntracked's behavior: lstat-guarded
+    // regular-file-only filtering. Non-regular entries are preserved at
+    // apply time, so dry-run must NOT claim they'd be deleted.
+    const abs = join(opts.repoRoot, p);
+    let st: Stats;
+    try {
+      st = await lstat(abs);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw err;
+    }
+    if (!st.isFile()) continue;
+    untracked_deleted.push(p);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Preflight failures (HEAD + drift). CLI maps each to receipt failures[].
+  //
+  // head_mismatch is SUPPRESSED when opts.allowHeadMismatch is true —
+  // see the option JSDoc for the A6 rationale. excludeDrift is never
+  // suppressed (D75: --force does NOT bypass exclude drift; the message
+  // reflects that there's no force-equivalent for this signal).
+  // ---------------------------------------------------------------------------
+
+  const preflight_failures: RestorePreflightFailure[] = [];
+  if (!pre.headMatch && !opts.allowHeadMismatch) {
+    preflight_failures.push({
+      error_code: "head_mismatch",
+      message: `current HEAD ${pre.actualHeadSha} does not match checkpoint-captured ${pre.manifest.git.head_sha}`,
+      affected_paths: [],
+    });
+  }
+  if (pre.excludeDrift !== null) {
+    preflight_failures.push({
+      error_code: "exclude_drift",
+      message:
+        "rollback.exclude patterns differ between capture and current config; restore would refuse",
+      affected_paths: normalizePathArray([...pre.excludeDrift.tighteningPaths]),
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Normalize all path arrays before returning. A9 byte-stability.
+  // ---------------------------------------------------------------------------
+
+  return {
+    head_match: pre.headMatch,
+    tracked_restored: normalizePathArray(tracked_restored),
+    untracked_restored: normalizePathArray(untracked_restored),
+    untracked_deleted: normalizePathArray(untracked_deleted),
+    skipped_excluded: normalizePathArray(skipped_excluded),
+    skipped_unchanged: normalizePathArray(skipped_unchanged),
+    preflight_failures,
+  };
+}
+
+// =============================================================================
+// Internal helpers — file-state inspection
+// =============================================================================
+
+/**
+ * Compute the SHA-256 of a file IF it's a regular file. Returns `null`
+ * when the path is absent or non-regular — semantics tuned for
+ * `planRestoreCheckpoint`'s skipped-unchanged classification (the
+ * "expected hash" would only match for a regular file with the right
+ * bytes).
+ *
+ * Three null sources match `collectHashMismatches` exactly:
+ *   - `lstat` returns ENOENT (file absent at lstat time).
+ *   - `lstat` succeeds but `!st.isFile()` (path is a symlink/dir/FIFO/
+ *     socket/device — any non-regular entry).
+ *   - `sha256File` throws ENOENT (file vanished between the lstat and
+ *     the streaming open — benign TOCTOU race).
+ *
+ * Any non-ENOENT error from either `lstat` or `sha256File` propagates
+ * as a real I/O failure — same defensive surface as
+ * `collectHashMismatches`.
+ *
+ * Inline helper (not exported, not in `./hashes.ts`): semantics are
+ * restore-specific (the three null sources are tuned for restore dry-run
+ * classification), not a general-purpose hash primitive.
+ */
+async function hashFileIfRegular(absPath: string): Promise<string | null> {
+  let st: Stats;
   try {
-    await pipeline(
-      Readable.from([buf]),
-      tar.list({
-        onentry: (entry: tar.ReadEntry) => {
-          seen.push({ path: entry.path, type: entry.type });
-        },
-      }),
-    );
+    st = await lstat(absPath);
   } catch (err) {
-    throw new CheckpointCorruptError(
-      checkpointDir,
-      `${archiveLabel} archive failed to parse: ${(err as Error).message}`,
-      err,
-    );
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
   }
-
-  // Validate each entry synchronously.
-  const seenPaths = new Set<string>();
-  for (const { path, type } of seen) {
-    if (!isSafeStoredRelativePath(path)) {
-      throw new CheckpointCorruptError(
-        checkpointDir,
-        `${archiveLabel} archive contains non-canonical path: ${JSON.stringify(path)}`,
-      );
-    }
-    if (type !== "File") {
-      throw new CheckpointCorruptError(
-        checkpointDir,
-        `${archiveLabel} archive contains non-regular entry of type ${JSON.stringify(type)} at path: ${path}`,
-      );
-    }
-    if (seenPaths.has(path)) {
-      throw new CheckpointCorruptError(
-        checkpointDir,
-        `${archiveLabel} archive contains duplicate entry: ${path}`,
-      );
-    }
-    seenPaths.add(path);
-  }
-
-  // Exact set parity in both directions.
-  const fileHashesField = archiveLabel === "tracked-dirty" ? "snapshots" : "untracked";
-  const expected = new Set(expectedPaths);
-  for (const seenPath of seenPaths) {
-    if (!expected.has(seenPath)) {
-      throw new CheckpointCorruptError(
-        checkpointDir,
-        `${archiveLabel} archive contains entry NOT in manifest.${fileHashesField}.file_hashes: ${seenPath}`,
-      );
-    }
-  }
-  for (const expectedPath of expected) {
-    if (!seenPaths.has(expectedPath)) {
-      throw new CheckpointCorruptError(
-        checkpointDir,
-        `${archiveLabel} archive is missing manifest-declared entry: ${expectedPath}`,
-      );
-    }
+  if (!st.isFile()) return null;
+  try {
+    return await sha256File(absPath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
   }
 }
 
@@ -687,7 +877,10 @@ async function assertArchiveEntries(
  * tree that is NOT in `capturedSet`. Files in `capturedSet` are left alone
  * — `extractUntrackedTarball` will overwrite them with captured bytes in
  * the next step. Excluded paths are left alone unconditionally (D3
- * narrowed).
+ * narrowed). `.viberevert/**` paths are hard-excluded per file header
+ * invariant #6 (defense-in-depth so the emergency pre-rollback checkpoint
+ * created by the CLI immediately before this function runs can never be
+ * deleted regardless of `.gitignore` state).
  *
  * Symlink-strict per the M B regular-file-only policy: lstat each
  * candidate, skip on ENOENT (race with concurrent process), skip if not a
@@ -705,11 +898,12 @@ async function assertArchiveEntries(
  */
 async function deleteUncapturedUntracked(
   repoRoot: string,
-  capturedSet: Set<string>,
+  capturedSet: ReadonlySet<string>,
   isExcluded: (path: string) => boolean,
 ): Promise<void> {
   const candidates = await gitListUntracked(repoRoot);
   for (const p of candidates) {
+    if (isVibeRevertInternalPath(p)) continue; // file header invariant #6 call site (a) — hard-exclude VibeRevert's own storage
     if (isExcluded(p)) continue;
     if (capturedSet.has(p)) continue;
     const abs = join(repoRoot, p);
@@ -758,6 +952,18 @@ async function deleteUncapturedUntracked(
  *     destroy user data).
  *   - FIFO / socket / block- or character-device anywhere relevant
  *     (out-of-policy entries; not safe to assume removable).
+ *   - **`.viberevert/**` paths (LOUD TRIPWIRE).** Preflight rejects
+ *     such paths from manifest/archive/patch evidence, so by the time
+ *     `expectedPaths` reaches this helper, no `.viberevert/**` entry
+ *     should be present. If one is, preflight has DRIFTED — the
+ *     tripwire pushes a structured conflict with the locked reason
+ *     "restore refused to clean extraction path under VibeRevert
+ *     internal storage (.viberevert/**)" and skips both the path AND
+ *     its ancestors from the cleanup walk. Non-mutating (no rmdir /
+ *     unlink touches `.viberevert/**`); the conflict bubbles up
+ *     through `RestoreExtractionConflictError` so the impossible
+ *     condition is visible at the throw point rather than silently
+ *     absorbed. See file header invariant #6 call site (c).
  *
  * **Iteration order: ancestors before descendants** (paths sorted by
  * depth ascending). This matters because clearing a symlink ancestor
@@ -768,18 +974,43 @@ async function deleteUncapturedUntracked(
  *
  * Untracked paths matched by `isExcluded` are skipped — restore won't
  * extract over them, so blockers there are not relevant (D3 narrowed). At
- * the call site, `assertNoManifestPathExcluded` has already guaranteed
- * none of `expectedPaths` matches `isExcluded`, so the skip is effectively
- * a no-op — kept for defense-in-depth + clarity.
+ * the call site, preflight's drift check has already guaranteed none of
+ * `expectedPaths` matches `isExcluded`, so the skip is effectively a
+ * no-op — kept for defense-in-depth + clarity.
+ *
+ * **Export scope (controlled internal).** Exported from this module so
+ * package-local tests can call it directly with synthetic `expectedPaths`
+ * — specifically to verify the `.viberevert/**` tripwire branch (file
+ * header invariant #6 call site (c)) without setting up a full
+ * restore lifecycle or bypassing preflight. NOT re-exported from
+ * `@viberevert/git`'s barrel — this is a test-surface concession, NOT a
+ * controlled CLI orchestration API, and no D77 architectural-invariant
+ * binds it. Package-local test imports use the source module path:
+ * `import { clearExtractionPathConflicts } from "../src/restore.js"`.
  */
-async function clearExtractionPathConflicts(
+export async function clearExtractionPathConflicts(
   repoRoot: string,
   expectedPaths: readonly string[],
   isExcluded: (path: string) => boolean,
 ): Promise<RestoreExtractionConflict[]> {
+  const conflicts: RestoreExtractionConflict[] = [];
+
   // Collect every path we'd touch (final paths + ancestor dirs).
+  // `.viberevert/**` paths surface as TRIPWIRE conflicts (see helper
+  // JSDoc) and are skipped from the walk entirely — neither the path
+  // nor its ancestors are added to `allPaths`, so no rmdir/unlink can
+  // touch VibeRevert's own storage even if preflight drifts.
   const allPaths = new Set<string>();
   for (const p of expectedPaths) {
+    if (isVibeRevertInternalPath(p)) {
+      conflicts.push({
+        manifestPath: p,
+        conflictingPath: p,
+        reason:
+          "restore refused to clean extraction path under VibeRevert internal storage (.viberevert/**)",
+      });
+      continue;
+    }
     if (isExcluded(p)) continue;
     allPaths.add(p);
     let parent = p;
@@ -802,7 +1033,6 @@ async function clearExtractionPathConflicts(
   });
 
   const expectedSet = new Set(expectedPaths);
-  const conflicts: RestoreExtractionConflict[] = [];
 
   for (const rel of ordered) {
     const abs = join(repoRoot, rel);
@@ -919,14 +1149,22 @@ function describeStat(st: Stats): string {
 
 /**
  * Extract a gzipped tarball Buffer into `cwd` (the repo root). Strict tar
- * filters reject anything that isn't a regular file with a safe path,
- * mirroring the preflight assertions. Runs from the in-memory Buffer; never
- * touches the on-disk archive after it was first read in the validate
- * phase.
+ * filters reject anything that isn't a regular file with a safe path AND
+ * not under `.viberevert/**`, mirroring the preflight assertions. Runs
+ * from the in-memory Buffer; never touches the on-disk archive after it
+ * was first read by preflight.
  *
  * Uses `tar.extract` (the documented stream-based named export) which
  * auto-detects and decompresses gzip. Buffer fed via `Readable.from([buf])`
  * (single-chunk) per file header invariant #2.
+ *
+ * The `.viberevert/**` reject in the filter is defense-in-depth — preflight
+ * already rejected such entries during archive validation, so this filter
+ * should never fire in practice. Kept as belt-and-braces against future
+ * preflight drift: if someone refactors preflight and accidentally drops
+ * the `.viberevert/**` archive-entry check, this filter still prevents
+ * VibeRevert's own storage from being overwritten by extraction. See file
+ * header invariant #6 call site (d).
  */
 async function extractUntrackedTarball(buf: Buffer, repoRoot: string): Promise<void> {
   await pipeline(
@@ -934,16 +1172,17 @@ async function extractUntrackedTarball(buf: Buffer, repoRoot: string): Promise<v
     tar.extract({
       cwd: repoRoot,
       // Per-entry guard: refuse anything not a regular file with a safe
-      // path. This duplicates the preflight assertion intentionally —
-      // tar.extract has its own filter pass; keeping both in agreement is
-      // belt-and-braces for trust-critical extraction.
-      // tar v7's filter signature is `(path, ReadEntry | Stats)` — Stats is
-      // for the create-side; extract always passes ReadEntry. Widen the
-      // parameter type to satisfy the assignability check, then narrow via
-      // the `"type" in entry` discriminator (fs.Stats has no `.type` field;
-      // ReadEntry does).
+      // path, AND refuse `.viberevert/**` entries (defense-in-depth).
+      // tar v7's filter signature is `(path, ReadEntry | Stats)` — Stats
+      // is for the create-side; extract always passes ReadEntry. Widen
+      // the parameter type to satisfy the assignability check, then
+      // narrow via the `"type" in entry` discriminator (fs.Stats has no
+      // `.type` field; ReadEntry does).
       filter: (path: string, entry: tar.ReadEntry | Stats) =>
-        "type" in entry && entry.type === "File" && isSafeStoredRelativePath(path),
+        "type" in entry &&
+        entry.type === "File" &&
+        isSafeStoredRelativePath(path) &&
+        !isVibeRevertInternalPath(path),
       // Strip system-specific metadata on extraction too (mirrors capture-
       // side `portable: true`). Doesn't affect file contents.
       preservePaths: false,

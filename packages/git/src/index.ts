@@ -4,9 +4,9 @@
 // Public API of @viberevert/git.
 //
 // Consumers (the CLI orchestration layer in `viberevert`; M C's check engine;
-// future M D's rollback CLI) import from this barrel ONLY — never from
-// internal module paths. Internal module reorganization is allowed without a
-// major version bump as long as this surface stays stable.
+// M D's rollback CLI) import from this barrel ONLY — never from internal
+// module paths. Internal module reorganization is allowed without a major
+// version bump as long as this surface stays stable.
 //
 // =============================================================================
 // Public surface
@@ -49,6 +49,25 @@
 //       D17c — cleanup failures populate warnings, never thrown)
 //     - DiffSinceCheckpointOptions
 //
+//   Restore APIs (M B → M D promotion per D73; controlled package APIs
+//   per D77 — consumed only by CLI rollback orchestration, enforced by
+//   the architectural-invariants test):
+//     - restoreCheckpoint, RestoreCheckpointOptions (M B-introduced
+//       byte-identical restore primitive; M D extends with the new
+//       `allowHeadMismatch?: boolean` option per D64 so CLI's `--force`
+//       can propagate as a real HEAD-mismatch override into restore).
+//       Throws typed errors on refusal / verification failure (see
+//       Error classes below).
+//     - planRestoreCheckpoint, RestorePlan, PlanRestoreCheckpointOptions,
+//       RestorePreflightFailure (M D D76 dry-run sibling). Returns a
+//       structured classification of what `restoreCheckpoint` WOULD do
+//       against the same checkpoint + opts; never mutates. CLI uses
+//       the plan to synthesize the receipt's results[] in dry-run mode
+//       AND in apply mode (single source of truth — no second
+//       classification algorithm). HEAD/exclude-drift soft failures
+//       surface via `RestorePlan.preflight_failures[]` for CLI to map
+//       into the receipt's `failures[]` per the M D D69 schema.
+//
 //   Error classes (all extend Error and set `this.name` per the package's
 //   error convention):
 //     - GitNotAvailableError (D1 — git binary missing/unusable)
@@ -78,14 +97,43 @@
 // Deliberately NOT exported (locked)
 // =============================================================================
 //
-//   - `restoreCheckpoint` and `RestoreCheckpointOptions` (D7): restore is
-//     an INTERNAL helper used by M B's fixture tests to prove round-trip
-//     correctness AND by M C's `getDiffSinceCheckpoint` to materialize the
-//     checkpoint base inside a scratch worktree. The user-facing
-//     `viberevert rollback` CLI is M D scope (--dry-run, --force,
-//     typed-confirmation, emergency pre-rollback checkpoint). M B tests
-//     reach for restoreCheckpoint via `../src/restore.js` directly. Do NOT
-//     widen this barrel to include it without M D orchestration in place.
+//   - `loadRestorePreflight` and its result types
+//     (`RestorePreflightOptions`, `RestorePreflightResult` +
+//     `RestorePreflightResultWithArtifacts` +
+//     `RestorePreflightResultWithoutArtifacts`,
+//     `RestorePreflightArtifacts`, `ExcludeDriftDetail`) from
+//     `restore-preflight.ts`: internal. `loadRestorePreflight` is the
+//     non-mutating trust-validation pipeline consumed by
+//     `restoreCheckpoint` (apply path) and `planRestoreCheckpoint`
+//     (dry-run path). CLI rollback orchestration calls those two
+//     public helpers directly; it never needs the raw preflight
+//     result. Keeping preflight internal means the trust-validation
+//     contract (validation order, INFO-vs-throws split, archive vs
+//     patch path-policy enforcement) can be refactored without a
+//     major version bump.
+//
+//   - `clearExtractionPathConflicts` from `restore.ts`: test-surface
+//     concession. Exported from the source module so package-local
+//     tests can verify the `.viberevert/**` tripwire branch
+//     (`restore.ts` file header invariant #6 call site (c)) without
+//     setting up a full restore lifecycle or bypassing preflight.
+//     NOT a controlled CLI orchestration API; no D77 invariant binds
+//     it. Test imports use
+//     `import { clearExtractionPathConflicts } from "../src/restore.js"`.
+//
+//   - Restore-internal-path-policy primitives
+//     (`VIBEREVERT_INTERNAL_STORAGE_ROOT`, `isVibeRevertInternalPath`,
+//     `decodeGitQuotedEscapesForPolicyScan`,
+//     `patchHeaderTargetsVibeRevertInternalPath`) from
+//     `restore-internal-path-policy.ts`: internal to the restore
+//     subsystem (consumed by `restore.ts` mutation side +
+//     `restore-preflight.ts` evidence side). NOT a public utility
+//     surface — if another package ever needs `.viberevert/**` path
+//     policy (which has not happened in M A through M D), the right
+//     move is to lift the policy module into a dedicated shared
+//     package rather than widening this barrel. Package-local tests
+//     import via
+//     `import { ... } from "../src/restore-internal-path-policy.js"`.
 //
 //   - `writeFileAtomic` from `atomic.ts` (D17c): package-private. Each
 //     package owns its own private atomic-write helpers (intentional
@@ -181,3 +229,14 @@ export {
 
 // Runtime values: identity generators.
 export { generateCheckpointId } from "./ids.js";
+
+// Inferred TypeScript types: restore APIs (M D — D73 promotion of
+// restoreCheckpoint from M B internal; D76 new planRestoreCheckpoint).
+export type {
+  PlanRestoreCheckpointOptions,
+  RestoreCheckpointOptions,
+  RestorePlan,
+  RestorePreflightFailure,
+} from "./restore.js";
+// Runtime values: restore APIs (M D — D73 promotion + D76 dry-run sibling).
+export { planRestoreCheckpoint, restoreCheckpoint } from "./restore.js";
