@@ -1,24 +1,31 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Fabio Marcello Salvadori
 
-// ID factories for @viberevert/core: session IDs (`sess_<ULID>`) and
-// ad-hoc report IDs (`rpt_<ULID>`). Per D5/D6/D27 in the M B and
-// M C plans, each package owns its own ID-space monotonic factory:
-// core owns session+report here, @viberevert/git owns checkpoint.
+// ID factories for @viberevert/core: session IDs (`sess_<ULID>`),
+// ad-hoc report IDs (`rpt_<ULID>`), and rollback IDs (`rb_<ULID>`).
+// Per D5/D6/D27/D71 in the M B, M C, and M D plans, each package owns
+// its own ID-space monotonic factory: core owns session+report+rollback
+// here, @viberevert/git owns checkpoint.
 //
 // =============================================================================
 // Architectural locks (must be preserved by all changes here)
 // =============================================================================
 //
-// 1. **D5/D16 — independent ID spaces.** Session, report, and
-//    checkpoint use SEPARATE monotonicFactory() instances, in
-//    SEPARATE packages. Each maintains its own monotonic sequence
-//    without coordination with the others.
+// 1. **D5/D16 — independent ID spaces.** Session, report, rollback,
+//    and checkpoint use SEPARATE monotonicFactory() instances. Three
+//    live here in core (session/report/rollback); one lives in
+//    @viberevert/git (checkpoint). Each maintains its own monotonic
+//    sequence without coordination with the others.
 //
 // 2. **D17b — caller owns paths, factory owns IDs.** The factory
 //    returns `<prefix>_<ULID>` strings; callers use them verbatim in
 //    storage paths (e.g., `.viberevert/sessions/${sessionId}/`).
-//    NEVER prepend the prefix again.
+//    NEVER prepend the prefix again. Note that rollback IDs do NOT
+//    currently drive storage paths in M D (per D68 the receipt is
+//    session-bound; the rb_<ULID> lives inside the receipt's
+//    `rollback_id` field for audit). They are still emitted by an
+//    independent factory so that a future checkpoint-direct rollback
+//    (D59 deferral) can mint path-driving IDs without retrofitting.
 //
 // 3. **D49 Precondition 2 — env-var-driven determinism for fixtures.**
 //    Four behavior modes, keyed on the two test-only env vars:
@@ -196,8 +203,9 @@ function mulberry32(seed: number): PRNG {
 
 /**
  * Internal callable shape: returns a string ULID body (no prefix).
- * The two exported functions (`generateSessionId`, `generateReportId`)
- * prepend their respective `sess_` / `rpt_` prefixes.
+ * The three exported functions (`generateSessionId`,
+ * `generateReportId`, `generateRollbackId`) prepend their respective
+ * `sess_` / `rpt_` / `rb_` prefixes.
  *
  * - Production mode: `monotonicFactory()` invoked with no args
  *   (uses `Date.now()` internally).
@@ -286,7 +294,7 @@ function buildFactory(namespace: string): CachedFactory {
 /**
  * Per-namespace cache. Module-level Map; each namespace's entry is
  * rebuilt on key change. WeakRef / WeakMap is not needed — the set
- * of namespaces is fixed and small (2 here, 1 in git).
+ * of namespaces is fixed and small (3 here, 1 in git).
  */
 const factoryCache = new Map<string, CachedFactory>();
 
@@ -312,7 +320,8 @@ function getFactory(namespace: string): UlidThunk {
 }
 
 // =============================================================================
-// Public API (D5/D27): generateSessionId, generateReportId
+// Public API (D5/D27/D71): generateSessionId, generateReportId,
+// generateRollbackId
 // =============================================================================
 
 /**
@@ -364,4 +373,40 @@ export function generateSessionId(): string {
  */
 export function generateReportId(): string {
   return `rpt_${getFactory("core:report")()}`;
+}
+
+/**
+ * Returns a fresh rollback id of the form `rb_<ULID>` — e.g.
+ * `rb_01JV8Z0N6E9QABCDEFGHIJKLMN`.
+ *
+ * The returned string is the FULL id including the `rb_` prefix.
+ * Never prepend `rb_` to the result, or it will double up
+ * (`rb_rb_...`). Per D71 in the M D plan, M D mints a fresh
+ * rollback id for every `viberevert rollback` invocation (both
+ * `--apply` AND dry-run) and records it inside the receipt's
+ * `rollback_id` field for audit.
+ *
+ * Per D68, the rollback id does NOT currently drive storage paths
+ * in M D — the receipt is session-bound:
+ *   - `--apply` → `.viberevert/sessions/${sess}/rollback-receipt.json`
+ *   - dry-run   → `.viberevert/sessions/${sess}/rollback-dry-run-receipt.json`
+ * The independent factory is still warranted: a future
+ * checkpoint-direct rollback (D59 deferral) would mint
+ * path-driving ids of the form `.viberevert/rollbacks/${rb}/`
+ * without retrofitting the factory layer. Receipt schema's
+ * `ReceiptFileSchema.refine` already enforces the
+ * `rb_<26-char Crockford ULID>` shape per D69.
+ *
+ * Per D5/D16/D71, this factory is INDEPENDENT of `generateSessionId`
+ * and `generateReportId` — three separate monotonic sequences live
+ * in core, plus the separate `cp_<ULID>` sequence in
+ * `@viberevert/git`. No coordination between the four.
+ *
+ * Under `VIBEREVERT_TEST_FIXED_ULID_SEED` (per D49 Precondition 2),
+ * this factory produces a deterministic ULID sequence keyed on the
+ * subseed `core:rollback`. See the file header for the full env-var
+ * contract.
+ */
+export function generateRollbackId(): string {
+  return `rb_${getFactory("core:rollback")()}`;
 }

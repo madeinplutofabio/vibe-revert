@@ -15,6 +15,6 @@
     "risk_level": "low",
     "changed_files": [],
     "results": [],
-    "rollback_available": true
+    "rollback_available": false
   }
 }

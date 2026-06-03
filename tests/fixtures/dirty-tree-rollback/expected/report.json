@@ -22,6 +22,6 @@
       }
     ],
     "results": [],
-    "rollback_available": true
+    "rollback_available": false
   }
 }

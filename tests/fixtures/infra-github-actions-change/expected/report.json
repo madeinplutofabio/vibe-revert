@@ -40,7 +40,7 @@
         "recommendation": "Deployment configuration changes affect how and where the app runs. Verify the change in a non-production environment first, and confirm CI gates still pass before merging."
       }
     ],
-    "rollback_available": true,
+    "rollback_available": false,
     "summary": "1 findings: deployment (1)"
   }
 }

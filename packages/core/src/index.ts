@@ -27,11 +27,16 @@
 //       ctx.detectedFrameworks and SessionReport.detected_frameworks
 //     - KnownProfile, DetectionResult, Resolution types
 //
-//   Identity generators (M B + M C — D5/D16/D27):
+//   Identity generators (M B + M C + M D — D5/D16/D27/D71):
 //     - generateSessionId (M B — `sess_<ULID>`; core owns session IDs;
 //       git owns checkpoint IDs `cp_<ULID>` separately)
 //     - generateReportId (M C — `rpt_<ULID>` for ad-hoc reports;
 //       independent monotonic factory from generateSessionId per D27)
+//     - generateRollbackId (M D — `rb_<ULID>` for rollback receipts;
+//       independent monotonic factory per D71. Does NOT currently
+//       drive storage paths — receipts are session-bound per D68 —
+//       but the id is recorded inside the receipt's `rollback_id`
+//       field and is shape-enforced by `ReceiptFileSchema` per D69.)
 //
 //   Path helpers + repo-root resolution (M A):
 //     - resolveRepoRoot, viberevertDir, ensureViberevertDirs
@@ -80,8 +85,8 @@ export type { DetectionResult, KnownProfile, Resolution } from "./framework-dete
 // Runtime values: framework detection (D42 single source of truth).
 export { detectFramework, detectFrameworks } from "./framework-detect.js";
 
-// Runtime values: identity generators (M B + M C — D5/D16/D27).
-export { generateReportId, generateSessionId } from "./ids.js";
+// Runtime values: identity generators (M B + M C + M D — D5/D16/D27/D71).
+export { generateReportId, generateRollbackId, generateSessionId } from "./ids.js";
 // Path helpers + repo-root resolution.
 export {
   ensureViberevertDirs,

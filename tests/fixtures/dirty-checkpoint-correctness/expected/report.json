@@ -58,7 +58,7 @@
         "recommendation": "Add or update sibling tests for this change in the same diff. Risky-area changes without paired test changes are difficult to verify and easy to regress. If the change is intentionally test-exempt (e.g., a pure config tweak), document the exemption in the change description."
       }
     ],
-    "rollback_available": true,
+    "rollback_available": false,
     "summary": "2 findings: payments (1), test-gap (1)"
   }
 }

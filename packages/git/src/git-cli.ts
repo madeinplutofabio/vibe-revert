@@ -33,8 +33,9 @@
 // Public surface vs. internal:
 //   - Public: probeGitVersion, getHeadSha, getBranch, getStatusPorcelainText,
 //     getStatusPorcelainZ, getStatusPorcelainZRaw, parseStatusPorcelainZ,
-//     resolveCommitRef, getCommitTimestamp, plus the StatusEntry type and
-//     the CommitRefNotFoundError class.
+//     loadEndOfSessionChangedPaths, resolveCommitRef, getCommitTimestamp,
+//     plus the StatusEntry and EndOfSessionSnapshot types and the
+//     CommitRefNotFoundError class.
 //   - Internal (re-exported only within this package): gitDiffUnstaged,
 //     gitDiffStaged, gitListUntracked, gitListTrackedDirty, gitApply,
 //     gitApplyWithIndex, gitResetHardHead, runGit, runGitText, splitNulList.
@@ -66,8 +67,10 @@
 // config).
 
 import { execFile } from "node:child_process";
+import { readFile } from "node:fs/promises";
+import { isAbsolute, relative, resolve } from "node:path";
 import { promisify } from "node:util";
-import { toIsoSecondString } from "@viberevert/session-format";
+import { type SessionState, toIsoSecondString } from "@viberevert/session-format";
 import { GitNotAvailableError } from "./errors.js";
 
 const execFileAsync = promisify(execFile);
@@ -520,6 +523,167 @@ export async function getStatusPorcelainZ(repoRoot: string): Promise<readonly St
  */
 export async function getStatusPorcelainZRaw(repoRoot: string): Promise<Buffer> {
   return runGit(repoRoot, ["status", "--porcelain=v1", "-z"]);
+}
+
+/**
+ * Discriminated union returned by `loadEndOfSessionChangedPaths`. The
+ * `missing` arm signals "no machine snapshot exists for this session"
+ * — distinct from `{ kind: "present", paths: [] }` which means "the
+ * session ended with a clean tree". M D's rollback CLI branches on
+ * this discriminator (D61b's `--apply --force` escape hatch fires
+ * ONLY on `kind: "missing"`; an empty `paths` array is a legitimate
+ * no-change ended session and skips the escape hatch).
+ *
+ * Per D79: pre-M D ended sessions (and any session without an
+ * `after-status.z` file on disk) surface as `{ kind: "missing" }`;
+ * M D-aware ended sessions with at least one `after-status.z` byte
+ * surface as `{ kind: "present", ... }`.
+ */
+// TODO(M D follow-up): lift these canonical session-storage constants into
+// @viberevert/session-format and consume them from BOTH the core writer
+// (`packages/core/src/session.ts`) and this git-side reader. Today this
+// helper duplicates writer-owned knowledge:
+//
+//   - `.viberevert/sessions`
+//   - `after-status.txt`
+//   - `after-status.z`
+//   - `sess_<Crockford ULID>` shape
+//
+// Keeping the reader strict is the right Step 4b safety move, but the
+// long-term drift-proof home is session-format so writer and reader cannot
+// silently disagree on canonical paths.
+const SESSION_ID_RE = /^sess_[0-9A-HJKMNP-TV-Z]{26}$/;
+const SESSION_STORAGE_DIR_REL = ".viberevert/sessions";
+const AFTER_STATUS_FILENAME = "after-status.txt";
+const AFTER_STATUS_Z_FILENAME = "after-status.z";
+
+function expectedAfterStatusPath(sessionId: string): string {
+  return `${SESSION_STORAGE_DIR_REL}/${sessionId}/${AFTER_STATUS_FILENAME}`;
+}
+
+function expectedAfterStatusZPath(sessionId: string): string {
+  return `${SESSION_STORAGE_DIR_REL}/${sessionId}/${AFTER_STATUS_Z_FILENAME}`;
+}
+
+function resolveRepoContainedPath(repoRoot: string, repoRelativePath: string): string {
+  const repoAbs = resolve(repoRoot);
+  const targetAbs = resolve(repoAbs, repoRelativePath);
+  const rel = relative(repoAbs, targetAbs);
+
+  if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) {
+    throw new Error(`after_status_z_path resolves outside repoRoot: ${repoRelativePath}`);
+  }
+
+  return targetAbs;
+}
+
+export type EndOfSessionSnapshot =
+  | { readonly kind: "present"; readonly paths: readonly string[] }
+  | { readonly kind: "missing" };
+
+/**
+ * Load the end-of-session changed-path set for a session, parsing the
+ * persisted canonical `after-status.z` z-format snapshot via the shared
+ * `parseStatusPorcelainZ` parser.
+ *
+ * This helper is intentionally stricter than "read whatever path the
+ * typed object points at." It feeds mutation-bearing rollback decisions,
+ * so it first proves the session metadata is canonical:
+ *
+ *   - `session_id` must be a valid `sess_<ULID>`;
+ *   - `after_status_z_path` present implies the session is ended and
+ *     `after_status_path` is also present;
+ *   - `after_status_path` must equal
+ *     `.viberevert/sessions/${session_id}/after-status.txt`;
+ *   - `after_status_z_path` must equal
+ *     `.viberevert/sessions/${session_id}/after-status.z`;
+ *   - the read uses the computed canonical z path, not the input field.
+ *
+ * This blocks cross-session snapshot reads, path drift, manual metadata
+ * edits, and future refactor mistakes before any filesystem read occurs.
+ *
+ * Returns a discriminated union:
+ *   - `{ kind: "missing" }`: `session.after_status_z_path` is undefined
+ *     (legacy pre-M D ended session) OR the canonical z-file does not
+ *     exist on disk. M D rollback treats this as "no comparison base";
+ *     `--apply` refuses without `--force` per D61b; dry-run records
+ *     `dirty_tree_check: "skipped_no_after_state"`.
+ *   - `{ kind: "present", paths: [] }`: the canonical file exists but
+ *     is empty — a legitimate ended-session-with-no-changes. This is
+ *     NOT the same as missing.
+ *   - `{ kind: "present", paths: [...] }`: the canonical file exists
+ *     and parsed successfully. Paths are deduped and sorted.
+ *
+ * R/C rename/copy handling (D61 lock): for every rename or copy entry,
+ * BOTH `previousPath` and `path` are added to the set. A renamed file
+ * must be classified as session-related regardless of whether the old
+ * or new side appears in the current dirty enumeration.
+ *
+ * Failure modes:
+ *   - canonical metadata violations throw before any file read;
+ *   - file-read errors other than ENOENT propagate;
+ *   - malformed z-format bytes propagate the parser's fail-closed Error.
+ */
+export async function loadEndOfSessionChangedPaths(
+  session: SessionState,
+  repoRoot: string,
+): Promise<EndOfSessionSnapshot> {
+  if (session.after_status_z_path === undefined) {
+    return { kind: "missing" };
+  }
+
+  if (!SESSION_ID_RE.test(session.session_id)) {
+    throw new Error(`session.session_id is not a valid session id: ${session.session_id}`);
+  }
+
+  const expectedTxt = expectedAfterStatusPath(session.session_id);
+  const expectedZ = expectedAfterStatusZPath(session.session_id);
+
+  if (session.ended_at === undefined || session.after_status_path === undefined) {
+    throw new Error(
+      "session.after_status_z_path is present but ended_at/after_status_path is missing",
+    );
+  }
+
+  if (session.after_status_path !== expectedTxt) {
+    throw new Error(
+      `session.after_status_path does not match expected session path: expected ${expectedTxt}, got ${session.after_status_path}`,
+    );
+  }
+
+  if (session.after_status_z_path !== expectedZ) {
+    throw new Error(
+      `session.after_status_z_path does not match expected session path: expected ${expectedZ}, got ${session.after_status_z_path}`,
+    );
+  }
+
+  const absPath = resolveRepoContainedPath(repoRoot, expectedZ);
+
+  let buf: Buffer;
+  try {
+    buf = await readFile(absPath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      return { kind: "missing" };
+    }
+    throw err;
+  }
+
+  if (buf.length === 0) {
+    return { kind: "present", paths: [] };
+  }
+
+  const entries = parseStatusPorcelainZ(buf);
+  const paths = new Set<string>();
+
+  for (const entry of entries) {
+    paths.add(entry.path);
+    if (entry.previousPath !== undefined) {
+      paths.add(entry.previousPath);
+    }
+  }
+
+  return { kind: "present", paths: [...paths].sort() };
 }
 
 /**

@@ -143,6 +143,7 @@ import { renameDirAtomic, writeFileAtomic } from "../atomic.js";
 import {
   applyDiffPathExcludes,
   buildReportFile,
+  computeRollbackAvailable,
   mergeChecksConfig,
   parseRawDiffToInputs,
 } from "../check-orchestration.js";
@@ -492,7 +493,41 @@ Exit codes:
       };
       const runResult = runChecks(BUILTIN_CHECKS, ctx);
 
-      // Step 10: build the validated ReportFile. buildReportFile calls
+      // Step 10a: assemble sinceMeta with a PROVISIONAL
+      // rollbackAvailable=false. The provisional value is required
+      // to satisfy BuildReportSinceMeta's type (rollbackAvailable
+      // is a required boolean), but `computeRollbackAvailable`
+      // explicitly ignores the field — its docstring locks that
+      // only `kind` and `reportId` are read. The real value is
+      // computed in Step 10b and threaded into the final sinceMeta
+      // for Step 10c.
+      const sinceMetaProvisional = {
+        kind: base.kind,
+        sinceKind: base.sinceKind,
+        sinceRef: base.sinceRef,
+        sinceResolvedSha: base.sinceResolvedSha,
+        reportId: base.reportId,
+        startedAt: base.startedAt,
+        rollbackAvailable: false,
+        // Conditional spreads keep exactOptionalPropertyTypes happy —
+        // no field gets explicit-undefined.
+        ...(base.mode === "checkpoint" && base.checkpointId !== undefined
+          ? { checkpointId: base.checkpointId }
+          : {}),
+        ...(base.mode === "git-ref" && base.stagedOnly ? { stagedOnly: true as const } : {}),
+        ...(task !== undefined ? { task } : {}),
+      };
+
+      // Step 10b: derive rollback_available per D72. Session-bound
+      // reports probe the session's INNER checkpoint dir; ad-hoc
+      // reports always get false (M D rollback is session-only per
+      // D59). CheckpointNotFoundError → false; any other error
+      // (corruption, I/O, malformed reportId rejecting the fail-
+      // closed path guard) propagates as a stack trace per the
+      // same "engine bug" rule applied to schema failures below.
+      const rollbackAvailable = await computeRollbackAvailable(sinceMetaProvisional, repoRoot);
+
+      // Step 10c: build the validated ReportFile. buildReportFile calls
       // ReportFileSchema.parse internally so noise-budget violations,
       // identity-consistency drift, and since_kind ↔ kind / staged_only
       // ↔ kind refines all surface as one typed throw here. Schema
@@ -503,21 +538,7 @@ Exit codes:
         ctx,
         raw: filteredDiff,
         runResult,
-        sinceMeta: {
-          kind: base.kind,
-          sinceKind: base.sinceKind,
-          sinceRef: base.sinceRef,
-          sinceResolvedSha: base.sinceResolvedSha,
-          reportId: base.reportId,
-          startedAt: base.startedAt,
-          // Conditional spreads keep exactOptionalPropertyTypes happy —
-          // no field gets explicit-undefined.
-          ...(base.mode === "checkpoint" && base.checkpointId !== undefined
-            ? { checkpointId: base.checkpointId }
-            : {}),
-          ...(base.mode === "git-ref" && base.stagedOnly ? { stagedOnly: true as const } : {}),
-          ...(task !== undefined ? { task } : {}),
-        },
+        sinceMeta: { ...sinceMetaProvisional, rollbackAvailable },
       });
 
       // Step 11: atomic persistence (D17b/D26 dispatch on base.kind).

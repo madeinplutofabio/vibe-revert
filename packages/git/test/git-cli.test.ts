@@ -66,12 +66,65 @@
 //     equals parseStatusPorcelainZ(await getStatusPorcelainZRaw())
 //     for the same tree state. Locks that the refactor introduced no
 //     observable change at the public surface.
+//
+// Step 4b additions (M D — D71, D61, D61b, D79):
+//   - loadEndOfSessionChangedPaths: direct tests covering the
+//     canonical-snapshot read contract the M D rollback dirty-tree
+//     comparison depends on. The helper is intentionally stricter
+//     than "read whatever path the typed object points at" — it
+//     first proves the session metadata is canonical (session_id
+//     shape, ended_at + after_status_path presence, both paths
+//     equal to the computed canonical session-owned paths) before
+//     any filesystem read. The 13-test block exercises:
+//       Happy / missing paths:
+//         (1) `{ kind: "missing" }` on undefined after_status_z_path
+//             (pre-M D legacy session — fast path, no metadata
+//             validation).
+//         (2) `{ kind: "missing" }` on ENOENT for the canonical file
+//             (collapses with the field-undefined arm).
+//         (3) `{ kind: "present", paths: [] }` on empty canonical
+//             file — legitimate ended-session-with-no-changes, NOT
+//             the same as missing.
+//         (4) Populated canonical file: parsed paths sorted ascending
+//             for byte-stable golden output.
+//         (5) R/C entries include BOTH previousPath and path per D61
+//             lock; dedup observable when a rename's previousPath
+//             overlaps another entry's path.
+//         (6) Malformed z bytes propagate the parser's fail-closed
+//             Error (no silent fallback to `{ kind: "missing" }` —
+//             that fallback would be a security hole letting a
+//             tampered z-file bypass the dirty-tree comparison).
+//       Canonical-metadata violations (one canary per branch):
+//         (7) Non-canonical after_status_z_path with traversal-like
+//             segments rejected by the canonical-equality check
+//             BEFORE reaching resolveRepoContainedPath.
+//         (8) Cross-session after_status_z_path (canonical for OTHER
+//             session) rejected — the exact attack the canonical-
+//             equality check exists to block.
+//         (9) Malformed session_id rejected BEFORE any path
+//             computation can interpolate the corrupt id.
+//        (10) after_status_z_path present with ended_at missing
+//             (after_status_path canonical) — pins the OR-
+//             shortcircuit's first clause.
+//        (11) after_status_z_path present with after_status_path
+//             missing (ended_at present) — pins the OR-
+//             shortcircuit's second clause.
+//        (12) Wrong after_status_path (canonical for OTHER session)
+//             while after_status_z_path stays canonical — pins
+//             the txt-path canonical-mismatch check.
+//        (13) Non-ENOENT read failures propagate (canonical path
+//             exists as a directory). Asserts the rejection
+//             WITHOUT binding to a platform-specific error code
+//             (EISDIR on Linux/macOS, EPERM/EACCES variants on
+//             Windows) — the contract is "non-ENOENT propagates",
+//             not "EISDIR specifically".
 
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { SESSION_STATE_SCHEMA_VERSION, type SessionState } from "@viberevert/session-format";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -79,6 +132,7 @@ import {
   getCommitTimestamp,
   getStatusPorcelainZ,
   getStatusPorcelainZRaw,
+  loadEndOfSessionChangedPaths,
   parseStatusPorcelainZ,
   resolveCommitRef,
 } from "../src/git-cli.js";
@@ -155,6 +209,66 @@ async function commitWithFixedDate(
     },
   });
   return (await runGit(repoRoot, ["rev-parse", "HEAD"])).trim();
+}
+
+/**
+ * Locked session id for `loadEndOfSessionChangedPaths` fixtures.
+ * Single constant so the `expectedZ` path is identical across every
+ * test in the describe block; the cross-session test uses a SECOND
+ * id to exercise the canonical-equality reject path.
+ */
+const FIXTURE_SESSION_ID = "sess_01JV8Y7W2M7ABCDEFGHJKMNPQR";
+const FIXTURE_OTHER_SESSION_ID = "sess_01JV8Z0N6E7ABCDEFGHJKMNPQR";
+
+/**
+ * Construct a `SessionState` fixture for `loadEndOfSessionChangedPaths`
+ * tests, CANONICAL-BY-DEFAULT per the helper's stricter contract.
+ *
+ * The default fixture represents a fully-ended M D-aware session:
+ * `ended_at` set, `after_status_path` set to the canonical
+ * `.viberevert/sessions/<sess>/after-status.txt`, `after_status_z_path`
+ * set to the canonical `.viberevert/sessions/<sess>/after-status.z`.
+ * The helper accepts this fixture as canonical-valid; tests that
+ * exercise corruption paths override the specific field(s) they want
+ * to break.
+ *
+ * To exercise the field-undefined path (`{ kind: "missing" }`), pass
+ * `after_status_z_path: undefined` explicitly.
+ *
+ * The fixture does NOT validate via `SessionStateSchema.parse` — the
+ * helper reads ONLY the relevant fields, and several test fixtures
+ * deliberately violate the schema's pair-refines to exercise the
+ * helper's defensive checks. The `as SessionState` cast reflects
+ * that this builds a "shape that satisfies the consumer," not a
+ * "schema-valid persisted artifact." Schema validity is tested in
+ * `@viberevert/session-format/test/schemas.test.ts`.
+ */
+function buildSession(overrides: Partial<SessionState> = {}): SessionState {
+  const sessionId = overrides.session_id ?? FIXTURE_SESSION_ID;
+  return {
+    schema_version: SESSION_STATE_SCHEMA_VERSION,
+    session_id: sessionId,
+    checkpoint_id: "cp_01JV8Y7W2M7ABCDEFGHJKMNPQR",
+    started_at: "2026-05-04T10:00:00Z",
+    before_status_path: `.viberevert/sessions/${sessionId}/before-status.txt`,
+    commands_log_path: `.viberevert/sessions/${sessionId}/commands.log`,
+    ended_at: "2026-05-04T11:00:00Z",
+    after_status_path: `.viberevert/sessions/${sessionId}/after-status.txt`,
+    after_status_z_path: `.viberevert/sessions/${sessionId}/after-status.z`,
+    ...overrides,
+  } as SessionState;
+}
+
+/**
+ * Resolve the canonical absolute path of the after-status.z file for
+ * `FIXTURE_SESSION_ID` inside `repoRoot`, creating the parent
+ * directory tree on disk. Returns the absolute path ready for
+ * `writeFile`. Reused by every test that writes a fixture snapshot.
+ */
+async function prepareCanonicalSnapshotPath(repoRoot: string): Promise<string> {
+  const sessionDir = join(repoRoot, ".viberevert", "sessions", FIXTURE_SESSION_ID);
+  await mkdir(sessionDir, { recursive: true });
+  return join(sessionDir, "after-status.z");
 }
 
 // =============================================================================
@@ -746,6 +860,280 @@ describe("getStatusPorcelainZ — live wrapper parity", () => {
       expect(renameEntry).toBeDefined();
       expect(renameEntry?.path).toBe("newname.txt");
       expect(renameEntry?.previousPath).toBe("oldname.txt");
+    } finally {
+      await repo.cleanup();
+    }
+  });
+});
+
+describe("loadEndOfSessionChangedPaths — M D Step 4b rollback dirty-tree consumer", () => {
+  // ---------------------------------------------------------------------------
+  // Field-undefined and on-disk happy/missing paths
+  // ---------------------------------------------------------------------------
+
+  it("returns { kind: 'missing' } when session.after_status_z_path is undefined (pre-M D legacy session)", async () => {
+    const repo = await setupRepo();
+    try {
+      // Legacy session: field absent. Short-circuits BEFORE any
+      // canonical-metadata validation — undefined is the fast path,
+      // not a corruption signal.
+      const session = buildSession({ after_status_z_path: undefined });
+      const result = await loadEndOfSessionChangedPaths(session, repo.repoRoot);
+      expect(result).toEqual({ kind: "missing" });
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it("returns { kind: 'missing' } on ENOENT when canonical after-status.z file is absent", async () => {
+    const repo = await setupRepo();
+    try {
+      // Canonical session metadata, but no file written. ENOENT on the
+      // canonical path collapses to the same { kind: "missing" } arm
+      // as the field-undefined case per the helper's locked semantics.
+      const session = buildSession();
+      const result = await loadEndOfSessionChangedPaths(session, repo.repoRoot);
+      expect(result).toEqual({ kind: "missing" });
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it("returns { kind: 'present', paths: [] } on empty canonical file (legitimate ended-session-with-no-changes)", async () => {
+    const repo = await setupRepo();
+    try {
+      const absPath = await prepareCanonicalSnapshotPath(repo.repoRoot);
+      // 0-byte file = clean tree at end-of-session. NOT the same as
+      // { kind: "missing" }; D61b's escape hatch must NOT fire here.
+      await writeFile(absPath, Buffer.alloc(0));
+
+      const session = buildSession();
+      const result = await loadEndOfSessionChangedPaths(session, repo.repoRoot);
+      expect(result).toEqual({ kind: "present", paths: [] });
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it("populated file: returns parsed paths sorted ascending (byte-stable output for golden surfaces)", async () => {
+    const repo = await setupRepo();
+    try {
+      const absPath = await prepareCanonicalSnapshotPath(repo.repoRoot);
+      // Three entries in non-alphabetical order to make the sort
+      // observable. Format: 2-char status + space separator + path,
+      // NUL-terminated. ' M' = modified-in-worktree, '??' = untracked,
+      // 'A ' = added-in-index.
+      const bytes = Buffer.from(" M src/zeta.ts\0?? src/alpha.ts\0A  src/mu.ts\0", "utf8");
+      await writeFile(absPath, bytes);
+
+      const session = buildSession();
+      const result = await loadEndOfSessionChangedPaths(session, repo.repoRoot);
+      expect(result).toEqual({
+        kind: "present",
+        paths: ["src/alpha.ts", "src/mu.ts", "src/zeta.ts"],
+      });
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it("rename (R) AND copy (C) entries include BOTH previousPath and path; dedup on overlap", async () => {
+    const repo = await setupRepo();
+    try {
+      const absPath = await prepareCanonicalSnapshotPath(repo.repoRoot);
+      // Three entries:
+      //   - Rename: new1.ts (new) + old1.ts (previousPath follower)
+      //   - Copy:   new2.ts (new) + src.ts  (previousPath follower)
+      //   - Untracked: old1.ts (DUPLICATES the rename's previousPath)
+      // Per D61 lock, BOTH paths of R/C entries are added to the set.
+      // The untracked old1.ts then no-ops the Set add — dedup
+      // observable as exactly 4 unique paths in the result, not 5.
+      const bytes = Buffer.from("R  new1.ts\0old1.ts\0C  new2.ts\0src.ts\0?? old1.ts\0", "utf8");
+      await writeFile(absPath, bytes);
+
+      const session = buildSession();
+      const result = await loadEndOfSessionChangedPaths(session, repo.repoRoot);
+      expect(result).toEqual({
+        kind: "present",
+        // Sorted: 'n' < 'o' < 's'; within 'n' group: new1 < new2.
+        paths: ["new1.ts", "new2.ts", "old1.ts", "src.ts"],
+      });
+      if (result.kind === "present") {
+        expect(result.paths).toHaveLength(4);
+      }
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it("malformed z bytes propagate the parser's fail-closed Error (no silent fallback to missing)", async () => {
+    const repo = await setupRepo();
+    try {
+      const absPath = await prepareCanonicalSnapshotPath(repo.repoRoot);
+      // Token "???x" passes the length check (4 chars) but raw[2]='?'
+      // fails the separator-space check added in Step 4a's fail-closed
+      // hardening. The parser throws; the helper MUST propagate (NOT
+      // swallow into { kind: "missing" } — that would let a tampered
+      // z-file bypass M D's dirty-tree comparison).
+      const bytes = Buffer.from("???x\0", "utf8");
+      await writeFile(absPath, bytes);
+
+      const session = buildSession();
+      await expect(loadEndOfSessionChangedPaths(session, repo.repoRoot)).rejects.toThrow(
+        /malformed entry/,
+      );
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Canonical-metadata violations (Step 4b R1 hardening)
+  //
+  // Each test exercises ONE specific corruption channel that
+  // `loadEndOfSessionChangedPaths` defends against. The three
+  // schema-pair tests (ended_at-missing, after_status_path-missing,
+  // after_status_path-wrong) are intentionally separated so each
+  // branch in the canonical-metadata validator has its own
+  // regression canary — a future refactor that breaks the OR-
+  // shortcircuit in the presence check would otherwise slip past
+  // a combined fixture.
+  // ---------------------------------------------------------------------------
+
+  it("rejects non-canonical after_status_z_path with traversal-like segments before any file read", async () => {
+    const repo = await setupRepo();
+    try {
+      // Under the canonical-equality contract, traversal-like paths
+      // are caught by the after_status_z_path canonical-equality
+      // check BEFORE reaching resolveRepoContainedPath. The
+      // resolveRepoContainedPath traversal check is a defensive
+      // backstop that is unreachable in practice; the canonical-
+      // equality message is what fires here, and that's what we
+      // assert.
+      const session = buildSession({
+        after_status_z_path: "../escape/after-status.z",
+      });
+      await expect(loadEndOfSessionChangedPaths(session, repo.repoRoot)).rejects.toThrow(
+        /does not match expected session path/,
+      );
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it("rejects after_status_z_path that points at ANOTHER session's snapshot directory", async () => {
+    const repo = await setupRepo();
+    try {
+      // session_id is FIXTURE_SESSION_ID but after_status_z_path points
+      // at FIXTURE_OTHER_SESSION_ID's canonical location. This is the
+      // exact cross-session attack the canonical-equality check exists
+      // to block — without it, a corrupted session.json could make
+      // rollback read another session's dirty-tree snapshot and reach
+      // the wrong conclusion about which paths are "session-related".
+      const session = buildSession({
+        after_status_z_path: `.viberevert/sessions/${FIXTURE_OTHER_SESSION_ID}/after-status.z`,
+      });
+      await expect(loadEndOfSessionChangedPaths(session, repo.repoRoot)).rejects.toThrow(
+        /does not match expected session path/,
+      );
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it("rejects malformed session_id before any path computation", async () => {
+    const repo = await setupRepo();
+    try {
+      // Invalid session_id shape (missing sess_ prefix). The session_id
+      // shape check fires AFTER the field-undefined check but BEFORE
+      // any expected-path computation — so a corrupted session_id is
+      // caught before it can be interpolated into a path.
+      const session = buildSession({
+        session_id: "not-a-valid-session-id",
+      });
+      await expect(loadEndOfSessionChangedPaths(session, repo.repoRoot)).rejects.toThrow(
+        /session\.session_id is not a valid session id/,
+      );
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it("rejects after_status_z_path present without ended_at even when after_status_path is canonical", async () => {
+    const repo = await setupRepo();
+    try {
+      // Pin branch 3a in isolation: ended_at is the missing field;
+      // after_status_path stays canonical. The OR-shortcircuit fires
+      // on ended_at === undefined before the second clause is
+      // evaluated. A regression that broke the ended_at check (e.g.,
+      // dropped it from the OR) would surface here even though the
+      // companion test (after_status_path-missing) still passes.
+      const session = buildSession({
+        ended_at: undefined,
+      });
+      await expect(loadEndOfSessionChangedPaths(session, repo.repoRoot)).rejects.toThrow(
+        /ended_at\/after_status_path is missing/,
+      );
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it("rejects after_status_z_path present without after_status_path even when ended_at is present", async () => {
+    const repo = await setupRepo();
+    try {
+      // Pin branch 3b in isolation: after_status_path is the missing
+      // field; ended_at stays present. Without this test, branch 3b's
+      // coverage would be implicit (the OR fires on either clause);
+      // a regression that dropped the after_status_path check from
+      // the OR would only surface here.
+      const session = buildSession({
+        after_status_path: undefined,
+      });
+      await expect(loadEndOfSessionChangedPaths(session, repo.repoRoot)).rejects.toThrow(
+        /ended_at\/after_status_path is missing/,
+      );
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it("rejects wrong after_status_path even when after_status_z_path is canonical", async () => {
+    const repo = await setupRepo();
+    try {
+      // Pin branch 4: after_status_path is SET but points at another
+      // session's canonical path. ended_at and after_status_z_path
+      // both stay canonical for FIXTURE_SESSION_ID. The
+      // after_status_path mismatch fires BEFORE the after_status_z_path
+      // mismatch per the source's check order — that ordering is
+      // implicit in the assertion regex (matches the txt-path
+      // mismatch message, not the z-path one).
+      const session = buildSession({
+        after_status_path: `.viberevert/sessions/${FIXTURE_OTHER_SESSION_ID}/after-status.txt`,
+      });
+      await expect(loadEndOfSessionChangedPaths(session, repo.repoRoot)).rejects.toThrow(
+        /session\.after_status_path does not match expected session path/,
+      );
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it("propagates non-ENOENT read errors (canonical path is a directory)", async () => {
+    const repo = await setupRepo();
+    try {
+      // Create the canonical "after-status.z" path AS A DIRECTORY
+      // instead of a file. readFile on a directory produces
+      // EISDIR on Linux/macOS and platform-dependent codes on
+      // Windows (EPERM, EACCES, etc.) — the contract is "non-ENOENT
+      // propagates", NOT "EISDIR specifically", so we assert the
+      // rejection without binding to a specific error message.
+      const sessionDir = join(repo.repoRoot, ".viberevert", "sessions", FIXTURE_SESSION_ID);
+      await mkdir(sessionDir, { recursive: true });
+      await mkdir(join(sessionDir, "after-status.z"));
+
+      const session = buildSession();
+      await expect(loadEndOfSessionChangedPaths(session, repo.repoRoot)).rejects.toThrow();
     } finally {
       await repo.cleanup();
     }

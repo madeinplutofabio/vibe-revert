@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Fabio Marcello Salvadori
 //
-// check-orchestration.ts — C.6 targeted tests.
+// check-orchestration.ts — C.6 targeted tests + M D Step 4b additions.
 //
-// 43 tests across 7 describe blocks. Explicit coverage for the
+// 50 tests across 8 describe blocks. Explicit coverage for the
 // hardening paths C.5 introduced:
 //   - task drift guard (both set + disagree → throws)
 //   - staged_only literal-true emission + schema-refine throw on
@@ -17,15 +17,24 @@
 //     sortedUniqueStringArray
 //   - exclude filtering glob semantics matching the locked picomatch
 //     options across git / checks / cli
+//
+// M D Step 4b additions (D72 strict rule for `rollback_available`):
+//   - computeRollbackAvailable: 6 tests pinning the locked decision
+//     branches — ad_hoc kind short-circuit, session_bound inner
+//     checkpoint present/missing/corrupt, the architectural canary
+//     proving the helper reads the SESSION-OWNED inner checkpoint
+//     (not the global `cp_<ULID>` store), and the fail-closed
+//     SESSION_ID_RE guard rejecting malformed reportId BEFORE any
+//     filesystem path interpolation.
 
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { CheckContext, RunChecksResult } from "@viberevert/checks";
 import type { Config } from "@viberevert/core";
 import type { RawDiff, RawDiffEntry, RawDiffHunk } from "@viberevert/git";
-import type { CheckResult, RiskLevel } from "@viberevert/session-format";
+import { type CheckResult, type RiskLevel, SCHEMA_VERSION } from "@viberevert/session-format";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
@@ -33,6 +42,7 @@ import {
   type BuildReportSinceMeta,
   buildReportFile,
   computeRiskLevel,
+  computeRollbackAvailable,
   computeSummary,
   DEFAULT_CHECKS_CONFIG,
   DEFAULT_FRAMEWORKS_POLICY,
@@ -108,6 +118,13 @@ function makeSessionBoundSinceMeta(
     sinceResolvedSha: VALID_SHA,
     reportId: VALID_SESSION_ID,
     startedAt: "2026-01-01T00:00:00Z",
+    // D72 default: false. The 15 `buildReportFile` describe-block
+    // tests don't exercise rollback_available's derivation (that's
+    // the `computeRollbackAvailable` describe block below); they
+    // only need the field to be present so the fixture satisfies
+    // BuildReportSinceMeta's required-boolean shape. Per-test
+    // overrides can set it explicitly when needed.
+    rollbackAvailable: false,
     ...overrides,
   };
 }
@@ -120,6 +137,11 @@ function makeAdHocSinceMeta(overrides: Partial<BuildReportSinceMeta> = {}): Buil
     sinceResolvedSha: VALID_SHA,
     reportId: VALID_REPORT_ID,
     startedAt: "2026-01-01T00:00:00Z",
+    // D72 default: false. See makeSessionBoundSinceMeta for the
+    // rationale; ad_hoc reports are NEVER rollback-targetable in
+    // M D regardless of artifact presence (D72), so `false` is
+    // also the semantic value the actual derivation would emit.
+    rollbackAvailable: false,
     ...overrides,
   };
 }
@@ -724,5 +746,202 @@ describe("buildReportFile", () => {
     expect(file.report.changed_files.find((f) => f.path === "src/unknown.ts")?.risk_level).toBe(
       "low",
     );
+  });
+});
+
+describe("computeRollbackAvailable — M D Step 4b D72", () => {
+  // ---------------------------------------------------------------------------
+  // Local helpers — scoped to this describe block. The fixture-builder
+  // pattern (mkdtemp + try/finally cleanup) mirrors the convention used
+  // across the codebase's filesystem-touching test suites.
+  // ---------------------------------------------------------------------------
+
+  interface TestRepoRoot {
+    readonly repoRoot: string;
+    cleanup: () => Promise<void>;
+  }
+
+  async function setupRepoRoot(): Promise<TestRepoRoot> {
+    const tmp = await mkdtemp(join(tmpdir(), "viberevert-rollback-avail-"));
+    return {
+      repoRoot: tmp,
+      cleanup: async () => {
+        await rm(tmp, { recursive: true, force: true });
+      },
+    };
+  }
+
+  /**
+   * Write a minimal-valid Manifest to `<checkpointDir>/manifest.json`
+   * AND materialize empty stub files at every artifact path the
+   * manifest references. Sufficient to make `loadCheckpoint` succeed.
+   *
+   * Why the stub files: `loadCheckpoint` enforces TWO contracts —
+   *   (a) `ManifestSchema.parse` succeeds on the manifest JSON, AND
+   *   (b) every referenced artifact path (`unstaged_patch_path`,
+   *       `staged_patch_path`, `tracked_dirty_archive_path`,
+   *       `untracked.archive_path`) resolves to an existing
+   *       filesystem entry via `lstat`.
+   * Without (b), `loadCheckpoint` throws `CheckpointCorruptError`
+   * ("referenced artifact missing"), which propagates from
+   * `computeRollbackAvailable` as a non-CheckpointNotFoundError and
+   * makes test 1 fail. The stubs are 0-byte placeholders — content
+   * is not validated, only existence is.
+   */
+  async function writeMinimalCheckpointManifest(
+    checkpointDir: string,
+    sessionId: string,
+  ): Promise<void> {
+    await mkdir(checkpointDir, { recursive: true });
+    const manifest = {
+      schema_version: SCHEMA_VERSION,
+      session_id: sessionId,
+      captured_at: "2026-01-01T00:00:00Z",
+      git: {
+        head_sha: "0".repeat(40),
+        branch: "main",
+        porcelain_v1: "",
+      },
+      diffs: {
+        unstaged_patch_path: "diffs/unstaged.patch",
+        staged_patch_path: "diffs/staged.patch",
+      },
+      snapshots: {
+        tracked_dirty_archive_path: "snapshots/tracked.tar.gz",
+        tracked_dirty_paths: [],
+        file_hashes: {},
+      },
+      untracked: {
+        archive_path: "snapshots/untracked.tar.gz",
+        exclude_patterns: [],
+        file_hashes: {},
+      },
+      rollback_target_description: "test fixture checkpoint",
+    };
+    await writeFile(join(checkpointDir, "manifest.json"), JSON.stringify(manifest));
+
+    // Materialize the four referenced artifact paths as empty files so
+    // loadCheckpoint's lstat checks succeed. mkdir the two parent
+    // subdirs first (recursive is fine — both might or might not
+    // already exist depending on which path we touched first).
+    await mkdir(join(checkpointDir, "diffs"), { recursive: true });
+    await mkdir(join(checkpointDir, "snapshots"), { recursive: true });
+    await writeFile(join(checkpointDir, "diffs/unstaged.patch"), "");
+    await writeFile(join(checkpointDir, "diffs/staged.patch"), "");
+    await writeFile(join(checkpointDir, "snapshots/tracked.tar.gz"), "");
+    await writeFile(join(checkpointDir, "snapshots/untracked.tar.gz"), "");
+  }
+
+  function sessionCheckpointDir(repoRoot: string, sessionId: string): string {
+    return join(repoRoot, ".viberevert", "sessions", sessionId, "checkpoint");
+  }
+
+  function globalCheckpointDir(repoRoot: string, checkpointId: string): string {
+    return join(repoRoot, ".viberevert", "checkpoints", checkpointId);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Tests — one per locked branch of the D72 rule
+  // ---------------------------------------------------------------------------
+
+  it("returns true when session_bound and the session's inner checkpoint manifest loads", async () => {
+    const env = await setupRepoRoot();
+    try {
+      await writeMinimalCheckpointManifest(
+        sessionCheckpointDir(env.repoRoot, VALID_SESSION_ID),
+        VALID_SESSION_ID,
+      );
+
+      const result = await computeRollbackAvailable(makeSessionBoundSinceMeta(), env.repoRoot);
+      expect(result).toBe(true);
+    } finally {
+      await env.cleanup();
+    }
+  });
+
+  it("returns false when session_bound and the inner checkpoint dir is missing", async () => {
+    const env = await setupRepoRoot();
+    try {
+      // No checkpoint written. loadCheckpoint will throw
+      // CheckpointNotFoundError, which the helper swallows → false.
+      const result = await computeRollbackAvailable(makeSessionBoundSinceMeta(), env.repoRoot);
+      expect(result).toBe(false);
+    } finally {
+      await env.cleanup();
+    }
+  });
+
+  it("ARCHITECTURAL CANARY: returns false when only the GLOBAL checkpoint dir exists and the session's inner checkpoint dir is missing", async () => {
+    // The locked invariant being pinned: computeRollbackAvailable
+    // probes `.viberevert/sessions/<sess>/checkpoint/`, NOT
+    // `.viberevert/checkpoints/<cp>/`. Without this test, a
+    // regression that switched to the global store would pass tests
+    // 1, 2, 4, 5 cleanly (those don't set up a global checkpoint at
+    // all). Here we set up ONLY the global checkpoint — a regression
+    // would erroneously return true and this test would fail.
+    const env = await setupRepoRoot();
+    try {
+      const globalCheckpointId = "cp_01JV8Y7W2M7AABCDEFGHJKMNPQ";
+      await writeMinimalCheckpointManifest(
+        globalCheckpointDir(env.repoRoot, globalCheckpointId),
+        VALID_SESSION_ID,
+      );
+      // Deliberately do NOT create the session's inner checkpoint dir.
+
+      const result = await computeRollbackAvailable(
+        makeSessionBoundSinceMeta({ checkpointId: globalCheckpointId }),
+        env.repoRoot,
+      );
+      expect(result).toBe(false);
+    } finally {
+      await env.cleanup();
+    }
+  });
+
+  it("returns false when kind is ad_hoc (M D rollback is session-only per D59; no I/O fires)", async () => {
+    // The ad_hoc branch short-circuits BEFORE any filesystem access,
+    // so repoRoot pointing at a nonexistent path is fine — the test
+    // also implicitly proves the no-I/O property.
+    const result = await computeRollbackAvailable(
+      makeAdHocSinceMeta(),
+      "/this/path/does/not/exist/and/that/is/fine",
+    );
+    expect(result).toBe(false);
+  });
+
+  it("propagates non-CheckpointNotFoundError load failures (corrupted manifest JSON)", async () => {
+    const env = await setupRepoRoot();
+    try {
+      const checkpointDir = sessionCheckpointDir(env.repoRoot, VALID_SESSION_ID);
+      await mkdir(checkpointDir, { recursive: true });
+      // Malformed JSON triggers CheckpointCorruptError (or similar
+      // non-CNF error) inside loadCheckpoint. The helper does NOT
+      // swallow this — propagation is the locked safety move: a
+      // corrupted/tampered checkpoint must surface to the CLI, not
+      // silently degrade rollback_available to false.
+      await writeFile(join(checkpointDir, "manifest.json"), "{this is not valid JSON");
+
+      await expect(
+        computeRollbackAvailable(makeSessionBoundSinceMeta(), env.repoRoot),
+      ).rejects.toThrow();
+    } finally {
+      await env.cleanup();
+    }
+  });
+
+  it("fail-closed: rejects malformed reportId BEFORE any filesystem path interpolation", async () => {
+    // The fail-closed SESSION_ID_RE guard fires before any join() or
+    // loadCheckpoint call, so repoRoot pointing at a nonexistent path
+    // is irrelevant — the throw should fire from the regex check
+    // alone. Without this guard, a buggy upstream caller could make
+    // the helper read outside the intended session checkpoint dir
+    // via traversal-like segments. Same defense pattern as
+    // loadEndOfSessionChangedPaths in @viberevert/git.
+    await expect(
+      computeRollbackAvailable(
+        makeSessionBoundSinceMeta({ reportId: "../escape/not-a-session-id" }),
+        "/irrelevant/path",
+      ),
+    ).rejects.toThrow(/not a valid session id/);
   });
 });

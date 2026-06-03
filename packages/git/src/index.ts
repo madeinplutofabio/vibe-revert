@@ -30,6 +30,13 @@
 //     - parseStatusPorcelainZ (pure parser shared between live status
 //       and persisted after-status.z; single-source guarantee per
 //       Step 4a)
+//     - loadEndOfSessionChangedPaths + EndOfSessionSnapshot (M D
+//       Step 4b — reads `session.after_status_z_path`, parses via
+//       parseStatusPorcelainZ, surfaces the changed-path set or
+//       a "missing snapshot" discriminator. Imports SessionState
+//       as a TYPE from @viberevert/session-format per D16. Consumed
+//       by M D's rollback orchestration for D61's dirty-tree
+//       comparison and D61b's escape-hatch decision.)
 //     - getCommitTimestamp (M C — committer date for ad-hoc git-ref
 //       report.started_at per D56; delegates ref-to-SHA resolution to
 //       resolveCommitRef below)
@@ -217,7 +224,7 @@ export {
   RestoreTrackedDirtyParityError,
   RestoreVerificationError,
 } from "./errors.js";
-export type { StatusEntry } from "./git-cli.js";
+export type { EndOfSessionSnapshot, StatusEntry } from "./git-cli.js";
 
 // Runtime values: git subprocess wrappers (D17c single owner) +
 // commit-ref resolution single source of truth (resolveCommitRef) and
@@ -230,6 +237,7 @@ export {
   getStatusPorcelainText,
   getStatusPorcelainZ,
   getStatusPorcelainZRaw,
+  loadEndOfSessionChangedPaths,
   parseStatusPorcelainZ,
   probeGitVersion,
   resolveCommitRef,

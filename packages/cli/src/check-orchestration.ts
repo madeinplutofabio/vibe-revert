@@ -54,6 +54,7 @@
 //     does fs.existsSync probes) when `config.frameworks` is
 //     omitted/empty; everything else is in-memory transformation.
 
+import { join } from "node:path";
 import type {
   ChangedFileInput,
   CheckContext,
@@ -61,7 +62,12 @@ import type {
   RunChecksResult,
 } from "@viberevert/checks";
 import { type Config, detectFrameworks } from "@viberevert/core";
-import type { RawDiff, RawDiffEntry } from "@viberevert/git";
+import {
+  CheckpointNotFoundError,
+  loadCheckpoint,
+  type RawDiff,
+  type RawDiffEntry,
+} from "@viberevert/git";
 import {
   type ChangedFile,
   type CheckResult,
@@ -308,6 +314,100 @@ export function computeSummary(results: readonly CheckResult[]): string | undefi
 }
 
 // =============================================================================
+// computeRollbackAvailable (M D — D72)
+// =============================================================================
+
+// TODO(M D follow-up): SESSION_ID_RE is duplicated here from
+// @viberevert/git/src/git-cli.ts's `loadEndOfSessionChangedPaths`
+// (same shape, same purpose: fail-closed validation of session ids
+// used as path segments before any filesystem I/O). The long-term
+// home for this regex is @viberevert/session-format (exported,
+// consumed by every helper that reads session-owned paths). See the
+// matching TODO in git-cli.ts for the full deduplication list
+// (`.viberevert/sessions`, `after-status.{txt,z}`, sess_<ULID>
+// shape). Until that lift happens, keep the two copies BYTE-
+// IDENTICAL — a drift between readers would surface as
+// inconsistent "valid session id" decisions across the codebase.
+const SESSION_ID_RE = /^sess_[0-9A-HJKMNP-TV-Z]{26}$/;
+
+/**
+ * Compute the `rollback_available` boolean for a report's `sinceMeta`,
+ * per D72's strict rule:
+ *
+ *   - `kind === "ad_hoc"` → false (M D's rollback engine is
+ *     session-only per D59; ad-hoc reports — including
+ *     checkpoint-name, checkpoint-id, and git-ref bases — are not
+ *     rollback-targetable in M D regardless of artifact presence).
+ *   - `kind === "session_bound"` → fail-closed validate that
+ *     `sinceMeta.reportId` matches `SESSION_ID_RE` (throws plain
+ *     Error otherwise), then probe the SESSION-OWNED INNER
+ *     checkpoint dir at `.viberevert/sessions/<sess>/checkpoint/`
+ *     and return `true` iff `loadCheckpoint` succeeds.
+ *     `CheckpointNotFoundError` → false; ANY other error
+ *     propagates (no swallowing of I/O / corruption failures —
+ *     those should surface to the CLI, not silently degrade the
+ *     report).
+ *
+ * Three architectural locks:
+ *
+ *   1. **`sinceMeta.reportId` is used because, for `session_bound`,
+ *      it IS the originating session's id** (per the dual-meaning
+ *      JSDoc on `BuildReportSinceMeta.reportId`). If that contract
+ *      ever changes — e.g., reportId becomes a fresh id for both
+ *      kinds — this helper MUST be updated to source the session
+ *      id elsewhere. The coupling is intentional and grep-
+ *      discoverable via this comment.
+ *
+ *   2. **`reportId` must validate against `SESSION_ID_RE` before
+ *      any path interpolation.** Without this fail-closed check,
+ *      a malformed reportId from a buggy upstream caller (e.g.,
+ *      a future code path that skips
+ *      `check-since-resolution.ts`'s validation, or a corrupted
+ *      `active-session.json` smuggling a bad id) could make this
+ *      helper read outside the intended session checkpoint dir
+ *      via traversal-like segments. Same defense pattern as
+ *      `loadEndOfSessionChangedPaths` in @viberevert/git — see
+ *      that helper's R1 hardening for the matching rationale.
+ *
+ *   3. **Probes the same checkpoint directory rollback will restore
+ *      from**, NOT the globally-named checkpoint id (`cp_<ULID>`
+ *      under `.viberevert/checkpoints/`). Rollback restores from the
+ *      session's INNER checkpoint per M B's locked storage layout;
+ *      using the global store here could return `true` for a
+ *      report whose actual rollback target is missing/corrupt.
+ *      A future "let me reuse this for non-session contexts"
+ *      refactor must confront this comment first.
+ *
+ * Called by the CLI's `check.ts` orchestrator when constructing
+ * `BuildReportSinceMeta`; the boolean result is threaded through
+ * `sinceMeta.rollbackAvailable` so `buildReportFile` stays pure/sync.
+ */
+export async function computeRollbackAvailable(
+  sinceMeta: BuildReportSinceMeta,
+  repoRoot: string,
+): Promise<boolean> {
+  if (sinceMeta.kind !== "session_bound") return false;
+
+  if (!SESSION_ID_RE.test(sinceMeta.reportId)) {
+    throw new Error(
+      `Cannot compute rollback availability: session_bound reportId is not a valid session id: ${JSON.stringify(
+        sinceMeta.reportId,
+      )}`,
+    );
+  }
+
+  const checkpointDir = join(repoRoot, ".viberevert", "sessions", sinceMeta.reportId, "checkpoint");
+
+  try {
+    await loadCheckpoint(checkpointDir);
+    return true;
+  } catch (err) {
+    if (err instanceof CheckpointNotFoundError) return false;
+    throw err;
+  }
+}
+
+// =============================================================================
 // buildReportFile
 // =============================================================================
 
@@ -329,6 +429,22 @@ export interface BuildReportSinceMeta {
   readonly reportId: string;
   /** Only for session_bound: the originating session's checkpoint_id. */
   readonly checkpointId?: string;
+  /**
+   * Whether rollback can actually run on this report's underlying
+   * artifact, per D72. Derived UPSTREAM in the CLI orchestrator via
+   * `computeRollbackAvailable` (see helper below) and threaded
+   * through verbatim so `buildReportFile` stays pure/sync — no I/O
+   * inside report composition. The strict rule (locked):
+   *   - `kind === "ad_hoc"` → false (M D doesn't roll back ad-hoc).
+   *   - `kind === "session_bound"` AND the session's INNER
+   *     checkpoint manifest loads → true.
+   *   - `kind === "session_bound"` AND the inner checkpoint is
+   *     missing → false. Non-CheckpointNotFoundError load failures
+   *     (corruption, I/O, malformed reportId rejecting the path
+   *     guard) propagate from `computeRollbackAvailable` rather than
+   *     silently degrading the report to false.
+   */
+  readonly rollbackAvailable: boolean;
   /**
    * report.started_at: for session_bound, mirrors session.json's
    * started_at; for ad_hoc with checkpoint base, the manifest's
@@ -379,10 +495,16 @@ export interface BuildReportFileParams {
  * This catches a CLI bug where the orchestrator wires different task
  * values into the two slots.
  *
- * `rollback_available` is hardcoded to `true` in M C — every M C
- * report has a recoverable base (a checkpoint, session, or git ref).
- * M D's rollback engine will compute the real value (e.g. false when
- * a referenced checkpoint's artifacts have been deleted).
+ * `rollback_available` is derived per D72 by `computeRollbackAvailable`
+ * (the helper above this function) and threaded through via
+ * `sinceMeta.rollbackAvailable`. The derivation runs UPSTREAM of
+ * `buildReportFile` so this function stays pure/sync — no I/O inside
+ * report composition. Session-bound reports whose inner checkpoint
+ * loads → true; ad-hoc reports OR session-bound reports whose inner
+ * checkpoint is missing → false. Non-CheckpointNotFoundError load
+ * failures (corruption, I/O, fail-closed reportId-validation throws)
+ * propagate from `computeRollbackAvailable` rather than being
+ * downgraded to `false`.
  */
 export function buildReportFile(params: BuildReportFileParams): ReportFile {
   const { ctx, raw, runResult, sinceMeta, env } = params;
@@ -430,7 +552,7 @@ export function buildReportFile(params: BuildReportFileParams): ReportFile {
     risk_level: riskLevel,
     changed_files: changedFiles,
     results: [...runResult.results],
-    rollback_available: true,
+    rollback_available: sinceMeta.rollbackAvailable,
     ...(summary !== undefined ? { summary } : {}),
   };
 

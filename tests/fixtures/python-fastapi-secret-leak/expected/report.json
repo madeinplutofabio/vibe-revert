@@ -41,7 +41,7 @@
         "recommendation": "Rotate the credential immediately if real. Remove from git history (git filter-repo / BFG). If this is a test fixture, move it to a `.example`/`.template` file or add `# pragma: viberevert-allow` / `// viberevert-allow` to the line."
       }
     ],
-    "rollback_available": true,
+    "rollback_available": false,
     "summary": "1 findings: secrets (1)"
   }
 }

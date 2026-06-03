@@ -133,7 +133,7 @@
         ]
       }
     ],
-    "rollback_available": true,
+    "rollback_available": false,
     "summary": "6 findings: dependencies (4), payments (1), test-gap (1)"
   }
 }

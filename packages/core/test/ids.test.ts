@@ -2,17 +2,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Fabio Marcello Salvadori
 //
-// ids.ts — M C coverage for generateReportId plus the D27 ID-space
-// boundary guarantees. generateSessionId itself is exercised end-to-end
-// by M B's session tests; this file adds focused coverage of the M C
-// report-id surface and the public properties that prevent the two ID
-// spaces from coupling in observable ways.
+// ids.ts — M C coverage for generateReportId + M D coverage for
+// generateRollbackId, plus the D27/D71 ID-space boundary guarantees.
+// generateSessionId itself is exercised end-to-end by M B's session
+// tests; this file adds focused coverage of the M C report-id and
+// M D rollback-id surfaces and the public properties that prevent the
+// three ID spaces from coupling in observable ways.
 //
 // The "env-var-driven determinism" describe block at the bottom covers
 // the D49 Precondition 2 contract added in M C: VIBEREVERT_TEST_FIXED_NOW
 // and VIBEREVERT_TEST_FIXED_ULID_SEED behavior, including the
 // trust-critical cache-bypass regressions that prove cacheKey()
-// distinguishes `undefined` from `""`.
+// distinguishes `undefined` from `""`. M D extends this surface to
+// the new `core:rollback` namespace.
 
 import {
   VIBEREVERT_TEST_FIXED_NOW,
@@ -20,9 +22,10 @@ import {
 } from "@viberevert/session-format";
 import { describe, expect, it } from "vitest";
 
-import { generateReportId, generateSessionId } from "../src/ids.js";
+import { generateReportId, generateRollbackId, generateSessionId } from "../src/ids.js";
 
 const REPORT_ID_RE = /^rpt_[0-9A-HJKMNP-TV-Z]{26}$/;
+const ROLLBACK_ID_RE = /^rb_[0-9A-HJKMNP-TV-Z]{26}$/;
 const SESSION_ID_RE = /^sess_[0-9A-HJKMNP-TV-Z]{26}$/;
 const FORBIDDEN_CROCKFORD = /[ILOU]/;
 
@@ -105,49 +108,105 @@ describe("generateReportId", () => {
   });
 });
 
-describe("ID-space boundaries (generateSessionId vs generateReportId)", () => {
-  it("report-id monotonicity is preserved when interleaved with session-id calls", () => {
-    // This locks the public property needed by D27: generating session ids
-    // must not disturb the report-id sequence. The implementation-level
-    // independence is established in ids.ts by using separate factories.
+describe("generateRollbackId (M D — D71)", () => {
+  it("returns the rb_<26-char Crockford base32 ULID> shape", () => {
+    const id = generateRollbackId();
+    expect(id).toMatch(ROLLBACK_ID_RE);
+  });
+
+  it("100 consecutive calls are distinct AND already lex-sorted (monotonic factory + ULID timestamp prefix)", () => {
+    const ids = Array.from({ length: 100 }, () => generateRollbackId());
+    expect(new Set(ids).size).toBe(ids.length);
+    const sorted = [...ids].sort();
+    expect(ids).toEqual(sorted);
+  });
+
+  it("body never contains I/L/O/U (drift guard against regex-authoring typos)", () => {
+    for (let i = 0; i < 100; i += 1) {
+      const body = generateRollbackId().slice("rb_".length);
+      expect(body).not.toMatch(FORBIDDEN_CROCKFORD);
+    }
+  });
+});
+
+describe("ID-space boundaries (generateSessionId vs generateReportId vs generateRollbackId)", () => {
+  it("report-id monotonicity is preserved when interleaved with session-id AND rollback-id calls", () => {
+    // Locks the public property needed by D27/D71: generating session
+    // or rollback ids must not disturb the report-id sequence. The
+    // implementation-level independence is established in ids.ts by
+    // using separate factories per namespace.
     const r1 = generateReportId();
     generateSessionId();
-    generateSessionId();
+    generateRollbackId();
     generateSessionId();
     const r2 = generateReportId();
+    generateRollbackId();
     generateSessionId();
     const r3 = generateReportId();
     expect(r2 > r1).toBe(true);
     expect(r3 > r2).toBe(true);
   });
 
-  it("disjoint prefix spaces — sess_ and rpt_ never bleed into each other", () => {
+  it("rollback-id monotonicity is preserved when interleaved with session-id AND report-id calls", () => {
+    // Symmetric companion to the report-id interleave test above —
+    // locks the same D71 property from the rollback-id side. Together
+    // the two tests prove the new rollback factory is independent of
+    // BOTH existing factories (not just one).
+    const rb1 = generateRollbackId();
+    generateSessionId();
+    generateReportId();
+    generateSessionId();
+    const rb2 = generateRollbackId();
+    generateReportId();
+    generateSessionId();
+    const rb3 = generateRollbackId();
+    expect(rb2 > rb1).toBe(true);
+    expect(rb3 > rb2).toBe(true);
+  });
+
+  it("disjoint prefix spaces — sess_, rpt_, and rb_ never bleed into each other", () => {
     const sess = generateSessionId();
     const rpt = generateReportId();
+    const rb = generateRollbackId();
     expect(sess).toMatch(SESSION_ID_RE);
     expect(rpt).toMatch(REPORT_ID_RE);
+    expect(rb).toMatch(ROLLBACK_ID_RE);
+    // Full 3-way pairwise prefix check. `rb_` is a substring-prefix
+    // of neither `sess_` nor `rpt_` AND vice versa, but a regression
+    // that swapped factory wiring could surface as `rb_<...>` coming
+    // from generateSessionId — the assertions here are the canary.
     expect(sess.startsWith("rpt_")).toBe(false);
+    expect(sess.startsWith("rb_")).toBe(false);
     expect(rpt.startsWith("sess_")).toBe(false);
+    expect(rpt.startsWith("rb_")).toBe(false);
+    expect(rb.startsWith("sess_")).toBe(false);
+    expect(rb.startsWith("rpt_")).toBe(false);
   });
 });
 
 describe("env-var-driven determinism (D49 Precondition 2)", () => {
-  it("production mode (no env vars): both session AND report IDs match shape AND are distinct", () => {
+  it("production mode (no env vars): session, report, AND rollback IDs match shape AND are distinct", () => {
     withFixedEnv({}, () => {
       const sess1 = generateSessionId();
       const sess2 = generateSessionId();
       const rpt1 = generateReportId();
       const rpt2 = generateReportId();
+      const rb1 = generateRollbackId();
+      const rb2 = generateRollbackId();
 
       expect(sess1).toMatch(SESSION_ID_RE);
       expect(sess2).toMatch(SESSION_ID_RE);
       expect(rpt1).toMatch(REPORT_ID_RE);
       expect(rpt2).toMatch(REPORT_ID_RE);
+      expect(rb1).toMatch(ROLLBACK_ID_RE);
+      expect(rb2).toMatch(ROLLBACK_ID_RE);
       // Monotonic factory makes consecutive IDs strictly distinct
-      // even at sub-millisecond resolution. Asserted for BOTH ID
-      // spaces — locks production parity across the two factories.
+      // even at sub-millisecond resolution. Asserted for ALL THREE
+      // ID spaces — locks production parity across the three
+      // factories.
       expect(sess1).not.toBe(sess2);
       expect(rpt1).not.toBe(rpt2);
+      expect(rb1).not.toBe(rb2);
     });
   });
 
@@ -198,20 +257,50 @@ describe("env-var-driven determinism (D49 Precondition 2)", () => {
     expect(firstFromAttempt1).toMatch(REPORT_ID_RE);
   });
 
-  it("seeded mode: session vs report produce DIFFERENT random portions (namespace subseed)", () => {
+  it("seeded mode produces reproducible rollback IDs across factory cache rebuilds", () => {
+    // Same pattern as the session + report reproducibility tests
+    // above. Distinct seed (`fixture-seed-gamma`) used so a future
+    // regression that accidentally cross-wired the rollback
+    // namespace to a sibling factory's cache slot would surface
+    // here rather than silently passing due to incidental seed
+    // collision.
+    let firstFromAttempt1 = "";
+    let firstFromAttempt2 = "";
+    withFixedEnv({ seed: "fixture-seed-gamma" }, () => {
+      firstFromAttempt1 = generateRollbackId();
+    });
+    withFixedEnv({}, () => {
+      generateRollbackId(); // production-key call → forces rebuild on next seeded entry
+    });
+    withFixedEnv({ seed: "fixture-seed-gamma" }, () => {
+      firstFromAttempt2 = generateRollbackId();
+    });
+    expect(firstFromAttempt1).toBe(firstFromAttempt2);
+    expect(firstFromAttempt1).toMatch(ROLLBACK_ID_RE);
+  });
+
+  it("seeded mode: session vs report vs rollback all produce DIFFERENT random portions (3-way namespace subseed)", () => {
     // Under the same outer seed, the per-namespace subseed
-    // (`${seed}|core:session` vs `${seed}|core:report`) MUST produce
-    // distinct PRNG streams. Time prefix will match (both use the
+    // (`${seed}|core:session` vs `${seed}|core:report` vs
+    // `${seed}|core:rollback`) MUST produce three distinct PRNG
+    // streams. Time prefix will match across all three (all use the
     // same fixed time component), so we compare ONLY the trailing
     // 16-char random portion.
+    //
+    // 3-way pairwise: a regression that subseeded only TWO
+    // namespaces correctly while accidentally collapsing two
+    // others into the same subseed would pass a 2-way test but
+    // fail one of the three pairs below.
     withFixedEnv({ seed: "shared-seed-for-namespace-test" }, () => {
-      const sessionBody = generateSessionId().slice("sess_".length);
-      const reportBody = generateReportId().slice("rpt_".length);
+      const sessionRandom = generateSessionId().slice("sess_".length + 10);
+      const reportRandom = generateReportId().slice("rpt_".length + 10);
+      const rollbackRandom = generateRollbackId().slice("rb_".length + 10);
       // ULID = 10-char time + 16-char random. Time portion identical
-      // under the locked fallback time; random portion must differ.
-      const sessionRandom = sessionBody.slice(10);
-      const reportRandom = reportBody.slice(10);
+      // under the locked fallback time; all three pairs of random
+      // portions must differ.
       expect(sessionRandom).not.toBe(reportRandom);
+      expect(sessionRandom).not.toBe(rollbackRandom);
+      expect(reportRandom).not.toBe(rollbackRandom);
     });
   });
 
