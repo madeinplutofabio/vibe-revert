@@ -24,6 +24,12 @@
 //     - getHeadSha, getBranch
 //     - getStatusPorcelainText (raw v1 for audit storage, per D8)
 //     - getStatusPorcelainZ + StatusEntry (parsed -z for machine logic, D8)
+//     - getStatusPorcelainZRaw (raw -z bytes for M B's `end` persistence
+//       of after-status.z per Step 4a — M D's dirty-tree comparison
+//       feeds the persisted bytes through parseStatusPorcelainZ)
+//     - parseStatusPorcelainZ (pure parser shared between live status
+//       and persisted after-status.z; single-source guarantee per
+//       Step 4a)
 //     - getCommitTimestamp (M C — committer date for ad-hoc git-ref
 //       report.started_at per D56; delegates ref-to-SHA resolution to
 //       resolveCommitRef below)
@@ -223,6 +229,8 @@ export {
   getHeadSha,
   getStatusPorcelainText,
   getStatusPorcelainZ,
+  getStatusPorcelainZRaw,
+  parseStatusPorcelainZ,
   probeGitVersion,
   resolveCommitRef,
 } from "./git-cli.js";

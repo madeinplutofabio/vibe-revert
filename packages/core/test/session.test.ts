@@ -17,16 +17,35 @@
 //     - SessionAlreadyActiveError carries the parsed existing lock so the
 //       CLI's refusal message can render details without re-reading.
 //
-//   endSession:
-//     - Happy-path mutation order: after-status.txt written, session.json
-//       updated with ended_at + after_status_path, active-session.json
-//       deleted.
+//   endSession (M D Step 4a — TWO snapshots persisted per session.ts
+//   header lock #1):
+//     - Happy-path mutation order: after-status.txt written (D8 audit
+//       form; raw v1 text), after-status.z written (D8 machine surface;
+//       raw `git status --porcelain=v1 -z` BYTES persisted verbatim),
+//       session.json updated with ended_at + after_status_path +
+//       after_status_z_path, active-session.json deleted. Both files
+//       exist after a successful endSession; both path fields populate
+//       session.json. Per session.ts header lock #1 the two snapshots
+//       are captured by the CLI via SEPARATE git invocations
+//       (--porcelain=v1 vs --porcelain=v1 -z, because -z changes
+//       output format) and supplied independently to endSession —
+//       core does not assume they came from the same git call, and
+//       persists the exact text and bytes the caller hands it.
+//       Byte-exact round-trip of after-status.z is load-bearing:
+//       M D's rollback dirty-tree comparison reads these bytes back
+//       through @viberevert/git's shared parseStatusPorcelainZ
+//       parser, and any text-encoding round-trip would defeat the
+//       z-format's "binary-safe path delimiter" guarantee.
 //     - NoActiveSessionError when no lock.
 //     - Validate-before-mutate: a malformed `endedAt` throws BEFORE any
 //       writeFileAtomic. Asserts on-disk state byte-untouched (no
-//       after-status.txt, session.json unchanged, lock unchanged). This
-//       locks architectural lock #4 in session.ts: read+validate first,
-//       mutate second.
+//       after-status.txt, no after-status.z, session.json unchanged,
+//       lock unchanged). This locks architectural lock #4 in session.ts:
+//       read+validate first, mutate second. Coverage of after-status.z
+//       absence is what makes the lock M D-tight: if a future refactor
+//       split the two writes around the validation, the txt-only
+//       assertion would silently pass while leaking a half-written
+//       machine snapshot.
 //
 //   loadSession:
 //     - Happy-path returns parsed SessionState.
@@ -97,6 +116,24 @@ const CHECKPOINT_ID = "cp_01JV8Y7W2M7ABCDEFGHJKMNPQR";
 const OLDER_TS = "2026-05-04T09:00:00Z";
 const NEWER_TS = "2026-05-04T10:30:11Z";
 const ENDED_TS = "2026-05-04T11:00:00Z";
+
+// Representative `git status --porcelain=v1 -z` bytes for endSession's
+// after-status.z snapshot. Two entries (modified + untracked),
+// NUL-terminated per the z-format spec. Constructed as a Buffer (not a
+// utf-8 string) because:
+//   (a) endSession's `afterStatusZRaw` parameter is typed as Buffer —
+//       string would not typecheck.
+//   (b) The bytes are persisted verbatim by writeFileAtomic; the test's
+//       load-bearing assertion is byte-exact round-trip via
+//       Buffer.equals, NOT utf-8-decoded string equality. Any encoding
+//       round-trip would defeat z-format's binary-safe path delimiter
+//       guarantee and silently corrupt paths containing newlines /
+//       non-utf-8 sequences (which valid git paths CAN contain).
+//   (c) The bytes here are pure ASCII so they happen to round-trip
+//       through utf-8 cleanly, but the test asserts byte equality
+//       regardless — the assertion is calibrated to catch a future
+//       refactor that accidentally writes the string form.
+const AFTER_STATUS_Z_BYTES = Buffer.from(" M src/foo.ts\0?? src/bar.ts\0", "utf8");
 
 let repoRoot: string;
 
@@ -295,7 +332,7 @@ describe("startSession", () => {
 // =============================================================================
 
 describe("endSession", () => {
-  it("happy path: writes after-status.txt, mutates session.json, deletes active lock", async () => {
+  it("happy path: writes after-status.txt + after-status.z, mutates session.json with both paths, deletes active lock", async () => {
     // Set up an in-flight session
     const tmpDir = await makeTmpSessionDir(NEWER_ID);
     await startSession({
@@ -311,19 +348,31 @@ describe("endSession", () => {
       repoRoot,
       endedAt: ENDED_TS,
       afterStatusText: "after",
+      afterStatusZRaw: AFTER_STATUS_Z_BYTES,
     });
 
     const finalDir = join(repoRoot, ".viberevert", "sessions", NEWER_ID);
 
-    // after-status.txt written
+    // after-status.txt (D8 audit form — raw v1 text) written verbatim
     expect(await readFile(join(finalDir, "after-status.txt"), "utf8")).toBe("after");
 
-    // session.json mutated correctly
+    // after-status.z (D8 machine surface — raw -z bytes) written
+    // BYTE-IDENTICALLY. readFile with no encoding returns a Buffer;
+    // Buffer.equals is the byte-exact comparator. Asserting via utf-8
+    // round-trip would mask a future refactor that accidentally
+    // encoded the bytes as a string before writing.
+    const zRoundTrip = await readFile(join(finalDir, "after-status.z"));
+    expect(Buffer.isBuffer(zRoundTrip)).toBe(true);
+    expect(zRoundTrip.equals(AFTER_STATUS_Z_BYTES)).toBe(true);
+
+    // session.json mutated correctly — BOTH path fields populated per
+    // M D Step 4a
     const session = SessionStateSchema.parse(
       JSON.parse(await readFile(join(finalDir, "session.json"), "utf8")),
     );
     expect(session.ended_at).toBe(ENDED_TS);
     expect(session.after_status_path).toBe(`.viberevert/sessions/${NEWER_ID}/after-status.txt`);
+    expect(session.after_status_z_path).toBe(`.viberevert/sessions/${NEWER_ID}/after-status.z`);
     // Pre-existing fields preserved
     expect(session.session_id).toBe(NEWER_ID);
     expect(session.started_at).toBe(NEWER_TS);
@@ -334,7 +383,12 @@ describe("endSession", () => {
 
   it("throws NoActiveSessionError when no active-session.json exists", async () => {
     await expect(
-      endSession({ repoRoot, endedAt: ENDED_TS, afterStatusText: "after" }),
+      endSession({
+        repoRoot,
+        endedAt: ENDED_TS,
+        afterStatusText: "after",
+        afterStatusZRaw: AFTER_STATUS_Z_BYTES,
+      }),
     ).rejects.toBeInstanceOf(NoActiveSessionError);
   });
 
@@ -359,11 +413,18 @@ describe("endSession", () => {
         repoRoot,
         endedAt: "not-a-real-date",
         afterStatusText: "after",
+        afterStatusZRaw: AFTER_STATUS_Z_BYTES,
       }),
     ).rejects.toThrow();
 
     // No after-status.txt written
     await expect(stat(join(finalDir, "after-status.txt"))).rejects.toThrow();
+    // No after-status.z written either — M D Step 4a tightens the
+    // validate-before-mutate invariant to cover BOTH snapshots. A
+    // future refactor that split the two writes around the validation
+    // would leak the z-file even when endedAt is malformed; this
+    // assertion is the canary.
+    await expect(stat(join(finalDir, "after-status.z"))).rejects.toThrow();
     // session.json byte-untouched
     expect(await readFile(join(finalDir, "session.json"), "utf8")).toBe(sessionJsonBefore);
     // Active lock byte-untouched

@@ -32,8 +32,9 @@
 //
 // Public surface vs. internal:
 //   - Public: probeGitVersion, getHeadSha, getBranch, getStatusPorcelainText,
-//     getStatusPorcelainZ, resolveCommitRef, getCommitTimestamp, plus the
-//     StatusEntry type and the CommitRefNotFoundError class.
+//     getStatusPorcelainZ, getStatusPorcelainZRaw, parseStatusPorcelainZ,
+//     resolveCommitRef, getCommitTimestamp, plus the StatusEntry type and
+//     the CommitRefNotFoundError class.
 //   - Internal (re-exported only within this package): gitDiffUnstaged,
 //     gitDiffStaged, gitListUntracked, gitListTrackedDirty, gitApply,
 //     gitApplyWithIndex, gitResetHardHead, runGit, runGitText, splitNulList.
@@ -399,32 +400,34 @@ export type StatusEntry = {
 };
 
 /**
- * Parsed `git status --porcelain=v1 -z` output. Use this — NOT
- * getStatusPorcelainText — for any code that branches on file status (D8).
+ * Pure parser for `git status --porcelain=v1 -z` output buffers. Returns
+ * the same `StatusEntry[]` shape as `getStatusPorcelainZ` but operates on
+ * pre-captured raw bytes — no git subprocess.
  *
- * The `-z` format is unambiguous: NUL-separated entries, no quoting, no
- * locale-dependent escapes.
+ * **Why pure (vs. always going through getStatusPorcelainZ)?** M D's
+ * `loadEndOfSessionChangedPaths` needs to parse `after-status.z` bytes
+ * persisted at end-of-session time (not "current `git status` output").
+ * Both surfaces — live status (getStatusPorcelainZ) and persisted
+ * snapshot (loadEndOfSessionChangedPaths) — MUST use byte-identical
+ * parsing semantics, especially for rename/copy entries which D61's
+ * path-set comparison depends on. Sharing this pure parser is the
+ * single-source guarantee against the two surfaces drifting.
  *
- * Decoding: stdout is decoded as UTF-8. Safe for filenames containing
- * spaces, quotes, and Unicode characters that round-trip through UTF-8 (the
- * standard case for git output on every modern OS). Filenames containing
- * non-UTF-8 byte sequences (extremely rare, mostly on locale-misconfigured
- * Linux systems with `core.quotepath=false` and raw 8-bit pathnames) may be
- * lossy when decoded; that is out of scope for M B.
- *
- * Renames and copies (status code R or C in EITHER position X or Y, since
- * porcelain v1 places index state in X and worktree state in Y) consume an
- * extra NUL-terminated old-path entry per the porcelain v1 -z format.
- *
- * Fails closed on any malformed entry: throws an `Error` rather than
- * silently skipping or partially accepting. Status parsing feeds
- * trust-critical checkpoint/restore code; we need loud failures, not silent
- * corruption.
- *
- * Returns an empty array on a clean tree.
+ * **Logic extracted from the previous `getStatusPorcelainZ` body**, with
+ * ONE fail-closed hardening: the malformed-entry check now also
+ * validates that the required separator-space character (`raw[2]`) is
+ * actually present. The original check covered length-minimum
+ * (`raw.length >= 4`) but trusted the separator position implicitly —
+ * fine for live git output (which always emits the separator), but the
+ * extracted parser now ALSO consumes persisted `after-status.z` bytes
+ * which can be tampered. Failing closed on a missing/wrong separator
+ * surfaces tampering as a structured Error rather than letting it
+ * silently produce a wrong-path StatusEntry (e.g., the old check would
+ * accept `??foo.txt\0` and emit `{ statusXY: "??", path: "oo.txt" }`).
+ * All other failure modes (missing rename old-path follower) are
+ * unchanged. Returns `[]` for an empty buffer.
  */
-export async function getStatusPorcelainZ(repoRoot: string): Promise<readonly StatusEntry[]> {
-  const buf = await runGit(repoRoot, ["status", "--porcelain=v1", "-z"]);
+export function parseStatusPorcelainZ(buf: Buffer): readonly StatusEntry[] {
   if (buf.length === 0) return [];
   const text = buf.toString("utf8");
   const tokens = text.split("\0");
@@ -437,7 +440,7 @@ export async function getStatusPorcelainZ(repoRoot: string): Promise<readonly St
   while (i < tokens.length) {
     const raw = tokens[i];
     // Minimum valid entry: 2-char status + space + at-least-one-char path = 4 chars.
-    if (raw === undefined || raw.length < 4) {
+    if (raw === undefined || raw.length < 4 || raw[2] !== " ") {
       throw new Error(
         `git status --porcelain=v1 -z: malformed entry at token index ${i}: ${
           raw === undefined ? "<missing>" : JSON.stringify(raw)
@@ -469,6 +472,54 @@ export async function getStatusPorcelainZ(repoRoot: string): Promise<readonly St
     }
   }
   return out;
+}
+
+/**
+ * Parsed `git status --porcelain=v1 -z` output. Use this — NOT
+ * getStatusPorcelainText — for any code that branches on file status (D8).
+ *
+ * The `-z` format is unambiguous: NUL-separated entries, no quoting, no
+ * locale-dependent escapes.
+ *
+ * Decoding: stdout is decoded as UTF-8. Safe for filenames containing
+ * spaces, quotes, and Unicode characters that round-trip through UTF-8 (the
+ * standard case for git output on every modern OS). Filenames containing
+ * non-UTF-8 byte sequences (extremely rare, mostly on locale-misconfigured
+ * Linux systems with `core.quotepath=false` and raw 8-bit pathnames) may be
+ * lossy when decoded; that is out of scope for M B.
+ *
+ * Renames and copies (status code R or C in EITHER position X or Y, since
+ * porcelain v1 places index state in X and worktree state in Y) consume an
+ * extra NUL-terminated old-path entry per the porcelain v1 -z format.
+ *
+ * Fails closed on any malformed entry: throws an `Error` rather than
+ * silently skipping or partially accepting. Status parsing feeds
+ * trust-critical checkpoint/restore code; we need loud failures, not silent
+ * corruption.
+ *
+ * Returns an empty array on a clean tree.
+ */
+export async function getStatusPorcelainZ(repoRoot: string): Promise<readonly StatusEntry[]> {
+  return parseStatusPorcelainZ(await runGit(repoRoot, ["status", "--porcelain=v1", "-z"]));
+}
+
+/**
+ * Raw `git status --porcelain=v1 -z` output as Buffer — the EXACT bytes
+ * git produced, with no parsing. Used by M D's `endSession` extension to
+ * persist `after-status.z` alongside the existing `after-status.txt` audit
+ * snapshot. M D's rollback dirty-tree comparison parses the persisted
+ * z-format bytes via the shared `parseStatusPorcelainZ` parser, so live
+ * status (this helper → parser) and persisted snapshot (file read →
+ * parser) produce byte-identical entry sets for the same tree state.
+ *
+ * Per D8: `after-status.txt` (raw v1 text) is audit-only and must NOT be
+ * parsed for machine logic. The z-format buffer this helper returns IS
+ * the machine surface; persist it via atomic write per D13.
+ *
+ * Empty buffer on a clean tree.
+ */
+export async function getStatusPorcelainZRaw(repoRoot: string): Promise<Buffer> {
+  return runGit(repoRoot, ["status", "--porcelain=v1", "-z"]);
 }
 
 /**

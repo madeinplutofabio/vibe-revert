@@ -16,6 +16,17 @@
 //    @viberevert/git. Verifiable by grep: no `child_process` import in this
 //    file, no `@viberevert/git` import in this file.
 //
+//    **M D Step 4a extension:** `endSession` also accepts
+//    `afterStatusZRaw: Buffer` — the raw `git status --porcelain=v1 -z`
+//    output captured by the CLI via @viberevert/git's
+//    `getStatusPorcelainZRaw`. Core persists it verbatim to
+//    `after-status.z` alongside the existing `after-status.txt`. Per D8,
+//    `after-status.txt` is the human-audit form (raw v1 text, never
+//    parsed for machine logic); `after-status.z` is the machine surface
+//    that M D's rollback dirty-tree comparison parses via the shared
+//    `parseStatusPorcelainZ` parser. Core does NOT parse either form;
+//    it only writes the bytes.
+//
 // 2. **Deterministic timestamps: core never calls `new Date()` internally.**
 //    Both `startSession` and `endSession` accept the timestamp as a typed
 //    input (`startedAt`, `endedAt`). The CLI generates the ISO string;
@@ -86,6 +97,12 @@ const ACTIVE_SESSION_LOCK_FILENAME = "active-session.json";
 const SESSION_JSON_FILENAME = "session.json";
 const BEFORE_STATUS_FILENAME = "before-status.txt";
 const AFTER_STATUS_FILENAME = "after-status.txt";
+// M D Step 4a: machine-readable z-format snapshot persisted alongside the
+// existing `after-status.txt` audit file. M D's rollback dirty-tree
+// comparison parses these bytes via @viberevert/git's `parseStatusPorcelainZ`
+// (per D8: audit text is NEVER parsed for machine logic; z-format is the
+// machine surface).
+const AFTER_STATUS_Z_FILENAME = "after-status.z";
 const COMMANDS_LOG_FILENAME = "commands.log";
 
 /** Matches `sess_<26-char Crockford base32 ULID>`. */
@@ -139,6 +156,22 @@ export interface EndSessionOpts {
   readonly endedAt: string;
   /** Raw `git status --porcelain=v1` text (per D8 — fetched by CLI from git). */
   readonly afterStatusText: string;
+  /**
+   * Raw `git status --porcelain=v1 -z` BYTES (per M D Step 4a — fetched by
+   * CLI from git via `getStatusPorcelainZRaw`). Core persists these bytes
+   * verbatim to `after-status.z` alongside the existing
+   * `after-status.txt` and records the relative path in
+   * `session.after_status_z_path`.
+   *
+   * Per D8: `after-status.txt` is the human-audit form (raw v1 text, never
+   * parsed for machine logic). `after-status.z` is the machine surface
+   * that M D's rollback dirty-tree comparison parses via the shared
+   * `parseStatusPorcelainZ` parser. Both are captured by the CLI at
+   * end-of-session time and recorded in different formats. Core does not
+   * assume they came from the same git invocation; it persists the exact
+   * text and bytes supplied by the caller.
+   */
+  readonly afterStatusZRaw: Buffer;
 }
 
 /**
@@ -363,26 +396,43 @@ export async function startSession(opts: StartSessionOpts): Promise<void> {
  *      schema AND verifies `session_id` matches the lock's session id —
  *      see architectural lock #7).
  *   3. Build the post-mutation `SessionState` (existing + `ended_at` +
- *      `after_status_path`) and validate it against
- *      `SessionStateSchema`. Catches malformed `opts.endedAt` (wrong
- *      ISO format, missing offset, fractional seconds, etc.) here.
+ *      `after_status_path` + M D Step 4a `after_status_z_path`) and
+ *      validate it against `SessionStateSchema`. Catches malformed
+ *      `opts.endedAt` (wrong ISO format, missing offset, fractional
+ *      seconds, etc.) here. The schema's one-way coupling refine
+ *      (`after_status_z_path` present implies `ended_at` AND
+ *      `after_status_path` present) is also checked here — drift
+ *      between this builder and the schema surfaces as a loud failure.
  *   4. Steps 1-3 are all read/validate; the on-disk state is
  *      byte-untouched up to this point. If any of them throws, no
  *      mutation occurred.
- *   5. Write `after-status.txt` into the session dir via
- *      `writeFileAtomic`.
+ *   5. Write `after-status.txt` (audit, v1 text) and `after-status.z`
+ *      (machine, raw z-format BYTES — M D Step 4a) into the session dir
+ *      via `writeFileAtomic`. Both are supplied by the CLI from end-of-
+ *      session status captures, persisted separately for different
+ *      consumers per D8.
  *   6. Write the updated `session.json` via `writeFileAtomic`.
  *   7. Delete `active-session.json` via `rm`.
  *
  * **Known crash window (M B-tolerated):** a crash between step 6 and
  * step 7 leaves `session.json` showing the session as ended (with
- * `ended_at` set) AND `active-session.json` still pointing at it. The
- * session is logically ended on disk but the active-lock is stale —
- * subsequent `viberevert start` would refuse with the stale lock as
- * the "currently active" session. M B does not auto-recover this; a
- * future `viberevert gc` (deferred) sweeps stale locks by checking
- * whether the referenced session has `ended_at`. Manual recovery in
- * M B: delete `.viberevert/active-session.json` and retry `start`.
+ * `ended_at`, `after_status_path`, AND `after_status_z_path` set) AND
+ * `active-session.json` still pointing at it. The session is logically
+ * ended on disk but the active-lock is stale — subsequent `viberevert
+ * start` would refuse with the stale lock as the "currently active"
+ * session. M B does not auto-recover this; a future `viberevert gc`
+ * (deferred) sweeps stale locks by checking whether the referenced
+ * session has `ended_at`. Manual recovery in M B: delete
+ * `.viberevert/active-session.json` and retry `start`.
+ *
+ * A narrower crash between step 5's two atomic writes (after `.txt`
+ * lands but before `.z` lands, or vice versa) leaves one snapshot file
+ * present without its sibling. Per D13, each `writeFileAtomic` is
+ * individually atomic but the pair is not. This is M B-tolerated: M D's
+ * `loadEndOfSessionChangedPaths` (Step 4b) returns
+ * `{ kind: "missing" }` when `after_status_z_path` is unset OR the file
+ * is absent, routing through the same legacy-session escape hatch as
+ * pre-M D ended sessions (the D61b refusal + `--force` path).
  */
 export async function endSession(opts: EndSessionOpts): Promise<void> {
   const lock = await loadActiveSessionLock(opts.repoRoot);
@@ -398,24 +448,28 @@ export async function endSession(opts: EndSessionOpts): Promise<void> {
   const sessionDirAbs = join(opts.repoRoot, VIBEREVERT_DIR, SESSIONS_SUBDIR, lock.session_id);
   const sessionJsonAbs = join(sessionDirAbs, SESSION_JSON_FILENAME);
   const afterStatusAbs = join(sessionDirAbs, AFTER_STATUS_FILENAME);
+  const afterStatusZAbs = join(sessionDirAbs, AFTER_STATUS_Z_FILENAME);
   const activeLockPathAbs = join(opts.repoRoot, VIBEREVERT_DIR, ACTIVE_SESSION_LOCK_FILENAME);
   const afterStatusPathRel = `${SESSIONS_DIR_REL}/${lock.session_id}/${AFTER_STATUS_FILENAME}`;
+  const afterStatusZPathRel = `${SESSIONS_DIR_REL}/${lock.session_id}/${AFTER_STATUS_Z_FILENAME}`;
 
   // Build + validate the post-mutation state BEFORE any disk write —
   // catches malformed opts.endedAt (e.g., wrong ISO format, missing
   // offset, fractional seconds) here, leaving the on-disk state
   // byte-untouched. Without this ordering, a bad endedAt would surface
-  // only AFTER after-status.txt had already been written, leaving a
-  // half-state (after-status.txt updated, session.json untouched,
-  // active lock untouched).
+  // only AFTER after-status files had already been written, leaving a
+  // half-state (snapshots updated, session.json untouched, active lock
+  // untouched).
   const updatedState: SessionState = {
     ...existingState,
     ended_at: opts.endedAt,
     after_status_path: afterStatusPathRel,
+    after_status_z_path: afterStatusZPathRel,
   };
   SessionStateSchema.parse(updatedState);
 
   await writeFileAtomic(afterStatusAbs, opts.afterStatusText);
+  await writeFileAtomic(afterStatusZAbs, opts.afterStatusZRaw);
   await writeFileAtomic(sessionJsonAbs, JSON.stringify(updatedState, null, 2));
 
   await rm(activeLockPathAbs);

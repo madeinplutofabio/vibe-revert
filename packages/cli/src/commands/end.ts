@@ -16,11 +16,18 @@
 //    `loadConfig`.
 //
 // 2. **D16/D17c: git invocation through @viberevert/git only.** This
-//    command MUST NOT import `child_process`. Git status is fetched via
-//    `getStatusPorcelainText` from `@viberevert/git`, which is the
-//    single owner of git-binary invocation in the codebase. The
-//    architectural-invariants test from Step 3f already polices this
-//    for the whole `cli/src/commands/**` tree.
+//    command MUST NOT import `child_process`. Git status is fetched
+//    here via TWO calls into `@viberevert/git` per M D Step 4a:
+//      - `getStatusPorcelainText` — raw `--porcelain=v1` text, D8
+//        audit form, persisted as `after-status.txt`.
+//      - `getStatusPorcelainZRaw` — raw `--porcelain=v1 -z` BYTES,
+//        D8 machine surface, persisted as `after-status.z`.
+//    Two separate invocations are unavoidable: `-z` changes git's
+//    output format, so the two forms cannot be derived from a single
+//    call. `@viberevert/git` is the single owner of git-binary
+//    invocation in the codebase. The architectural-invariants test
+//    from Step 3f already polices `child_process` absence for the
+//    whole `cli/src/commands/**` tree.
 //
 // 3. **session.ts architectural lock #2: deterministic timestamps.**
 //    `core.endSession` accepts `endedAt` as a plain string input — it
@@ -33,9 +40,15 @@
 //    per D49 (M C addition). Production behavior is unchanged.
 //
 // 4. **D17c: plain inputs to core.** `core.endSession` receives
-//    `{repoRoot, endedAt, afterStatusText}` only. No config, no git
-//    refs, no derived state. Matches the "core takes plain typed
-//    inputs from the orchestration layer" boundary.
+//    `{repoRoot, endedAt, afterStatusText, afterStatusZRaw}` only.
+//    No config, no git refs, no derived state. Matches the "core
+//    takes plain typed inputs from the orchestration layer" boundary.
+//    Per M D Step 4a, the two status captures (`afterStatusText`
+//    string + `afterStatusZRaw` Buffer) are independently fetched
+//    here and handed to core verbatim; core persists them to two
+//    separate files (after-status.txt + after-status.z) without
+//    coupling them or assuming they came from the same git
+//    invocation.
 //
 // 5. **D11: refusal exit code is 1.** Both refusal cases (no repo
 //    root, no active session) exit 1 with a directive stderr message
@@ -60,7 +73,7 @@ import {
   RepoRootNotFoundError,
   resolveRepoRoot,
 } from "@viberevert/core";
-import { getStatusPorcelainText } from "@viberevert/git";
+import { getStatusPorcelainText, getStatusPorcelainZRaw } from "@viberevert/git";
 import { Command } from "clipanion";
 
 import { RuntimeEnvInvalidError, resolveNowForCliTimestamp } from "../runtime-env.js";
@@ -102,9 +115,24 @@ export class EndCommand extends Command {
       return 1;
     }
 
-    // Step 3: fetch raw `git status --porcelain=v1` text via
+    // Step 3: fetch the two post-session git status snapshots via
     // @viberevert/git (single owner of git invocation per D16/D17c).
+    // Per M D Step 4a + D8:
+    //   - `getStatusPorcelainText` returns raw `--porcelain=v1` text;
+    //     core persists it verbatim to `.viberevert/sessions/<sess>/
+    //     after-status.txt` (audit form — D8 forbids machine logic
+    //     from parsing this).
+    //   - `getStatusPorcelainZRaw` returns raw `--porcelain=v1 -z`
+    //     BYTES (a Buffer); core persists them verbatim to
+    //     `.viberevert/sessions/<sess>/after-status.z` (machine
+    //     surface — M D rollback feeds these bytes back through the
+    //     shared `parseStatusPorcelainZ` parser).
+    // Sequential rather than parallel: the two reads are cheap, and
+    // serializing them keeps the snapshot ordering crisp for any
+    // future debugger / strace-style audit. No correctness gain from
+    // Promise.all here.
     const afterStatusText = await getStatusPorcelainText(repoRoot);
+    const afterStatusZRaw = await getStatusPorcelainZRaw(repoRoot);
 
     // Step 4: generate ISO timestamp via the CLI's runtime-env
     // resolver. Production path: `resolveNowForCliTimestamp()` returns
@@ -130,9 +158,12 @@ export class EndCommand extends Command {
       throw err;
     }
 
-    // Step 5: call core to perform the atomic mutations.
+    // Step 5: call core to perform the atomic mutations. Core writes
+    // both `after-status.txt` and `after-status.z` (D13 atomic) and
+    // populates both `after_status_path` and `after_status_z_path`
+    // on `session.json` per M D Step 4a.
     try {
-      await endSession({ repoRoot, endedAt, afterStatusText });
+      await endSession({ repoRoot, endedAt, afterStatusText, afterStatusZRaw });
     } catch (err) {
       if (err instanceof NoActiveSessionError) {
         // Race: another `viberevert end` operation deleted

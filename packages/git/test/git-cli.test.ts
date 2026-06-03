@@ -52,6 +52,20 @@
 //     This locks the hardening that diff.ts's DiffRefNotFoundError
 //     also adopts — the symmetric DiffRefNotFoundError test lives
 //     in diff.test.ts.
+//
+// Step 4a additions (parser refactor + raw-bytes helper):
+//   - parseStatusPorcelainZ: pure parser direct tests covering empty
+//     buffer, single/multiple entries, rename/copy two-path follower
+//     correctness (R and C in either X or Y position), and the locked
+//     fails-closed errors (malformed entry — too short, missing
+//     separator, missing follower).
+//   - getStatusPorcelainZRaw: live z-format bytes for after-status.z
+//     persistence; empty on clean tree, exact byte equality on dirty
+//     tree, round-trip parity through parseStatusPorcelainZ.
+//   - getStatusPorcelainZ: live wrapper parity — wrapper(repoRoot)
+//     equals parseStatusPorcelainZ(await getStatusPorcelainZRaw())
+//     for the same tree state. Locks that the refactor introduced no
+//     observable change at the public surface.
 
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -60,7 +74,14 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 
-import { CommitRefNotFoundError, getCommitTimestamp, resolveCommitRef } from "../src/git-cli.js";
+import {
+  CommitRefNotFoundError,
+  getCommitTimestamp,
+  getStatusPorcelainZ,
+  getStatusPorcelainZRaw,
+  parseStatusPorcelainZ,
+  resolveCommitRef,
+} from "../src/git-cli.js";
 
 // =============================================================================
 // Test helpers
@@ -101,6 +122,12 @@ async function setupRepo(): Promise<TestRepo> {
   await runGit(repoRoot, ["config", "user.name", "Test User"]);
   await runGit(repoRoot, ["config", "commit.gpgsign", "false"]);
   await runGit(repoRoot, ["config", "core.autocrlf", "false"]);
+  // Force `git status --porcelain=v1 -z` to enumerate untracked files. Some
+  // user/system configs set `status.showUntrackedFiles=no` (e.g., to speed
+  // up status on huge repos); without this repo-local override, the live
+  // raw + wrapper tests below would get an empty buffer and assert
+  // wrong-tree shape for environmental reasons.
+  await runGit(repoRoot, ["config", "status.showUntrackedFiles", "all"]);
   return {
     repoRoot,
     cleanup: async () => {
@@ -485,5 +512,242 @@ describe("CommitRefNotFoundError", () => {
     const err = new CommitRefNotFoundError("bad\nref");
     expect(err.message).toBe('Could not resolve commit ref "bad\\nref"');
     expect(err.message).not.toContain("\n");
+  });
+});
+
+// =============================================================================
+// Step 4a — parseStatusPorcelainZ (pure parser)
+//
+// Tests target the pure parser directly via Buffer literals — no git
+// subprocess, no temp repo. Locks every parsing branch independent of
+// git's runtime behavior. The same parser feeds both live status
+// (getStatusPorcelainZ) and persisted after-status.z snapshots
+// (M D's loadEndOfSessionChangedPaths in Step 4b); a regression here
+// would corrupt both surfaces.
+//
+// Format reminder: each entry is `<XY> <path>\0`. Rename (R in X or Y)
+// or copy (C in X or Y) entries are followed by an extra
+// `<oldpath>\0` chunk.
+// =============================================================================
+
+describe("parseStatusPorcelainZ — pure parser", () => {
+  describe("happy paths", () => {
+    it("returns [] for empty buffer", () => {
+      expect(parseStatusPorcelainZ(Buffer.alloc(0))).toEqual([]);
+    });
+
+    it("parses single untracked entry", () => {
+      const buf = Buffer.from("?? newfile.txt\0", "utf8");
+      expect(parseStatusPorcelainZ(buf)).toEqual([{ statusXY: "??", path: "newfile.txt" }]);
+    });
+
+    it("parses single unstaged-modified entry", () => {
+      // Format: X=space (no index change), Y=M (worktree modified)
+      const buf = Buffer.from(" M file.txt\0", "utf8");
+      expect(parseStatusPorcelainZ(buf)).toEqual([{ statusXY: " M", path: "file.txt" }]);
+    });
+
+    it("parses multiple non-rename entries in source order", () => {
+      const buf = Buffer.from("?? a.txt\0 M b.txt\0M  c.txt\0", "utf8");
+      expect(parseStatusPorcelainZ(buf)).toEqual([
+        { statusXY: "??", path: "a.txt" },
+        { statusXY: " M", path: "b.txt" },
+        { statusXY: "M ", path: "c.txt" },
+      ]);
+    });
+  });
+
+  describe("rename/copy two-path entries (D61 path-set comparison depends on this)", () => {
+    it("parses rename entry with R in X (index) position + old-path follower", () => {
+      // R in X = rename detected in the index. Format: `R <newpath>\0<oldpath>\0`
+      const buf = Buffer.from("R  newname.txt\0oldname.txt\0", "utf8");
+      expect(parseStatusPorcelainZ(buf)).toEqual([
+        { statusXY: "R ", path: "newname.txt", previousPath: "oldname.txt" },
+      ]);
+    });
+
+    it("parses rename entry with R in Y (worktree) position + old-path follower", () => {
+      // Y=R also consumes a follower per porcelain v1 -z docs.
+      const buf = Buffer.from(" R newname.txt\0oldname.txt\0", "utf8");
+      expect(parseStatusPorcelainZ(buf)).toEqual([
+        { statusXY: " R", path: "newname.txt", previousPath: "oldname.txt" },
+      ]);
+    });
+
+    it("parses copy entry with C in X position + old-path follower", () => {
+      const buf = Buffer.from("C  copy.txt\0source.txt\0", "utf8");
+      expect(parseStatusPorcelainZ(buf)).toEqual([
+        { statusXY: "C ", path: "copy.txt", previousPath: "source.txt" },
+      ]);
+    });
+
+    it("parses copy entry with C in Y position + old-path follower", () => {
+      // Y=C also consumes a follower per porcelain v1 -z docs (matches
+      // the R-in-Y branch in the parser's isRenameOrCopy check).
+      const buf = Buffer.from(" C copy.txt\0source.txt\0", "utf8");
+      expect(parseStatusPorcelainZ(buf)).toEqual([
+        { statusXY: " C", path: "copy.txt", previousPath: "source.txt" },
+      ]);
+    });
+
+    it("parses mixed entries with renames interspersed (index advances by 2 across rename, 1 elsewhere)", () => {
+      const buf = Buffer.from("?? a.txt\0R  new.txt\0old.txt\0 M c.txt\0", "utf8");
+      expect(parseStatusPorcelainZ(buf)).toEqual([
+        { statusXY: "??", path: "a.txt" },
+        { statusXY: "R ", path: "new.txt", previousPath: "old.txt" },
+        { statusXY: " M", path: "c.txt" },
+      ]);
+    });
+  });
+
+  describe("error paths (fails closed — never silently skips)", () => {
+    it("throws on malformed entry shorter than 4 chars", () => {
+      // Minimum valid entry: 2-char status + space + at-least-one-char path = 4.
+      // "ab" is only 2 chars → malformed.
+      const buf = Buffer.from("ab\0", "utf8");
+      expect(() => parseStatusPorcelainZ(buf)).toThrow(/malformed entry/);
+    });
+
+    it("throws when the status/path separator is not a space (tampered after-status.z byte protection)", () => {
+      // Step 4a fail-closed hardening: the original live-only parser
+      // trusted the separator position implicitly. The extracted parser
+      // also consumes persisted after-status.z bytes (tamperable), so it
+      // now validates `raw[2] === " "` explicitly. Without the
+      // hardening, `??foo.txt\0` would silently parse as
+      // { statusXY: "??", path: "oo.txt" } — wrong path, no error.
+      const buf = Buffer.from("??foo.txt\0", "utf8");
+      expect(() => parseStatusPorcelainZ(buf)).toThrow(/malformed entry/);
+    });
+
+    it("throws on rename entry missing its required old-path follower", () => {
+      // R entry but no follower chunk → fails closed with structured error.
+      const buf = Buffer.from("R  orphan.txt\0", "utf8");
+      expect(() => parseStatusPorcelainZ(buf)).toThrow(/missing its required old-path follower/);
+    });
+  });
+});
+
+// =============================================================================
+// Step 4a — getStatusPorcelainZRaw (live z-format bytes)
+//
+// The raw helper is the bridge between git subprocess output and M B's
+// `end` persistence of after-status.z. These live tests prove:
+//   - clean tree → empty Buffer
+//   - dirty tree → exact byte equality with the parser's input form
+//   - round-trip: getStatusPorcelainZRaw → parseStatusPorcelainZ matches
+//     getStatusPorcelainZ for the same tree state (no semantic drift
+//     from the refactor)
+// =============================================================================
+
+describe("getStatusPorcelainZRaw — live z-format bytes for after-status.z persistence", () => {
+  it("returns an empty Buffer on a clean tree", async () => {
+    const repo = await setupRepo();
+    try {
+      await writeFile(join(repo.repoRoot, "README.md"), "# test\n");
+      await runGit(repo.repoRoot, ["add", "README.md"]);
+      await runGit(repo.repoRoot, ["commit", "-m", "init"]);
+
+      const buf = await getStatusPorcelainZRaw(repo.repoRoot);
+      expect(buf.length).toBe(0);
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it("returns the exact raw z-format bytes git produced for a dirty tree, parseable via parseStatusPorcelainZ", async () => {
+    const repo = await setupRepo();
+    try {
+      await writeFile(join(repo.repoRoot, "README.md"), "# test\n");
+      await runGit(repo.repoRoot, ["add", "README.md"]);
+      await runGit(repo.repoRoot, ["commit", "-m", "init"]);
+
+      // Add an untracked file — git enumerates it as ?? in z-format.
+      await writeFile(join(repo.repoRoot, "newfile.txt"), "new\n");
+
+      const buf = await getStatusPorcelainZRaw(repo.repoRoot);
+      // Format: `?? newfile.txt\0`
+      expect(buf.toString("utf8")).toBe("?? newfile.txt\0");
+
+      // The bytes flow through the pure parser to the expected entry —
+      // proves the raw helper and the parser are wired correctly together.
+      const entries = parseStatusPorcelainZ(buf);
+      expect(entries).toEqual([{ statusXY: "??", path: "newfile.txt" }]);
+    } finally {
+      await repo.cleanup();
+    }
+  });
+});
+
+// =============================================================================
+// Step 4a — getStatusPorcelainZ (live wrapper parity)
+//
+// Locks that the refactor preserved observable behavior at the public
+// surface: wrapper(repoRoot) === parseStatusPorcelainZ(await
+// getStatusPorcelainZRaw(repoRoot)) for any tree state. Existing
+// callers of getStatusPorcelainZ are unaffected by the extraction.
+// =============================================================================
+
+describe("getStatusPorcelainZ — live wrapper parity", () => {
+  it("returns [] on a clean tree", async () => {
+    const repo = await setupRepo();
+    try {
+      await writeFile(join(repo.repoRoot, "README.md"), "# test\n");
+      await runGit(repo.repoRoot, ["add", "README.md"]);
+      await runGit(repo.repoRoot, ["commit", "-m", "init"]);
+
+      const entries = await getStatusPorcelainZ(repo.repoRoot);
+      expect(entries).toEqual([]);
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it("parity: wrapper output equals parseStatusPorcelainZ(getStatusPorcelainZRaw()) for the same tree state", async () => {
+    const repo = await setupRepo();
+    try {
+      await writeFile(join(repo.repoRoot, "README.md"), "# test\n");
+      await runGit(repo.repoRoot, ["add", "README.md"]);
+      await runGit(repo.repoRoot, ["commit", "-m", "init"]);
+
+      // Mixed dirty state: modified tracked file + new untracked file.
+      await writeFile(join(repo.repoRoot, "README.md"), "# modified\n");
+      await writeFile(join(repo.repoRoot, "newfile.txt"), "new\n");
+
+      const fromWrapper = await getStatusPorcelainZ(repo.repoRoot);
+      const fromRaw = parseStatusPorcelainZ(await getStatusPorcelainZRaw(repo.repoRoot));
+      expect(fromWrapper).toEqual(fromRaw);
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it("correctly captures rename entries via the wrapper (live git output)", async () => {
+    const repo = await setupRepo();
+    try {
+      await writeFile(join(repo.repoRoot, "README.md"), "# test\n");
+      await writeFile(join(repo.repoRoot, "oldname.txt"), "content\n");
+      await runGit(repo.repoRoot, ["add", "README.md", "oldname.txt"]);
+      await runGit(repo.repoRoot, ["commit", "-m", "init"]);
+
+      // Force rename detection on. `status.renames` may be `false` in
+      // user / system git config (e.g., to avoid CPU cost on large
+      // repos); without this repo-local override, `git status
+      // --porcelain=v1 -z` would surface the rename as a separate D + ??
+      // pair, NOT an R entry, and the rename-capture assertion below
+      // would fail environment-dependently.
+      await runGit(repo.repoRoot, ["config", "status.renames", "true"]);
+
+      // Use `git mv` to stage a rename — porcelain z output produces an
+      // R-status entry with the old-path follower.
+      await runGit(repo.repoRoot, ["mv", "oldname.txt", "newname.txt"]);
+
+      const entries = await getStatusPorcelainZ(repo.repoRoot);
+      const renameEntry = entries.find((e) => e.statusXY.includes("R"));
+      expect(renameEntry).toBeDefined();
+      expect(renameEntry?.path).toBe("newname.txt");
+      expect(renameEntry?.previousPath).toBe("oldname.txt");
+    } finally {
+      await repo.cleanup();
+    }
   });
 });
