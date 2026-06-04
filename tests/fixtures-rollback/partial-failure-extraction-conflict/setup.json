@@ -1,0 +1,22 @@
+{
+  "files": [
+    {
+      "path": "README.md",
+      "content": "# Test\n\nInitial baseline for the extraction-conflict receipt fixture.\n"
+    }
+  ],
+  "git_init": true,
+  "pre_session_untracked_files": [
+    { "path": "subdir/file.txt", "content": "Captured untracked file.\n" }
+  ],
+  "session": {
+    "task": "M D Step 8 extraction-conflict scenario"
+  },
+  "post_end_transformations": {
+    "delete_paths": ["subdir/file.txt", "subdir"],
+    "create_dirs": ["subdir/file.txt/blocker"]
+  },
+  "rollback_invocation": { "mode": "apply", "force": false },
+  "expected_rollback_exit_code": 1,
+  "expected_receipt": true
+}

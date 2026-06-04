@@ -1,0 +1,20 @@
+{
+  "schema_version": "1.0",
+  "rollback_id": "rb_01KDVDNA009CEYQ0QAVTDW0T7S",
+  "session_id": "sess_01KDVDNA00BZYA8KS027KPF7N4",
+  "checkpoint_id": "cp_01KDVDNA00HMDCQ95QZSDQBCYC",
+  "mode": "apply",
+  "forced": false,
+  "written_at": "2026-01-01T00:00:00Z",
+  "pre_rollback_checkpoint_id": "cp_01KDVDNA00HMDCQ95QZSDQBCYC",
+  "results": [
+    {
+      "path": "session-edit.txt",
+      "outcome": "untracked_deleted"
+    }
+  ],
+  "failures": [],
+  "forced_unrelated_dirty_paths": [],
+  "dirty_tree_check": "performed",
+  "out_of_scope_notice": "Vibe-revert restores tracked file content, untracked file content, and the git index. It does NOT restore: database schemas/data, deployed artifacts, package registry publishes (npm/pypi/etc.), external API state, environment variable mutations in the parent shell, OS-level state outside the repo, or any process-side effects. Recover those manually."
+}

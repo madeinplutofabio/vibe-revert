@@ -1,0 +1,18 @@
+{
+  "files": [
+    {
+      "path": "README.md",
+      "content": "# Test\n\nInitial baseline for the clean-apply receipt fixture.\n"
+    }
+  ],
+  "git_init": true,
+  "session": {
+    "task": "M D Step 8 clean apply scenario",
+    "untracked_files": [
+      { "path": "session-edit.txt", "content": "Session-created untracked content.\n" }
+    ]
+  },
+  "rollback_invocation": { "mode": "apply", "force": false },
+  "expected_rollback_exit_code": 0,
+  "expected_receipt": true
+}

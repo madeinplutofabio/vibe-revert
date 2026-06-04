@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Fabio Marcello Salvadori
 
-# VibeRevert M B + M C Phase 12a + 12b smoke test.
+# VibeRevert M B + M C + M D smoke test (Phase 12a + 12b + 12c).
 # Builds + packs the 6 currently publishable packages, installs them into a
 # scratch dir under $env:TEMP, and exercises the M B command surface AND the
-# M C Phase 12a + 12b packed-install scenarios (basic check + report flows
-# plus targeted package-boundary proofs) against a real `git init` repo.
+# M C/D Phase 12a + 12b + 12c packed-install scenarios (basic check + report
+# flows, targeted package-boundary proofs, and the M D rollback dry-run +
+# apply + idempotency flow) against a real `git init` repo.
 #
 # See docs/release-process.md for the workflow rationale and the two known
 # release-packaging issues (pnpm.overrides workaround; PowerShell 5.1 BOM).
@@ -47,7 +48,8 @@ function Write-Section($title) {
 }
 
 function Invoke-Cli {
-    # Runs `pnpm exec viberevert <args>` and asserts the exit code.
+    # Runs `pnpm exec viberevert <args>` and asserts the exit code (and
+    # optionally that captured output contains a specific substring).
     # Two PowerShell 5.1 hazards on native-exe interop, both handled here:
     #   1. `2>&1` wraps native stderr lines in ErrorRecord (NativeCommandError)
     #      objects. With $ErrorActionPreference='Stop' (set at script top so
@@ -59,10 +61,16 @@ function Invoke-Cli {
     #      captured but doesn't throw.
     #   2. `$?` is unreliable after such calls; we always use $LASTEXITCODE
     #      for the actual exit-code assertion.
+    #
+    # ExpectedOutputContains (optional) locks the user-facing error/output
+    # copy in addition to the exit code. Combined exit-AND-content check
+    # so pass/fail counters stay coherent (one PASS or one FAIL per step,
+    # never both).
     param(
         [Parameter(Mandatory)][string[]]$CliArgs,
         [Parameter(Mandatory)][int]$ExpectedExit,
-        [Parameter(Mandatory)][string]$StepName
+        [Parameter(Mandatory)][string]$StepName,
+        [string]$ExpectedOutputContains
     )
     Write-Host "> pnpm exec viberevert $($CliArgs -join ' ')"
     $previousErrorActionPreference = $ErrorActionPreference
@@ -73,32 +81,43 @@ function Invoke-Cli {
     } finally {
         $ErrorActionPreference = $previousErrorActionPreference
     }
+    # Normalize output lines for both display and the optional
+    # substring assertion. ErrorRecord objects need their exception
+    # message extracted; PowerShell 5.1's `2>&1` synthetic
+    # 'System.Management.Automation.RemoteException' lines are filtered.
+    $normalizedLines = @()
     if ($output) {
-        # PowerShell 5.1 wraps native stderr under `2>&1` as ErrorRecord
-        # objects. Blank/separator stderr lines can stringify as the type
-        # name `System.Management.Automation.RemoteException`, which is not
-        # useful smoke output. Normalize ErrorRecord objects through their
-        # exception message and suppress blank / placeholder lines.
         $output | ForEach-Object {
             $text = if ($_ -is [System.Management.Automation.ErrorRecord]) {
                 $_.Exception.Message
             } else {
                 "$_"
             }
-
             if (
                 -not [string]::IsNullOrWhiteSpace($text) -and
                 $text -ne 'System.Management.Automation.RemoteException'
             ) {
                 Write-Host "  $text"
+                $normalizedLines += $text
             }
         }
     }
-    if ($actualExit -eq $ExpectedExit) {
+    $exitMatches = ($actualExit -eq $ExpectedExit)
+    $contentMatches = $true
+    if ($PSBoundParameters.ContainsKey('ExpectedOutputContains')) {
+        $joined = $normalizedLines -join "`n"
+        $contentMatches = $joined.Contains($ExpectedOutputContains)
+    }
+    if ($exitMatches -and $contentMatches) {
         Write-Host "[PASS] $StepName (exit $actualExit)"
         $script:passCount++
     } else {
-        Write-Host "[FAIL] $StepName (expected exit $ExpectedExit, got $actualExit)"
+        if (-not $exitMatches) {
+            Write-Host "[FAIL] $StepName (expected exit $ExpectedExit, got $actualExit)"
+        }
+        if (-not $contentMatches) {
+            Write-Host "[FAIL] $StepName output did not contain expected substring: $ExpectedOutputContains"
+        }
         $script:failCount++
         throw "Smoke step failed: $StepName"
     }
@@ -351,6 +370,225 @@ APP_API_KEY = "TESTFIXTUREONLY_S9qX8wV7tS6rP5nM4kL3jH2gF1"
         Write-Section 'M C 12b: D58 --staged + checkpoint mutual exclusion'
         Invoke-Cli -CliArgs @('check', '--staged', '--since', 'smoke-baseline') -ExpectedExit 1 -StepName 'check-staged-plus-checkpoint-name-refused'
 
+        # 9. M D Phase 12c: rollback dry-run + apply + idempotency.
+        # Runs BEFORE the missing-config "LAST scenario" block because
+        # rollback requires a valid .viberevert.yml (D19 config-required).
+        # Proves the new M D rollback command end-to-end:
+        #   - clean git baseline before session start (no D61 ambiguity)
+        #   - dry-run produces a receipt without mutating
+        #   - apply restores tracked content AND removes session-created files
+        #   - apply writes its own receipt + preserves the dry-run receipt
+        #     byte-identically (D68 path-split)
+        #   - the emergency pre-rollback checkpoint is created and referenced
+        #   - re-applying triggers the D70 already-applied refusal with the
+        #     locked copy AND no new state (no new checkpoint, no apply-
+        #     receipt mutation, no leaked lock)
+
+        Write-Section 'M D 12c: prepare rollback baseline'
+
+        # Commit everything from prior phases so Phase 12c starts from a
+        # clean git baseline. Without this, the dirty state from Phase
+        # 12a/12b (README.md modified, src/config.py untracked, etc.)
+        # would interact with D61's expected-dirt computation in ways
+        # that are hard to reason about within a smoke proof.
+        & git add -A
+        if ($LASTEXITCODE -ne 0) { throw 'git add -A failed before rollback smoke phase' }
+        & git commit --allow-empty -q -m 'smoke rollback baseline'
+        if ($LASTEXITCODE -ne 0) { throw 'git commit failed before rollback smoke phase' }
+
+        $preRollbackStatus = & git status --porcelain
+        if ($preRollbackStatus) {
+            throw "expected clean git status before rollback smoke phase, got:`n$preRollbackStatus"
+        }
+        Write-Host '[ok] rollback smoke phase starts from clean git baseline'
+
+        # Create a TRACKED baseline file. Will be modified during the
+        # session; apply should restore this exact content (the harder
+        # restore semantic — untracked-only deletion is insufficient
+        # coverage).
+        'baseline tracked rollback content' | Out-File -FilePath 'tracked-rollback.txt' -Encoding ascii
+        & git add tracked-rollback.txt
+        if ($LASTEXITCODE -ne 0) { throw 'git add tracked-rollback.txt failed' }
+        & git commit -q -m 'smoke rollback tracked baseline'
+        if ($LASTEXITCODE -ne 0) { throw 'git commit of tracked-rollback.txt failed' }
+
+        $trackedBaselineStatus = & git status --porcelain
+        if ($trackedBaselineStatus) {
+            throw "expected clean git status after tracked rollback baseline commit, got:`n$trackedBaselineStatus"
+        }
+        Write-Host '[ok] tracked rollback baseline committed cleanly'
+
+        Write-Section 'M D 12c: rollback dry-run + apply + idempotency'
+
+        # Start a fresh session against the clean baseline.
+        Invoke-Cli -CliArgs @('start', '--task', 'smoke rollback') -ExpectedExit 0 -StepName 'rollback-start-session'
+
+        # Capture the session id from active-session.json (more robust
+        # than parsing stdout). Verify it has the locked sess_<ULID> shape.
+        $activeSessionPath = '.viberevert/active-session.json'
+        if (-not (Test-Path $activeSessionPath)) {
+            throw 'active-session.json not present after `viberevert start`'
+        }
+        $sessionId = (Get-Content $activeSessionPath -Raw | ConvertFrom-Json).session_id
+        if (-not ($sessionId -match '^sess_[0-9A-HJKMNP-TV-Z]{26}$')) {
+            throw "could not parse sess_<ULID> from active-session.json (got: $sessionId)"
+        }
+        Write-Host "[ok] captured session id: $sessionId"
+
+        # Two changes during the session:
+        #   - Modify the tracked file (apply should restore it to baseline).
+        #   - Create an untracked file (apply should remove it).
+        'session modified tracked rollback content' | Out-File -FilePath 'tracked-rollback.txt' -Encoding ascii
+        'Smoke rollback file - to be removed by --apply.' | Out-File -FilePath 'smoke-rollback.txt' -Encoding ascii
+
+        # End the session. Captures after-status with both changes.
+        Invoke-Cli -CliArgs @('end') -ExpectedExit 0 -StepName 'rollback-end-session'
+
+        # Dry-run rollback. Receipt at the dry-run D68 path; no mutation.
+        Invoke-Cli -CliArgs @('rollback', $sessionId) -ExpectedExit 0 -StepName 'rollback-dry-run'
+
+        # Lock cleanup (D67): rollback should remove its own lock on exit.
+        if (Test-Path '.viberevert/.locks/rollback.lock') {
+            throw 'rollback lock leaked after dry-run'
+        }
+        Write-Host '[ok] rollback lock cleaned up after dry-run'
+
+        $dryRunReceiptPath = ".viberevert/sessions/$sessionId/rollback-dry-run-receipt.json"
+        if (-not (Test-Path $dryRunReceiptPath)) {
+            throw "dry-run receipt missing at $dryRunReceiptPath"
+        }
+        Write-Host "[ok] dry-run receipt persisted at $dryRunReceiptPath"
+
+        # Parse + assert dry-run receipt shape (D69 schema).
+        $dryRunReceipt = Get-Content $dryRunReceiptPath -Raw | ConvertFrom-Json
+        if ($dryRunReceipt.mode -ne 'dry_run') {
+            throw "dry-run receipt mode mismatch: got $($dryRunReceipt.mode)"
+        }
+        if ($null -ne $dryRunReceipt.pre_rollback_checkpoint_id) {
+            throw "dry-run receipt should not have pre_rollback_checkpoint_id (got: $($dryRunReceipt.pre_rollback_checkpoint_id))"
+        }
+        Write-Host '[ok] dry-run receipt shape locked (mode=dry_run, pre_rollback_checkpoint_id=null)'
+
+        # D68 path-split (inverse check): dry-run must NOT have created the
+        # apply receipt path. Defined here once and reused for the later
+        # post-apply existence check.
+        $applyReceiptPath = ".viberevert/sessions/$sessionId/rollback-receipt.json"
+        if (Test-Path $applyReceiptPath) {
+            throw "apply receipt should not exist after dry-run at $applyReceiptPath"
+        }
+        Write-Host '[ok] dry-run did not create apply receipt path (D68)'
+
+        # Dry-run is inspection-only: smoke-rollback.txt must still exist
+        # AND tracked-rollback.txt must still be in its session-modified form.
+        if (-not (Test-Path 'smoke-rollback.txt')) {
+            throw 'smoke-rollback.txt should still exist after dry-run (no mutation)'
+        }
+        $trackedAfterDryRun = Get-Content 'tracked-rollback.txt' -Raw
+        if ($trackedAfterDryRun -notmatch '^session modified tracked rollback content\r?\n?$') {
+            throw "tracked-rollback.txt should remain session-modified after dry-run. Got: $trackedAfterDryRun"
+        }
+        Write-Host '[ok] dry-run did not mutate tracked or untracked working-tree state'
+
+        # Capture dry-run receipt bytes BEFORE apply, so we can later
+        # assert apply preserved them byte-identically (D68 path-split).
+        $dryRunReceiptBytesBeforeApply = Get-Content $dryRunReceiptPath -Raw
+
+        # Apply rollback. Receipt at the apply D68 path; tracked file
+        # restored to baseline; smoke-rollback.txt removed.
+        Invoke-Cli -CliArgs @('rollback', $sessionId, '--apply') -ExpectedExit 0 -StepName 'rollback-apply'
+
+        # Lock cleanup (D67).
+        if (Test-Path '.viberevert/.locks/rollback.lock') {
+            throw 'rollback lock leaked after apply'
+        }
+        Write-Host '[ok] rollback lock cleaned up after apply'
+
+        if (-not (Test-Path $applyReceiptPath)) {
+            throw "apply receipt missing at $applyReceiptPath"
+        }
+        Write-Host "[ok] apply receipt persisted at $applyReceiptPath"
+
+        # Parse + assert apply receipt shape (D69 schema + Lock #16).
+        $applyReceipt = Get-Content $applyReceiptPath -Raw | ConvertFrom-Json
+        if ($applyReceipt.mode -ne 'apply') {
+            throw "apply receipt mode mismatch: got $($applyReceipt.mode)"
+        }
+        if ($applyReceipt.forced -ne $false) {
+            throw "apply receipt should have forced=false for non-force smoke apply, got: $($applyReceipt.forced)"
+        }
+        if ($applyReceipt.failures.Count -ne 0) {
+            throw "apply receipt should have no failures, got: $($applyReceipt.failures | ConvertTo-Json -Depth 10)"
+        }
+        Write-Host '[ok] apply receipt shape locked (mode=apply, forced=false, failures empty)'
+
+        # D68 path-split: dry-run receipt preserved byte-identically across apply.
+        if (-not (Test-Path $dryRunReceiptPath)) {
+            throw "dry-run receipt was removed by apply at $dryRunReceiptPath (D68 path-split violated)"
+        }
+        $dryRunReceiptBytesAfterApply = Get-Content $dryRunReceiptPath -Raw
+        if ($dryRunReceiptBytesAfterApply -ne $dryRunReceiptBytesBeforeApply) {
+            throw 'dry-run receipt changed during apply; D68 byte-preservation violated'
+        }
+        Write-Host '[ok] dry-run receipt preserved byte-identically across apply (D68)'
+
+        # smoke-rollback.txt removed by apply (session-created untracked file).
+        if (Test-Path 'smoke-rollback.txt') {
+            throw 'smoke-rollback.txt should have been removed by apply'
+        }
+        Write-Host '[ok] smoke-rollback.txt removed by apply'
+
+        # tracked-rollback.txt restored to baseline content (the harder
+        # semantic — proves restore actually works on tracked files).
+        $trackedAfterApply = Get-Content 'tracked-rollback.txt' -Raw
+        if ($trackedAfterApply -notmatch '^baseline tracked rollback content\r?\n?$') {
+            throw "tracked-rollback.txt was not restored to baseline after apply. Got: $trackedAfterApply"
+        }
+        Write-Host '[ok] tracked-rollback.txt restored to baseline by apply'
+
+        # Verify pre-rollback emergency checkpoint (D65) exists. The
+        # apply receipt's pre_rollback_checkpoint_id field names it.
+        $preRollbackCpId = $applyReceipt.pre_rollback_checkpoint_id
+        if (-not ($preRollbackCpId -match '^cp_[0-9A-HJKMNP-TV-Z]{26}$')) {
+            throw "apply receipt has invalid pre_rollback_checkpoint_id: $preRollbackCpId"
+        }
+        $emergencyCpDir = ".viberevert/checkpoints/$preRollbackCpId"
+        if (-not (Test-Path $emergencyCpDir)) {
+            throw "pre-rollback emergency checkpoint missing at $emergencyCpDir"
+        }
+        Write-Host "[ok] pre-rollback emergency checkpoint persisted at $emergencyCpDir"
+
+        # Capture state BEFORE re-apply so we can assert D70 refuses
+        # before any mutation (no new checkpoint, no apply-receipt change).
+        $checkpointCountBeforeReapply = @(Get-ChildItem '.viberevert/checkpoints' -Directory -Filter 'cp_*').Count
+        $applyReceiptBytesBeforeReapply = Get-Content $applyReceiptPath -Raw
+
+        # D70 idempotency: re-applying must refuse with exit 1 AND
+        # surface the locked "already been rolled back" copy.
+        Invoke-Cli -CliArgs @('rollback', $sessionId, '--apply') `
+            -ExpectedExit 1 `
+            -StepName 'rollback-reapply-refused' `
+            -ExpectedOutputContains 'already been rolled back'
+
+        # Lock cleanup (D67) on refusal path too.
+        if (Test-Path '.viberevert/.locks/rollback.lock') {
+            throw 'rollback lock leaked after re-apply refusal'
+        }
+        Write-Host '[ok] rollback lock cleaned up after re-apply refusal'
+
+        # D70 must refuse BEFORE any mutation: no new emergency CP
+        # created, apply receipt unchanged byte-for-byte.
+        $checkpointCountAfterReapply = @(Get-ChildItem '.viberevert/checkpoints' -Directory -Filter 'cp_*').Count
+        if ($checkpointCountAfterReapply -ne $checkpointCountBeforeReapply) {
+            throw "re-apply refusal created a new checkpoint (count went from $checkpointCountBeforeReapply to $checkpointCountAfterReapply); D70 should refuse before D65 emergency CP creation"
+        }
+        Write-Host '[ok] re-apply refusal did not create a new emergency checkpoint'
+
+        $applyReceiptBytesAfterReapply = Get-Content $applyReceiptPath -Raw
+        if ($applyReceiptBytesAfterReapply -ne $applyReceiptBytesBeforeReapply) {
+            throw 're-apply refusal changed the apply receipt; D70 pre-mutation guarantee violated'
+        }
+        Write-Host '[ok] re-apply refusal did not mutate the apply receipt'
+
         Write-Section 'M C 12b: missing config (LAST scenario - corrupts state for any later steps)'
         Remove-Item -Force '.viberevert.yml'
         if (Test-Path '.viberevert.yml') {
@@ -365,7 +603,7 @@ APP_API_KEY = "TESTFIXTUREONLY_S9qX8wV7tS6rP5nM4kL3jH2gF1"
     Write-Section 'Summary'
     Write-Host "CLI steps passed: $passCount"
     Write-Host "CLI steps failed: $failCount"
-    Write-Host '[ALL PASS] M B + M C Phase 12a + 12b smoke test green.'
+    Write-Host '[ALL PASS] M B + M C + M D Phase 12a + 12b + 12c smoke test green.'
 
 } catch {
     $aborted = $true

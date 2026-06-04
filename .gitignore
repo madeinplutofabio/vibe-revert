@@ -17,6 +17,10 @@ packages/*/src/**/*.d.ts.map
 # test artifacts
 coverage/
 *.log
+# Test-harness build-coordination lock (tests/fixtures/cli-build.ts);
+# created by parallel vitest workers (mkdir-based exclusive lock),
+# removed by the build-owner worker in `finally`. Stale on crash.
+/.viberevert-test-cli-build.lock
 
 # editors / OS
 .DS_Store

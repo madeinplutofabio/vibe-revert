@@ -1,0 +1,21 @@
+{
+  "files": [
+    {
+      "path": "README.md",
+      "content": "# Test\n\nInitial baseline for the force-apply receipt fixture.\n"
+    }
+  ],
+  "git_init": true,
+  "session": {
+    "task": "M D Step 8 force apply scenario",
+    "untracked_files": [
+      { "path": "session-edit.txt", "content": "Session-created untracked content.\n" }
+    ]
+  },
+  "unrelated_dirt_after_end": [
+    { "path": "unrelated.txt", "content": "Unrelated dirty file accepted by --force.\n" }
+  ],
+  "rollback_invocation": { "mode": "apply", "force": true },
+  "expected_rollback_exit_code": 0,
+  "expected_receipt": true
+}

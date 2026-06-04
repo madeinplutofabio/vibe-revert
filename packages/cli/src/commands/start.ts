@@ -59,12 +59,17 @@
 //    metadata — single timestamp policy per command. Production
 //    behavior is unchanged.
 //
-// 6. **D11 refusal copy is locked verbatim.** When `active-session.json`
-//    already exists, the refusal lists Session / Started at / Task /
-//    Checkpoint with TRUNCATED IDs (matching the plan example), and a
-//    "Use:" footer naming ONLY commands that exist in M B
-//    (`viberevert sessions`, `viberevert end`). MUST NOT include
-//    `viberevert rollback` per D7/D10/D11 — that's M D scope.
+// 6. **D11 refusal copy is locked verbatim (D74 unlock applied in M D).**
+//    When `active-session.json` already exists, the refusal lists
+//    Session / Started at / Task / Checkpoint with TRUNCATED IDs
+//    (matching the plan example), and a "Use:" footer with three
+//    directives: `viberevert sessions`, `viberevert end` (start fresh),
+//    and `viberevert end && viberevert rollback <session>` (discard
+//    this session's changes). The compound `end && rollback` is
+//    intentional, not decorative: D63 requires ending before
+//    rolling back, so a bare `viberevert rollback <session>` on the
+//    active session would refuse — the compound is the only safe
+//    "discard this session's changes" path.
 //
 // 7. **D13/D17c cleanup on failure.** If anything between mkdir(tmp)
 //    and core.startSession's rename throws, we attempt `rm -rf` on the

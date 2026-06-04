@@ -22,7 +22,8 @@
       "!!**/coverage",
       "!!LICENSE",
       "!!NOTICE",
-      "!!tests/fixtures/**/expected"
+      "!!tests/fixtures/**/expected",
+      "!!tests/fixtures-rollback/**/expected"
     ]
   },
   "formatter": {

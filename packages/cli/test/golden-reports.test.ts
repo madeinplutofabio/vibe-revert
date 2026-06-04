@@ -2,169 +2,92 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Fabio Marcello Salvadori
 //
-// Verify-mode driver for the golden-fixture harness. Iterates every
-// scenario dir under `tests/fixtures/` and calls
+// Verify-mode driver for the M C golden-fixture harness. Iterates
+// every scenario dir under `tests/fixtures/` and calls
 // `runFixture({ mode: "verify" })`, which compares the harness's
 // actual output to each fixture's `expected/{report.json,
 // report.terminal.txt, report.markdown.md}` byte-for-byte.
 //
+// Parallel to `golden-receipts.test.ts` (M D). Both files share the
+// build-driving machinery (`ensureCliBuilt`, `CLI_BIN_ABS_PATH`,
+// `BEFORE_ALL_TIMEOUT_MS`) via the M D Step 8-extracted
+// `tests/fixtures/cli-build.ts` module — see its file header for
+// the full locked rationale on auto-build coordination, the
+// mkdir-based build lock that serializes concurrent vitest
+// workers, the Windows `cmd.exe /d /s /c pnpm.cmd ...` workaround,
+// and the timeout budget formula.
+//
 // =============================================================================
-// Locks (per Step 10.1 design)
+// Locks (per Step 10.1 design; extended by M D Step 8 to share
+//        build-driving with golden-receipts.test.ts)
 // =============================================================================
 //
-// 1. **Auto-build-if-missing in beforeAll.** This is the asymmetric
-//    counterpart to `scripts/regen-goldens.ts`'s fail-fast on missing
-//    dist. The full 4-gate order is `typecheck && lint && test && build`
-//    — `test` runs BEFORE `build`, so on a clean CI checkout the CLI's
-//    `dist/index.js` does NOT exist when this test file loads. A
-//    fail-fast there would make valid CI red even though the repo is
-//    fine; an auto-build in `beforeAll` honors the gate order without
-//    reshuffling it. The build is idempotent and safe to invoke when
-//    already built. This file owns the missing-dist precondition
-//    without reshuffling the gate order.
+// 1. **Build-driving delegated to `tests/fixtures/cli-build.ts`.**
+//    M D Step 8 introduces a SECOND golden-fixture test file
+//    (golden-receipts.test.ts). Without coordination, parallel
+//    vitest workers would both spawn `pnpm --filter viberevert...
+//    build` on clean CI and race for the same outputs. The shared
+//    cli-build.ts module solves this via an mkdir-based exclusive
+//    build lock with retry-on-crashed-owner semantics, a pre-build
+//    budget guard, ENOENT-only errno discipline, and the inherited
+//    Windows `cmd.exe /d /s /c pnpm.cmd ...` build invocation.
+//    This file's beforeAll just calls the imported
+//    `ensureCliBuilt()` and trusts the shared module's locks. See
+//    `tests/fixtures/cli-build.ts`'s 9-lock header for the detailed
+//    concurrency contract.
 //
-//    Timeout budgeting: the `beforeAll` hook timeout is set LARGER
-//    than the inner subprocess timeout (BUILD_TIMEOUT_MS + 30s)
-//    deliberately. Without the buffer, a build that approaches its
-//    own 120s ceiling can race with vitest's hook timer — vitest
-//    might fire first, reporting "hook timed out" and discarding
-//    the wrapped stdout/stderr enrichment from `ensureCliBuilt`'s
-//    catch block. The 30s buffer guarantees the inner timeout
-//    always fires first, so the catch block always gets to surface
-//    the build output.
+//    Pre-M D this file had its own local `ensureCliBuilt` + ~7
+//    locks covering the build-driving machinery. M D Step 8
+//    extracted that into the shared module so both consumers use
+//    the same single source of truth. The historical Step 11
+//    Windows `pnpm.cmd` bug is now documented in
+//    cli-build.ts's lock #6.
 //
-// 2. **Build-if-missing, not build-if-stale.** We check for dist
-//    existence but do NOT compare source mtimes. Developers running
-//    `pnpm test` repeatedly after source edits would test against the
-//    stale binary; the documented workflow is `pnpm build && pnpm
-//    test` (or the full gate cycle). For CI this is moot — clean
-//    checkout always triggers the build branch.
-//
-// 3. **Dependency-closed build filter.** The build invocation uses
-//    `--filter viberevert...` (trailing `...`) which builds the CLI
-//    AND all its workspace dependencies in topological order, not
-//    just the CLI package alone. On clean CI, `packages/git/dist/`,
-//    `packages/core/dist/`, etc. are also missing — a CLI-only
-//    `--filter viberevert` (without the `...`) would fail to resolve
-//    workspace deps at link time OR produce a binary that crashes
-//    at runtime trying to import missing dist.
-//
-// 4. **Top-level fixture discovery.** Uses ESM top-level await to
+// 2. **Top-level fixture discovery.** Uses ESM top-level await to
 //    discover scenarios at module load, then registers one `it()`
 //    per fixture via a for-loop. Per-iteration `const` bindings
 //    capture `fixtureDir` + `name` correctly into each closure.
 //
-// 5. **Empty-discovery fallback.** If zero scenarios are found,
+// 3. **Empty-discovery fallback.** If zero scenarios are found,
 //    register a single failing `it()` so vitest reports a clear
 //    error rather than the silent "no tests" warning that would
 //    otherwise surface.
 //
-// 6. **`lstat` for shape checks.** Mirrors the regen-goldens.ts and
+// 4. **`lstat` for shape checks.** Mirrors the regen-goldens.ts and
 //    codebase-wide convention — symlink-strict probes for file/dir
-//    type so symlinked-CLI-binary or symlinked-fixture-dir
-//    pathologies don't slip through.
-//
-// 7. **Platform-conditional pnpm build invocation via explicit
-//    cmd.exe on Windows.** On Windows, `pnpm` ships as `pnpm.cmd`
-//    (a batch wrapper). Node's child_process has TWO failure modes
-//    against batch files that the Step 10.1 design did not catch:
-//      - `execFile("pnpm", ...)` ENOENTs because Node does not
-//        auto-resolve the `.cmd` extension.
-//      - `execFile("pnpm.cmd", ...)` (Step 10.1's original choice)
-//        fails with `spawn EINVAL` because Node's spawn syscall
-//        cannot directly invoke `.cmd`/`.bat` files on Windows —
-//        the OS requires a command interpreter to parse batch
-//        syntax. The Step 10.1 lock claimed `pnpm.cmd` "avoids
-//        shell true without inviting escaping hazards"; that
-//        claim is now known false on this code path.
-//
-//    The fix is to invoke `cmd.exe /d /s /c pnpm.cmd ...`
-//    explicitly:
-//      - `/d` disables AutoRun registry commands (no surprise
-//        side effects from user-local registry tweaks).
-//      - `/s` modifies string handling after /c (more predictable
-//        quoting behavior).
-//      - `/c` execute the command and terminate.
-//    This is the same internal pattern Node uses when
-//    `{ shell: true }` is set on Windows, but invoked explicitly
-//    so the spawn options stay focused (no broad `shell: true`
-//    toggle, which would also alter argument escaping for the
-//    rest of the call). POSIX behavior is unchanged — Linux/macOS
-//    still invokes `pnpm` directly.
-//
-//    The bug was masked until Step 11's clean-state verification
-//    deleted `dist/` and forced the auto-build path to run for the
-//    first time on Windows.
+//    type so symlinked-fixture-dir pathologies don't slip through.
 
-import { execFile } from "node:child_process";
 import { lstat, readdir } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
 
 import { beforeAll, describe, expect, it } from "vitest";
 
+import {
+  BEFORE_ALL_TIMEOUT_MS,
+  CLI_BIN_ABS_PATH,
+  ensureCliBuilt,
+} from "../../../tests/fixtures/cli-build.js";
 import { runFixture } from "../../../tests/fixtures/harness.js";
 
-const execFileAsync = promisify(execFile);
-
 // =============================================================================
-// Path resolution + locked timing/binary constants
+// Path resolution + per-file constants
 // =============================================================================
 
 const THIS_FILE = fileURLToPath(import.meta.url);
 // packages/cli/test/golden-reports.test.ts → up 3 → repo root.
 const REPO_ROOT = resolve(dirname(THIS_FILE), "..", "..", "..");
 const FIXTURES_DIR = join(REPO_ROOT, "tests", "fixtures");
-const CLI_BIN_ABS_PATH = join(REPO_ROOT, "packages", "cli", "dist", "index.js");
 
 /**
- * Platform-conditional build invocation. See lock #7 for the full
- * rationale on why Windows needs explicit `cmd.exe /d /s /c pnpm.cmd
- * ...` rather than `execFile("pnpm.cmd", ...)` directly. POSIX
- * platforms invoke `pnpm` directly because `pnpm` is a real script
- * (or symlink to one) that Node's spawn handles correctly.
- */
-const PNPM_BUILD_COMMAND = process.platform === "win32" ? "cmd.exe" : "pnpm";
-
-const PNPM_BUILD_ARGS =
-  process.platform === "win32"
-    ? ["/d", "/s", "/c", "pnpm.cmd", "--filter", "viberevert...", "build"]
-    : ["--filter", "viberevert...", "build"];
-
-/**
- * Build-step subprocess timeout passed to `execFile`. CLI's tsc +
- * finalize-bin runs in ~5-10s on typical hardware; 2-min ceiling
- * accommodates slow CI runners AND the dependency-closed build
- * (which builds session-format, git, core, checks, reporters, and
- * cli in topological order).
- */
-const BUILD_TIMEOUT_MS = 120_000;
-
-/**
- * Vitest `beforeAll` hook timeout. Deliberately LARGER than
- * BUILD_TIMEOUT_MS by 30s so the inner subprocess timeout always
- * fires first — without the buffer, vitest's hook timer can race
- * the subprocess timer and report "hook timed out" before the
- * catch block in `ensureCliBuilt` gets to surface the build's
- * stdout/stderr. See lock #1's timeout-budgeting paragraph.
- */
-const BEFORE_ALL_TIMEOUT_MS = BUILD_TIMEOUT_MS + 30_000;
-
-/**
- * Per-fixture verify timeout. Each fixture runs 5 subprocess
+ * Per-fixture verify timeout. Each report fixture runs 5 subprocess
  * invocations (init + checkpoint + check + report + report --markdown)
  * + several git operations. Real measured time is ~5-10s; 60s
- * ceiling is generous headroom.
+ * ceiling is generous headroom. Parallel to
+ * golden-receipts.test.ts's 90s timeout — receipt fixtures are
+ * heavier (3x setups per scenario), reports are lighter.
  */
 const FIXTURE_TIMEOUT_MS = 60_000;
-
-/**
- * Subprocess buffer cap matching the harness's own EXEC_MAX_BUFFER_BYTES.
- * The build itself can produce substantial stdout (per-package tsc
- * compilation messages), so default 1MB is too tight under -r mode.
- */
-const EXEC_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
 
 // =============================================================================
 // Fixture discovery (mirrors scripts/regen-goldens.ts's logic)
@@ -207,79 +130,6 @@ async function discoverFixtures(): Promise<readonly string[]> {
   }
   scenarioDirs.sort();
   return scenarioDirs;
-}
-
-/**
- * Ensure `packages/cli/dist/index.js` exists as a real file. If
- * missing OR wrong shape, shell out to
- * `pnpm --filter viberevert... build` (dependency-closed) from the
- * repo root. Verifies the build actually produced the expected file
- * before returning.
- *
- * Asymmetric to regen-goldens.ts (which fail-fasts) — see lock #1
- * for rationale. Uses the dependency-closed filter per lock #3 so
- * all transitive workspace builds run too.
- *
- * Failure wrapping: execFile's default rejection message is
- * unhelpful for a multi-package build. The catch surfaces both
- * stdout AND stderr in the thrown Error so a CI build failure says
- * exactly what tsc complained about.
- */
-async function ensureCliBuilt(): Promise<void> {
-  let needBuild = false;
-  try {
-    const st = await lstat(CLI_BIN_ABS_PATH);
-    if (!st.isFile()) needBuild = true;
-  } catch {
-    needBuild = true;
-  }
-  if (needBuild) {
-    try {
-      await execFileAsync(PNPM_BUILD_COMMAND, PNPM_BUILD_ARGS, {
-        cwd: REPO_ROOT,
-        windowsHide: true,
-        timeout: BUILD_TIMEOUT_MS,
-        maxBuffer: EXEC_MAX_BUFFER_BYTES,
-      });
-    } catch (err) {
-      const e = err as NodeJS.ErrnoException & {
-        stdout?: string;
-        stderr?: string;
-        message?: string;
-      };
-      throw new Error(
-        `Failed to auto-build CLI for golden fixture tests.\n` +
-          `Command: ${PNPM_BUILD_COMMAND} ${PNPM_BUILD_ARGS.join(" ")}\n` +
-          `stdout:\n${String(e.stdout ?? "")}\n` +
-          `stderr:\n${String(e.stderr ?? e.message ?? "")}`,
-      );
-    }
-  }
-  // Post-build sanity. Covers BOTH failure modes with the same
-  // precise message:
-  //   - lstat throws ENOENT (build exited 0 but produced no file
-  //     at the expected path — tsconfig misemit, wrong outDir, etc.)
-  //   - lstat succeeds but isFile() is false (path exists as dir,
-  //     symlink, FIFO, etc. — wrong shape)
-  // Without the try/catch around lstat, the ENOENT case would leak
-  // a raw Node-formatted error and contradict the comment above.
-  try {
-    const st = await lstat(CLI_BIN_ABS_PATH);
-    if (!st.isFile()) {
-      throw new Error(
-        `CLI build did not produce a regular file at ${CLI_BIN_ABS_PATH}. ` +
-          `Check the build output for errors.`,
-      );
-    }
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-      throw new Error(
-        `CLI build did not produce a regular file at ${CLI_BIN_ABS_PATH}. ` +
-          `Check the build output for errors.`,
-      );
-    }
-    throw err;
-  }
 }
 
 // =============================================================================
