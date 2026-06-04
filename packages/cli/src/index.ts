@@ -11,6 +11,7 @@ import { DoctorCommand } from "./commands/doctor.js";
 import { EndCommand } from "./commands/end.js";
 import { InitCommand } from "./commands/init.js";
 import { ReportCommand } from "./commands/report.js";
+import { RollbackCommand } from "./commands/rollback.js";
 import { SessionsCommand } from "./commands/sessions.js";
 import { StartCommand } from "./commands/start.js";
 import { VersionCommand } from "./commands/version.js";
@@ -32,5 +33,6 @@ cli.register(CheckpointCommand);
 cli.register(StartCommand);
 cli.register(CheckCommand);
 cli.register(ReportCommand);
+cli.register(RollbackCommand);
 
 await cli.runExit(process.argv.slice(2));

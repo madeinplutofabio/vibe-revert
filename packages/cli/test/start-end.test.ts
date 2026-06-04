@@ -487,11 +487,20 @@ describe("start command", () => {
     // Full IDs MUST NOT leak (truncation contract)
     expect(result.stderr).not.toContain(SESSION_ID);
     expect(result.stderr).not.toContain(CHECKPOINT_ID);
-    // "Use:" footer with M B-only commands
+    // "Use:" footer per D74 unlock (M D Step 7): names the M B
+    // state-machine exit (viberevert end) AND the M D discard
+    // sequence (viberevert end && viberevert rollback <session>).
     expect(result.stderr).toContain("viberevert sessions");
     expect(result.stderr).toContain("viberevert end");
-    // M D commands MUST NOT be named (D7/D10/D11)
-    expect(result.stderr).not.toContain("viberevert rollback");
+    // D74-unlocked: M D rollback IS named (previously D11 forbade
+    // it). The `end && rollback` compound is explicitly locked to
+    // honor D63's state-machine invariant — a session must be
+    // ended before rollback, so a bare `viberevert rollback
+    // <sess>` would refuse on the active session. The
+    // `viberevert end &&` assertion locks the SEQUENCING wording,
+    // not just rollback's presence.
+    expect(result.stderr).toContain("viberevert rollback");
+    expect(result.stderr).toContain("viberevert end &&");
 
     // CRITICAL ASSERTION (architectural lock #4 in start.ts): the
     // pre-check happens BEFORE any expensive work. After refusal,

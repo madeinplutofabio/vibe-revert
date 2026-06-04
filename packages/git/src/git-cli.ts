@@ -266,6 +266,23 @@ export async function runGitText(
 }
 
 /**
+ * Decode an array of child-process output chunks to a single string,
+ * tolerating either Buffer chunks (default Node stream mode) or string
+ * chunks (when an upstream consumer set `setEncoding("utf8")` on the
+ * stream). Using `Buffer.concat` directly on a mixed array throws
+ * `ERR_INVALID_ARG_TYPE` when any chunk is a string, surfacing as a
+ * confusing crash in error-handling paths (e.g., when git apply itself
+ * fails and the CLI is trying to construct the rejection message).
+ * This helper handles both shapes uniformly so the bug cannot re-occur
+ * if a future refactor toggles stream encoding.
+ */
+function decodeOutputChunks(chunks: readonly (Buffer | string)[]): string {
+  return chunks
+    .map((chunk) => (typeof chunk === "string" ? chunk : chunk.toString("utf8")))
+    .join("");
+}
+
+/**
  * Run `git <args...>` in `repoRoot` with `stdinData` piped to git's stdin.
  * Captures stderr and includes it in the thrown Error on non-zero exit, so
  * failed invocations produce diagnosable messages.
@@ -296,8 +313,8 @@ async function runGitWithStdin(
     if (child.stdin === null) {
       throw new Error(`git ${args.join(" ")}: stdin unavailable`);
     }
-    const stderrChunks: Buffer[] = [];
-    child.stderr?.on("data", (chunk: Buffer) => {
+    const stderrChunks: (Buffer | string)[] = [];
+    child.stderr?.on("data", (chunk: Buffer | string) => {
       stderrChunks.push(chunk);
     });
     child.stdin.end(stdinData);
@@ -313,7 +330,7 @@ async function runGitWithStdin(
         if (code === 0) {
           resolve();
         } else {
-          const stderrText = Buffer.concat(stderrChunks).toString("utf8").trim();
+          const stderrText = decodeOutputChunks(stderrChunks).trim();
           const base = `git ${args.join(" ")} exited with code ${code}${signal ? ` (signal ${signal})` : ""}`;
           reject(new Error(stderrText.length > 0 ? `${base}: ${stderrText}` : base));
         }

@@ -314,9 +314,15 @@ export class StartCommand extends Command {
       result = await withExclusiveLock(lockDir, lockInfo, protectedFlow);
     } catch (err) {
       if (err instanceof SessionAlreadyActiveError) {
-        // D11 locked refusal copy. Truncated IDs match the plan's
-        // example. "Use:" footer names ONLY M B commands — MUST NOT
-        // include `viberevert rollback` (deferred to M D per D7/D10).
+        // D74-unlocked refusal copy (M D Step 7; previously D11
+        // said "MUST NOT include viberevert rollback"). Truncated
+        // IDs match the plan's example. The "Use:" footer's
+        // `end && rollback` compound is intentional, not decorative:
+        // D63's state-machine invariant requires ending a session
+        // before rolling it back, so a bare `viberevert rollback
+        // <session>` on the active session would refuse — the
+        // && compound is the only safe "discard this session's
+        // changes" path.
         const lock = err.active;
         this.context.stderr.write("A session is already active in this repo.\n\n");
         this.context.stderr.write(`Session:     ${truncateIdForDisplay(lock.session_id)}\n`);
@@ -327,7 +333,12 @@ export class StartCommand extends Command {
         this.context.stderr.write(`Checkpoint:  ${truncateIdForDisplay(lock.checkpoint_id)}\n`);
         this.context.stderr.write("\nUse:\n");
         this.context.stderr.write("  viberevert sessions\n");
-        this.context.stderr.write("  viberevert end\n");
+        this.context.stderr.write(
+          "  viberevert end                                     (then start fresh)\n",
+        );
+        this.context.stderr.write(
+          "  viberevert end && viberevert rollback <session>    (then discard that session's changes)\n",
+        );
         return 1;
       }
       if (err instanceof ConcurrentOperationError) {
