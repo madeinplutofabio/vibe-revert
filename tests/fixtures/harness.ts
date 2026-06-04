@@ -41,7 +41,7 @@
 //   - GIT_AUTHOR_EMAIL / GIT_COMMITTER_EMAIL → "test@example.com"
 
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
@@ -1031,6 +1031,15 @@ async function runRefusalReceiptScenario(args: {
   const repoRoot = join(tmpParent, "repo");
   try {
     await mkdir(repoRoot, { recursive: true });
+
+    // Pre-check: assert the fixture's own expected/ directory does
+    // not exist on disk before the scenario runs. Catches a stale
+    // dir committed by a prior contributor (e.g., regen ran against
+    // a misclassified setup.json before the misclassification was
+    // corrected). Paired with an after-check below for defense in
+    // depth.
+    await assertRefusalFixtureHasNoExpectedDir(args.opts.fixtureDir);
+
     const sessionId = await setupSessionAndEnd({
       opts: args.opts,
       setup: args.setup,
@@ -1087,6 +1096,12 @@ async function runRefusalReceiptScenario(args: {
         `Refusal scenario should produce NO apply receipt, but found one at ${applyPath}`,
       );
     }
+
+    // Post-check: re-assert the fixture's own expected/ directory
+    // does not exist. Defensive against a future harness regression
+    // that might accidentally write into the fixture directory
+    // during the scenario.
+    await assertRefusalFixtureHasNoExpectedDir(args.opts.fixtureDir);
   } finally {
     await rm(tmpParent, { recursive: true, force: true });
   }
@@ -1345,6 +1360,44 @@ async function pathExists(absPath: string): Promise<boolean> {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
     throw err;
   }
+}
+
+/**
+ * Assert that a refusal-class receipt fixture does NOT have an
+ * `expected/` directory on disk. Refusal scenarios (per design lock
+ * #8 in this file's header and the rollback-fixtures README) produce
+ * NO golden artifacts; an `expected/` directory under a refusal
+ * fixture indicates either (a) the fixture was misclassified and
+ * `pnpm regen-goldens` ran against it before the misclassification
+ * was corrected, or (b) the fixture was repurposed from
+ * receipt-producing to refusal without removing the now-stale
+ * expected/ tree. Either way, the stale dir would sit in git as
+ * never-verified noise.
+ *
+ * Called BOTH before and after the refusal scenario runs — the
+ * before-call catches a stale dir committed by a prior contributor;
+ * the after-call catches a stale dir somehow created during the
+ * scenario (defensive belt-and-suspenders against a future harness
+ * regression that might accidentally write into the fixture
+ * directory).
+ *
+ * Uses `lstat` (not `pathExists`) because the target is a directory
+ * and `pathExists` is file-oriented (implemented via `readFile`).
+ * Throws on any non-ENOENT error so I/O failures don't silently
+ * pass the check.
+ */
+async function assertRefusalFixtureHasNoExpectedDir(fixtureDir: string): Promise<void> {
+  const fixtureExpectedDir = join(fixtureDir, "expected");
+  try {
+    await lstat(fixtureExpectedDir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw err;
+  }
+  throw new Error(
+    `Refusal-scenario fixture should not have an expected/ directory, but ${fixtureExpectedDir} exists. ` +
+      `Remove it if the fixture was misclassified or repurposed.`,
+  );
 }
 
 // =============================================================================
