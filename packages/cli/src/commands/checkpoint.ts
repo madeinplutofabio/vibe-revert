@@ -83,15 +83,11 @@ import {
   RepoRootNotFoundError,
   resolveRepoRoot,
 } from "@viberevert/core";
-import {
-  CheckpointCorruptError,
-  CheckpointNotFoundError,
-  createCheckpoint,
-  listCheckpoints,
-} from "@viberevert/git";
+import { createCheckpoint } from "@viberevert/git";
 import { Command, Option } from "clipanion";
 
 import { renameDirAtomic } from "../atomic.js";
+import { CollisionExitSentinel, safeListCheckpoints } from "../checkpoint-helpers.js";
 import { ConcurrentOperationError, type LockInfo, withExclusiveLock } from "../locks.js";
 import { RuntimeEnvInvalidError, resolveNowForCliTimestamp } from "../runtime-env.js";
 
@@ -295,46 +291,5 @@ export class CheckpointCommand extends Command {
       this.context.stdout.write(`Name: ${this.name}\n`);
     }
     return 0;
-  }
-}
-
-/**
- * Internal sentinel used to break out of the (possibly locked)
- * `protectedFlow` after a collision-class refusal. The catch block
- * in `execute()` recognizes it and returns exit 1 cleanly — without
- * confusing the message-write logic with a separate "did we already
- * write the refusal?" flag. NOT exported; not a public API.
- */
-class CollisionExitSentinel extends Error {
-  constructor() {
-    super("collision exit (internal sentinel)");
-    this.name = "CollisionExitSentinel";
-  }
-}
-
-/**
- * Wrap `git.listCheckpoints` with the same clean-stderr error
- * handling as the `viberevert checkpoints` command. Returns the
- * array on success, OR `null` if a corruption/not-found error was
- * surfaced (the caller should treat this as a refusal that has
- * already been printed and exit 1).
- *
- * Distinguishing "no checkpoints exist" (returns `[]`) from "could
- * not read checkpoints" (returns `null` after writing stderr) is
- * essential for the collision-scan flow: an empty repo should
- * proceed to creation; a corrupt repo should refuse cleanly.
- */
-async function safeListCheckpoints(
-  repoRoot: string,
-  cmd: { context: { stderr: { write(s: string): unknown } } },
-): Promise<readonly { name: string | null }[] | null> {
-  try {
-    return await listCheckpoints(repoRoot);
-  } catch (err) {
-    if (err instanceof CheckpointCorruptError || err instanceof CheckpointNotFoundError) {
-      cmd.context.stderr.write(`Error reading existing checkpoints: ${err.message}\n`);
-      return null;
-    }
-    throw err;
   }
 }

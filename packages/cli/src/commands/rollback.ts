@@ -139,20 +139,15 @@
 //     to `.toContain`. Those changes land in the SAME commit
 //     as this file.
 //
-// 15. **Bounded duplication of safeListCheckpoints and
-//     CollisionExitSentinel from checkpoint.ts.** Both helpers
-//     are duplicated file-locally rather than extracted to a
-//     shared module — extracting would widen Step 7's scope.
-//     The duplicates are behavior-conservative with their
-//     checkpoint.ts originals (semantics preserved; the
-//     safeListCheckpoints return type intentionally derives from
-//     `Awaited<ReturnType<typeof listCheckpoints>>` rather than
-//     copying the hand-rolled type literally, and the filter uses
-//     `!= null` for defense — both small improvements over the
-//     original's shape, so byte-equality is NOT claimed); covered
-//     by rollback's own emergency-checkpoint test coverage;
-//     tracked for post-Step-9 extraction via a spawn_task
-//     follow-up.
+// 15. **Shared CLI-local helper extracted after Step 9.**
+//     `safeListCheckpoints` and `CollisionExitSentinel` live in
+//     `packages/cli/src/checkpoint-helpers.ts`, imported here AND
+//     by `commands/checkpoint.ts`. The module stays in
+//     `packages/cli/src/` — NOT in `@viberevert/core`, `/git`, or
+//     `/session-format` — because both helpers are command UX
+//     plumbing (clean-stderr handling for the corruption-error
+//     classes, plus the typed sentinel for exit-1-cleanly). The
+//     module is CLI-internal (no barrel re-export).
 //
 // 16. **Apply receipt = apply ATTEMPT, not successful mutation.**
 //     The apply receipt is written for EVERY --apply invocation
@@ -230,14 +225,11 @@ import {
   SessionNotFoundError,
 } from "@viberevert/core";
 import {
-  CheckpointCorruptError,
-  CheckpointNotFoundError,
   createCheckpoint,
   type EndOfSessionSnapshot,
   GitNotAvailableError,
   getHeadSha,
   getStatusPorcelainZ,
-  listCheckpoints,
   loadEndOfSessionChangedPaths,
   planRestoreCheckpoint,
   type RestorePlan,
@@ -252,6 +244,7 @@ import {
 import { Command, Option } from "clipanion";
 
 import { renameDirAtomic, writeFileAtomic } from "../atomic.js";
+import { CollisionExitSentinel, safeListCheckpoints } from "../checkpoint-helpers.js";
 import { ConcurrentOperationError, type LockInfo, withExclusiveLock } from "../locks.js";
 import {
   buildReceiptForApply,
@@ -405,24 +398,6 @@ class RollbackEmergencyCheckpointError extends Error {
   }
 }
 
-/**
- * Internal sentinel used to break out of the inner-locked
- * collision-scan flow after a `safeListCheckpoints` corruption
- * (CheckpointCorruptError / CheckpointNotFoundError) was already
- * surfaced to stderr. Recognized in `handleKnownError` and
- * exits 1 cleanly. NOT exported.
- *
- * Behavior-conservative duplicate of the same class in
- * checkpoint.ts per lock #15 — follow-up task tracks the
- * extraction.
- */
-class CollisionExitSentinel extends Error {
-  constructor() {
-    super("collision exit (internal sentinel)");
-    this.name = "CollisionExitSentinel";
-  }
-}
-
 // =============================================================================
 // D68 receipt path helpers (lock #4 — no inline path joins)
 // =============================================================================
@@ -558,44 +533,6 @@ async function loadExistingApplyReceipt(
     );
   }
   return parsed as ExistingApplyReceipt;
-}
-
-/**
- * Element type of the `listCheckpoints` result, derived from
- * the function's own return type so future shape changes either
- * compile-fail loudly OR stay aligned without manual updates here.
- */
-type CheckpointSummary = Awaited<ReturnType<typeof listCheckpoints>>[number];
-
-/**
- * Wrap `listCheckpoints` with clean-stderr handling for
- * corruption / not-found error classes. Returns the array on
- * success OR `null` if a corruption-class error was surfaced
- * (caller exits 1 via `CollisionExitSentinel`). Distinguishing
- * "no checkpoints" (returns `[]`) from "could not read
- * checkpoints" (returns `null` after stderr write) is essential
- * for the collision-scan flow: empty repo proceeds; corrupt
- * repo refuses.
- *
- * Behavior-conservative duplicate of `safeListCheckpoints` in
- * checkpoint.ts per lock #15 — semantics preserved; return type
- * derives from `listCheckpoints` and the filter uses `!= null`
- * defensively (both small improvements over the original's
- * hand-rolled shape). Follow-up task tracks the extraction.
- */
-async function safeListCheckpoints(
-  repoRoot: string,
-  cmd: { context: { stderr: { write(s: string): unknown } } },
-): Promise<readonly CheckpointSummary[] | null> {
-  try {
-    return await listCheckpoints(repoRoot);
-  } catch (err) {
-    if (err instanceof CheckpointCorruptError || err instanceof CheckpointNotFoundError) {
-      cmd.context.stderr.write(`Error reading existing checkpoints: ${err.message}\n`);
-      return null;
-    }
-    throw err;
-  }
 }
 
 /**
