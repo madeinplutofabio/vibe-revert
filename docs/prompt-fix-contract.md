@@ -69,7 +69,7 @@ The template is sectioned, with sections separated by exactly one blank line, in
 
 1. **Preamble** — three fixed paragraphs (role framing, prompt-injection guard, scope-discipline constraint). Template-owned, ASCII-only, never templated by report contents.
 2. **Source attribution** — `Source report: <report_id> (<since_kind>: <since_ref>)`.
-3. **Task context** — `Task: <task>` line. Rendered ONLY if the current ReportFile schema carries task metadata; in v0.7.0 the schema does not, so this section is omitted. (Forward-compatible: if a future ReportFileSchema adds task, the renderer auto-picks it up. prompt-fix does NOT load session.json to discover the task — that would create a second I/O dependency and a new failure mode.)
+3. **Task context** — `Task: <task>` line. Rendered when the loaded ReportFile carries a non-empty `task` value. In v0.7.0, `SessionReportSchema` already carries `task` as an optional field; prompt-fix does NOT load session.json to discover or repair missing task context.
 4. **Repo context** — Frameworks (deduplicated + sorted), Resolved SHA, Risk level, Summary.
 5. **Findings** — sorted critical > high > medium > low (ties broken by `id` ASC), truncated to **at most 20** findings, with a locked omitted-count line when truncation fires.
 6. **Suggested next steps** — locked verbatim, with two variants based on source kind (session-bound mentions `viberevert rollback <sess>`; ad-hoc directs to git/checkpoint recovery since rollback is session-scoped).
