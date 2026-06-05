@@ -126,18 +126,31 @@ The `### ` header contains ONLY two interpolated values: `<LEVEL>` (enum-validat
 
 **Every other dynamic field — category, id, title, message, evidence, recommendation — renders in BLOCK FORM**: section label on its own line, content indented two spaces. This is deliberate: the current `CheckResultSchema` defines `id` and `category` as non-blank strings WITHOUT safe-token regex constraints, so the renderer assumes the worst case (a potentially header-breaking value) and keeps both out of `### ` headers by default. Title block form is for the same reason — title is repository-controlled data.
 
+The `File: <evidence[0].file>:<evidence[0].line>` quick-anchor line renders ONLY when BOTH `evidence[0].file` AND `evidence[0].line` are present. In `EvidenceSchema` both are optional fields, so the line is omitted when either is absent (the full evidence content is still rendered in the `Evidence:` block below). When the schema's refine `(e.line === undefined || typeof e.file === "string")` holds, this collapses to: "render `File:` iff `evidence[0].line` is defined" — but the renderer code guards on both fields independently for defensive clarity.
+
 ### Evidence-entry rendering
 
-Each evidence entry renders ONLY known ReportFile evidence fields, in this fixed order **when present**:
+Per the actual `EvidenceSchema` in `@viberevert/session-format` (`schemas.ts`), every evidence entry has these four fields:
 
-1. `file`
-2. `line`
-3. `snippet`
-4. `detail`
-5. `message`
-6. `code`
+| Field | Constraint | Render |
+|---|---|---|
+| `detail` | **REQUIRED** (non-blank string) | ALWAYS rendered (`detail:` labeled line) |
+| `file` | optional (safe stored relative path) | Rendered only when present |
+| `line` | optional (positive integer; requires `file` to be present per schema refine) | Rendered only when present |
+| `command` | optional (non-blank string) | Rendered only when present |
 
-Missing fields are silently OMITTED — no empty `snippet:` placeholders. **Unknown future fields are NOT rendered** until they're explicitly added to this contract (a future ReportFileSchema extension that adds `evidence[].context` or similar does NOT automatically appear in the prompt). **Object/JSON stringification is FORBIDDEN** in the prompt renderer.
+The renderer emits each entry as a sub-block with the present fields in this fixed order:
+
+1. `file:` (when present)
+2. `line:` (when present; schema guarantees `file` is also present whenever `line` is)
+3. `detail:` (always)
+4. `command:` (when present)
+
+Each labeled line is block-form (label on its own line, content indented two spaces, normalized per D85.7). Missing optional fields are silently OMITTED — no empty `file:` placeholders. Entries within the `Evidence:` block are separated by one blank line.
+
+The `EvidenceSchema` constrains `evidence` to `min(1)`, so every CheckResult has at least one evidence entry; the renderer never needs to handle "no evidence at all" as a special case.
+
+**Unknown future fields are NOT rendered automatically.** If a later session-format revision adds `evidence[].context` or `evidence[].snippet` or any other new field, the renderer continues to emit only the four fields above until this contract is explicitly extended. **Object/JSON stringification is FORBIDDEN** in the prompt renderer — every rendered value is a known scalar field of evidence or omitted.
 
 ### Recommendation fallback semantics
 
