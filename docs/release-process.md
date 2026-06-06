@@ -146,6 +146,43 @@ This affects any .NET-via-PowerShell file write that Node will later parse as JS
 
 PowerShell 7+ (`pwsh`) defaults `-Encoding utf8` to no-BOM, so this gotcha is specific to PowerShell 5.1. The smoke-test helper script targets PowerShell 5.1 because it is the system PowerShell on Windows 10 and Windows 11 without an explicit `pwsh` install.
 
+### 3. PowerShell 5.1 ASCII-only discipline for .ps1 scripts
+
+**Problem.** PowerShell 5.1 reads `.ps1` script files via the active Windows code page (commonly Windows-1252 on US/EU systems) when the file has no BOM. UTF-8 multi-byte characters in source then garble at parse time. An em-dash (`—`, U+2014, UTF-8 bytes `E2 80 94`) decodes to `â€"` under Windows-1252 — the trailing `"` terminates any surrounding string literal, producing parser errors of the form:
+
+```
+At C:\path\to\script.ps1:LINE char:COL
++ ...         throw "violation â€" identifier follows here...
++                                  ~~~~~~~~~~~~~~
+Unexpected token 'identifier' in expression or statement.
+```
+
+The cascade of follow-on `Missing closing '}'` errors is symptomatic — the real failure is the orphaned `"` from the garbled em-dash bytes.
+
+**Workaround.** Keep `.ps1` source files **ASCII-only** unless the repository deliberately switches its `.ps1` encoding strategy (BOM-prefixed UTF-8, or pwsh-only execution). Concretely:
+
+- No em-dashes (`—`) → use `--`.
+- No en-dashes (`–`) → use `-`.
+- No smart quotes (`‘`, `’`, `“`, `”`) → use straight `'` / `"`.
+- No arrows (`→`, `←`, `↔`) → use `->`, `<-`, `<->`.
+- No ellipsis (`…`) → use `...`.
+- No other multi-byte Unicode in source.
+
+**Verification.** Before committing changes to any `.ps1` file, run a non-ASCII scan. From PowerShell:
+
+```powershell
+# Should return zero matches; any output indicates a future parse-time hazard.
+Select-String -Path scripts/smoke-test.ps1 -Pattern '[^\x00-\x7F]'
+```
+
+Or from any shell with ripgrep:
+
+```sh
+rg -P '[^\x00-\x7F]' scripts/smoke-test.ps1
+```
+
+**Background.** This is the read-side facet of the same root cause as §2 (PowerShell 5.1's UTF-8 handling is BOM-dependent). §2 covers the write-side — files PowerShell *creates* without `UTF8Encoding($false)` get an unwanted BOM that breaks downstream JSON parsers. §3 covers the read-side — files PowerShell *reads* without a BOM get parsed via the active code page, which mangles multi-byte UTF-8. Both facets disappear under pwsh 7+ (PowerShell 7's `.ps1` parser is UTF-8 by default), but the repo's smoke-test target is Windows PowerShell 5.1 because it is the system PowerShell on stock Windows 10/11.
+
 ## License
 
 Apache-2.0. See the repository `LICENSE` and `NOTICE` files.
