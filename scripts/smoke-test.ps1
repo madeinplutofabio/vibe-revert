@@ -54,7 +54,7 @@ function Invoke-Cli {
     #   1. `2>&1` wraps native stderr lines in ErrorRecord (NativeCommandError)
     #      objects. With $ErrorActionPreference='Stop' (set at script top so
     #      our own helpers fail fast), those ErrorRecords would terminate the
-    #      pipeline mid-call, BEFORE we can check $LASTEXITCODE — and every
+    #      pipeline mid-call, BEFORE we can check $LASTEXITCODE -- and every
     #      step that legitimately expects exit 1 (refusal cases) would abort.
     #      Solution: lower $ErrorActionPreference to 'Continue' for the
     #      duration of the call via try/finally so the wrapped stderr is
@@ -123,6 +123,119 @@ function Invoke-Cli {
     }
 }
 
+function Invoke-CliCaptureStdout {
+    # Truly byte-level stdout capture via System.Diagnostics.Process,
+    # with stdout AND stderr drained concurrently to prevent
+    # pipe-buffer deadlock.
+    #
+    # Why a separate helper from Invoke-Cli:
+    # Invoke-Cli uses `2>&1` + ErrorRecord normalization +
+    # Write-Host for refusal-style assertions -- right for those
+    # cases, but would corrupt a D81 byte-identity comparison.
+    # This helper keeps stdout in its own stream and reads it as
+    # raw bytes via StandardOutput.BaseStream.CopyToAsync --
+    # PowerShell 5.1's native `1>$file` redirection has known
+    # host-dependent transcoding/normalization quirks for native
+    # commands, so the .NET API is the only path guaranteed
+    # byte-clean.
+    #
+    # Concurrent draining: stdout via CopyToAsync to a MemoryStream,
+    # stderr via ReadToEndAsync to a string Task. Both Tasks start
+    # before WaitForExit so the child can write to either stream
+    # without filling the OS pipe buffer (4KB on Windows).
+    # Sequential reads (stdout fully then stderr) would deadlock
+    # if the child wrote >4KB of stderr before closing stdout.
+    #
+    # Returns a PSCustomObject with three fields:
+    #   StdoutBytes (byte[]) -- raw stdout, byte-identical to what
+    #                          the child process wrote
+    #   StderrText  (string) -- stderr decoded as text, for
+    #                          diagnostic display AND caller-side
+    #                          assertions (e.g., "success path must
+    #                          have empty stderr"). The helper
+    #                          displays stderr but does NOT assert
+    #                          on it -- semantics vary per caller.
+    #   ExitCode    (int)    -- process exit code (already asserted
+    #                          to match $ExpectedExit before return)
+    param(
+        [Parameter(Mandatory)][string[]]$CliArgs,
+        [Parameter(Mandatory)][int]$ExpectedExit,
+        [Parameter(Mandatory)][string]$StepName
+    )
+
+    # Defensive: our CliArgs in this smoke are simple (flag names,
+    # ULIDs, literal strings -- no whitespace). cmd.exe arg-joining
+    # below is space-naive; a future arg with embedded whitespace
+    # would need explicit quoting. Fail loudly here so the
+    # limitation surfaces at the call site, not silently downstream.
+    foreach ($a in $CliArgs) {
+        if ($a -match '\s') {
+            throw "Invoke-CliCaptureStdout: arg '$a' contains whitespace; cmd.exe arg-joining is space-naive. Add explicit quoting at the helper site if this becomes needed."
+        }
+    }
+
+    # Wrap via cmd.exe because pnpm on Windows is `pnpm.cmd`, which
+    # CreateProcess (UseShellExecute=$false) can't launch directly.
+    # The wrapper costs one shell hop; the byte path through pnpm
+    # and node is unchanged.
+    $argsString = "/c pnpm exec viberevert $($CliArgs -join ' ')"
+
+    Write-Host "> pnpm exec viberevert $($CliArgs -join ' ') (Process.StandardOutput.BaseStream raw bytes, concurrent stderr drain)"
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $env:ComSpec
+    $psi.Arguments = $argsString
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.WorkingDirectory = (Get-Location).Path
+
+    $proc = New-Object System.Diagnostics.Process
+    $proc.StartInfo = $psi
+    $null = $proc.Start()
+
+    # Drain BOTH streams concurrently. Tasks start before
+    # WaitForExit so the child can fill either pipe without
+    # blocking. Wait() on both Tasks AFTER WaitForExit guarantees
+    # we've consumed everything before reading the buffers.
+    $ms = New-Object System.IO.MemoryStream
+    try {
+        $stdoutTask = $proc.StandardOutput.BaseStream.CopyToAsync($ms)
+        $stderrTask = $proc.StandardError.ReadToEndAsync()
+        $proc.WaitForExit()
+        $stdoutTask.Wait()
+        $stderrTask.Wait()
+
+        $stdoutBytes = $ms.ToArray()
+        $stderrText = $stderrTask.Result
+        $actualExit = $proc.ExitCode
+    } finally {
+        $ms.Dispose()
+        $proc.Dispose()
+    }
+
+    # Display stderr for diagnostic -- does NOT assert. Callers
+    # enforce per-path stderr semantics (e.g., Phase 12d success
+    # path asserts $.StderrText -eq '').
+    if (-not [string]::IsNullOrEmpty($stderrText)) {
+        Write-Host "  [stderr] $stderrText"
+    }
+    if ($actualExit -ne $ExpectedExit) {
+        Write-Host "[FAIL] $StepName (expected exit $ExpectedExit, got $actualExit)"
+        $script:failCount++
+        throw "Smoke step failed: $StepName"
+    }
+    Write-Host "[PASS] $StepName (exit $actualExit, $($stdoutBytes.Length) bytes stdout, $($stderrText.Length) bytes stderr)"
+    $script:passCount++
+
+    return [PSCustomObject]@{
+        StdoutBytes = $stdoutBytes
+        StderrText  = $stderrText
+        ExitCode    = $actualExit
+    }
+}
+
 # --- Pre-flight: required tools on PATH ------------------------------------
 
 Write-Section 'Pre-flight'
@@ -171,11 +284,11 @@ try {
     $tgzGi = (Get-ChildItem $packDir -Filter 'viberevert-git-*.tgz' | Select-Object -First 1).FullName
     $tgzCh = (Get-ChildItem $packDir -Filter 'viberevert-checks-*.tgz' | Select-Object -First 1).FullName
     $tgzRe = (Get-ChildItem $packDir -Filter 'viberevert-reporters-*.tgz' | Select-Object -First 1).FullName
-    # `viberevert-<version>.tgz` — match digit-leading suffix so we don't pick
+    # `viberevert-<version>.tgz` -- match digit-leading suffix so we don't pick
     # up viberevert-git/core/session-format/checks/reporters tarballs (which also
     # start with `viberevert-`).
     # Note: PowerShell/Windows `-Filter` is filesystem-provider filtering, NOT a bash-style
-    # glob — character classes like `[0-9]` do NOT work. Use a `Where-Object` regex (.NET regex)
+    # glob -- character classes like `[0-9]` do NOT work. Use a `Where-Object` regex (.NET regex)
     # via `-match` instead. Sort-Object for deterministic selection if multiple matches ever exist.
     $tgzCl = (Get-ChildItem $packDir -Filter 'viberevert-*.tgz' |
         Where-Object { $_.Name -match '^viberevert-\d' } |
@@ -337,7 +450,7 @@ APP_API_KEY = "TESTFIXTUREONLY_S9qX8wV7tS6rP5nM4kL3jH2gF1"
         Write-Section 'M C 12a: report variants'
         # `viberevert report` defaults to terminal output, reads the most
         # recent persisted report via D47 resolution. Exit 0 for a read-only
-        # render — the report's findings do NOT affect this command's exit
+        # render -- the report's findings do NOT affect this command's exit
         # code (only `check` gates).
         Invoke-Cli -CliArgs @('report') -ExpectedExit 0 -StepName 'report-terminal'
         Invoke-Cli -CliArgs @('report', '--markdown') -ExpectedExit 0 -StepName 'report-markdown'
@@ -404,7 +517,7 @@ APP_API_KEY = "TESTFIXTUREONLY_S9qX8wV7tS6rP5nM4kL3jH2gF1"
 
         # Create a TRACKED baseline file. Will be modified during the
         # session; apply should restore this exact content (the harder
-        # restore semantic — untracked-only deletion is insufficient
+        # restore semantic -- untracked-only deletion is insufficient
         # coverage).
         'baseline tracked rollback content' | Out-File -FilePath 'tracked-rollback.txt' -Encoding ascii
         & git add tracked-rollback.txt
@@ -538,7 +651,7 @@ APP_API_KEY = "TESTFIXTUREONLY_S9qX8wV7tS6rP5nM4kL3jH2gF1"
         Write-Host '[ok] smoke-rollback.txt removed by apply'
 
         # tracked-rollback.txt restored to baseline content (the harder
-        # semantic — proves restore actually works on tracked files).
+        # semantic -- proves restore actually works on tracked files).
         $trackedAfterApply = Get-Content 'tracked-rollback.txt' -Raw
         if ($trackedAfterApply -notmatch '^baseline tracked rollback content\r?\n?$') {
             throw "tracked-rollback.txt was not restored to baseline after apply. Got: $trackedAfterApply"
@@ -588,6 +701,191 @@ APP_API_KEY = "TESTFIXTUREONLY_S9qX8wV7tS6rP5nM4kL3jH2gF1"
             throw 're-apply refusal changed the apply receipt; D70 pre-mutation guarantee violated'
         }
         Write-Host '[ok] re-apply refusal did not mutate the apply receipt'
+
+        Write-Section 'M E 12d: prompt-fix (deliberate fresh-report + byte-identity + --llm precedence)'
+
+        # Step 1: Create a fresh risk-bearing file using the EXACT
+        # proven Phase 12a secret value + Python file pattern, with
+        # a distinct filename + constant identifier so this finding
+        # is unambiguously Phase 12d's contribution (not Phase 12a's
+        # src/config.py finding that survives rollback).
+        #
+        # Write via [System.IO.File]::WriteAllText with
+        # UTF8Encoding($false) -- explicit UTF-8 NO BOM. PowerShell
+        # 5.1's Set-Content defaults to the active code page
+        # (Windows-1252 often), and Out-File can inject a BOM on
+        # some hosts; the .NET API is the bytewise-deterministic
+        # path.
+        New-Item -ItemType Directory -Force 'src' | Out-Null
+        $riskFileContent = @'
+"""Smoke Phase 12d trigger."""
+
+PHASE_12D_TOKEN = "TESTFIXTUREONLY_S9qX8wV7tS6rP5nM4kL3jH2gF1"
+'@
+        $riskFilePath = Join-Path (Get-Location).Path 'src/smoke-12d-trigger.py'
+        [System.IO.File]::WriteAllText(
+            $riskFilePath,
+            $riskFileContent,
+            (New-Object System.Text.UTF8Encoding($false))
+        )
+
+        # Step 2: Snapshot existing report.json files BEFORE the
+        # fresh check, so Step 3's set-difference identifies the
+        # NEW report deterministically -- without relying on the
+        # resolver's "latest by written_at DESC" sort which could
+        # pick the wrong report under timestamp ties (real wall-
+        # clock + second precision can tie when checks run rapidly)
+        # OR if the resolver drifts.
+        $reportsBefore = @(
+            Get-ChildItem -Path '.viberevert/sessions/*/report.json', `
+                                '.viberevert/reports/*/report.json' `
+                -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
+        )
+
+        # Step 3: Run check --since smoke-baseline --json (exit 2
+        # on the critical secret per block_on=critical).
+        Invoke-Cli -CliArgs @('check', '--since', 'smoke-baseline', '--json') `
+            -ExpectedExit 2 -StepName 'prompt-fix-check-risky'
+
+        # Identify the new report by set-difference.
+        $reportsAfter = @(
+            Get-ChildItem -Path '.viberevert/sessions/*/report.json', `
+                                '.viberevert/reports/*/report.json' `
+                -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
+        )
+        $newReports = @($reportsAfter | Where-Object { $reportsBefore -notcontains $_ })
+        if ($newReports.Count -ne 1) {
+            throw "Expected EXACTLY 1 new report.json after fresh check, found $($newReports.Count): $($newReports -join ', ')"
+        }
+        $newReportPath = $newReports[0]
+
+        # Parse the new report's id from JSON. Lightweight extraction
+        # -- full schema validation belongs in golden fixtures; the
+        # smoke just needs report_id for the downstream assertions.
+        $newReportData = Get-Content -Path $newReportPath -Raw | ConvertFrom-Json
+        $newReportId = $newReportData.report_id
+        if (-not ($newReportId -match '^(rpt_|sess_)[0-9A-HJKMNP-TV-Z]{26}$')) {
+            throw "New report has invalid report_id: $newReportId"
+        }
+        Write-Host "[ok] new report: $newReportId at $newReportPath"
+
+        # Step 4: Run prompt-fix via raw-byte capture (D81 prep).
+        # The helper returns an object so the caller can enforce
+        # per-path stderr semantics.
+        $promptFix = Invoke-CliCaptureStdout `
+            -CliArgs @('prompt-fix') `
+            -ExpectedExit 0 `
+            -StepName 'prompt-fix-render'
+        $promptStdoutBytes = $promptFix.StdoutBytes
+
+        # Success path: stderr MUST be empty. Locks against silent
+        # warnings (e.g., a future deprecation notice) becoming
+        # smoke-approved on the next run.
+        if ($promptFix.StderrText -ne '') {
+            throw "prompt-fix-render wrote unexpected stderr on success path:`n$($promptFix.StderrText)"
+        }
+        if ($promptStdoutBytes.Length -eq 0) {
+            throw 'prompt-fix produced empty stdout despite exit 0'
+        }
+
+        # Step 5: Assert prompt-fix rendered the NEW report -- its
+        # report_id MUST appear in the "Source report:" line. This
+        # binds Phase 12d to the specific fresh report from Step 3,
+        # closing the gap where default resolution could pick an
+        # older report due to timestamp tie or resolver drift.
+        $promptStdoutText = [System.Text.Encoding]::UTF8.GetString($promptStdoutBytes)
+        $expectedSourceLine = "Source report: $newReportId"
+        if (-not $promptStdoutText.Contains($expectedSourceLine)) {
+            $previewLen = [Math]::Min(800, $promptStdoutText.Length)
+            throw "prompt-fix did not render the NEW report. Expected '$expectedSourceLine' in stdout. First $previewLen chars of stdout:`n$($promptStdoutText.Substring(0, $previewLen))"
+        }
+        if (-not ($promptStdoutText -match '## Findings')) {
+            throw 'prompt-fix stdout missing "## Findings" section header'
+        }
+        Write-Host "[ok] prompt-fix rendered the new report ($newReportId) with D85 structural markers"
+
+        # Step 6: Compute expected sibling path beside the NEW
+        # report. EXACTLY one fix-prompt.txt MUST exist (catches
+        # accidental writes to both sessions/ and reports/), AND
+        # it MUST be at that sibling path (D82 contract).
+        $expectedSiblingPath = Join-Path (Split-Path -Parent $newReportPath) 'fix-prompt.txt'
+        $persistedFiles = @(
+            Get-ChildItem -Path '.viberevert/sessions/*/fix-prompt.txt', `
+                                '.viberevert/reports/*/fix-prompt.txt' `
+                -ErrorAction SilentlyContinue
+        )
+        if ($persistedFiles.Count -ne 1) {
+            throw "Expected EXACTLY 1 persisted fix-prompt.txt, found $($persistedFiles.Count): $(($persistedFiles | ForEach-Object FullName) -join ', ')"
+        }
+        $persistedPath = $persistedFiles[0].FullName
+        if ($persistedPath -ne $expectedSiblingPath) {
+            throw "Persisted fix-prompt.txt is NOT the sibling of the new report. Expected: $expectedSiblingPath. Got: $persistedPath. D82 contract violation."
+        }
+        Write-Host "[ok] persisted fix-prompt.txt is sibling of the new report: $persistedPath"
+
+        # Step 7: D81 dual-sink byte-identity. Read persisted file
+        # as raw bytes; compare length + per-byte equality with
+        # captured stdout. Manual loop because PowerShell 5.1 lacks
+        # SequenceEqual on byte[] without Add-Type.
+        $persistedBytes = [System.IO.File]::ReadAllBytes($persistedPath)
+        if ($persistedBytes.Length -ne $promptStdoutBytes.Length) {
+            throw "D81 byte-identity violation -- fix-prompt.txt length ($($persistedBytes.Length)) != stdout length ($($promptStdoutBytes.Length))"
+        }
+        for ($i = 0; $i -lt $persistedBytes.Length; $i++) {
+            if ($persistedBytes[$i] -ne $promptStdoutBytes[$i]) {
+                throw "D81 byte-identity violation at offset $($i): persisted=$($persistedBytes[$i]) stdout=$($promptStdoutBytes[$i])"
+            }
+        }
+        Write-Host "[ok] D81 dual-sink byte-identity: $($persistedBytes.Length) bytes match"
+
+        # Step 8: Snapshot file state BEFORE --llm test.
+        $snapshotBytes = $persistedBytes
+        $snapshotMtime = (Get-Item $persistedPath).LastWriteTimeUtc
+
+        # Step 9: Run prompt-fix --llm. D84 reserved seam; exit 1
+        # with the locked deferred-feature copy. Regular Invoke-Cli
+        # (substring assertion handles the message; byte capture
+        # unnecessary for refusal).
+        Invoke-Cli -CliArgs @('prompt-fix', '--llm') `
+            -ExpectedExit 1 `
+            -StepName 'prompt-fix-llm-refused' `
+            -ExpectedOutputContains 'Not available in v0.7.0'
+
+        # Step 10: PRIMARY assertions on --llm refusal (all hard-
+        # throw): exactly 1 fix-prompt.txt still exists, path
+        # unchanged, bytes unchanged. SECONDARY (warn-only per D94
+        # caveat): mtime unchanged.
+        $afterLlmFiles = @(
+            Get-ChildItem -Path '.viberevert/sessions/*/fix-prompt.txt', `
+                                '.viberevert/reports/*/fix-prompt.txt' `
+                -ErrorAction SilentlyContinue
+        )
+        if ($afterLlmFiles.Count -ne 1) {
+            throw "After --llm refusal, expected exactly 1 fix-prompt.txt, found $($afterLlmFiles.Count) -- refusal must NOT create new sibling files"
+        }
+        if ($afterLlmFiles[0].FullName -ne $persistedPath) {
+            throw "After --llm refusal, fix-prompt.txt path changed: was $persistedPath, now $($afterLlmFiles[0].FullName)"
+        }
+        $afterLlmBytes = [System.IO.File]::ReadAllBytes($persistedPath)
+        if ($afterLlmBytes.Length -ne $snapshotBytes.Length) {
+            throw "After --llm refusal, fix-prompt.txt size changed: was $($snapshotBytes.Length), now $($afterLlmBytes.Length)"
+        }
+        for ($i = 0; $i -lt $afterLlmBytes.Length; $i++) {
+            if ($afterLlmBytes[$i] -ne $snapshotBytes[$i]) {
+                throw "After --llm refusal, fix-prompt.txt byte mismatch at offset $($i)"
+            }
+        }
+        Write-Host '[ok] --llm refusal left persisted fix-prompt.txt byte-identical at the same path (primary D84 lock)'
+
+        $afterLlmMtime = (Get-Item $persistedPath).LastWriteTimeUtc
+        if ($afterLlmMtime -ne $snapshotMtime) {
+            # Secondary signal per D94 -- bytes proven identical
+            # above, so this is informational platform noise on
+            # filesystems with low mtime precision. Don't fail.
+            Write-Host "[warn] LastWriteTimeUtc drifted after --llm refusal (was $snapshotMtime, now $afterLlmMtime); bytes still identical -- likely fs-precision platform noise per D94 caveat"
+        } else {
+            Write-Host '[ok] --llm refusal preserved LastWriteTimeUtc (secondary defense-in-depth signal)'
+        }
 
         Write-Section 'M C 12b: missing config (LAST scenario - corrupts state for any later steps)'
         Remove-Item -Force '.viberevert.yml'
