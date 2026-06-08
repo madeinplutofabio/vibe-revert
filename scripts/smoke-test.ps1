@@ -887,6 +887,274 @@ PHASE_12D_TOKEN = "TESTFIXTUREONLY_S9qX8wV7tS6rP5nM4kL3jH2gF1"
             Write-Host '[ok] --llm refusal preserved LastWriteTimeUtc (secondary defense-in-depth signal)'
         }
 
+        Write-Section 'M F 12e: hook install/uninstall (POSIX, --force backup, --restore round-trip)'
+
+        # Step 1: Verify clean baseline -- no pre-existing pre-commit hook.
+        $hookPath = Join-Path $scratch '.git/hooks/pre-commit'
+        if (Test-Path $hookPath) {
+            throw "Phase 12e precondition violated: .git/hooks/pre-commit already exists at $hookPath. Prior phase did not clean up."
+        }
+
+        # Step 2: Install. Exit 0 expected.
+        Invoke-Cli -CliArgs @('hook', 'install') -ExpectedExit 0 -StepName 'hook-install-clean'
+
+        # Step 3: Assert hook exists. Verify shebang + line-2 marker (D98.G).
+        # Wrap Get-Content in @(...) to force-array -- PS scalar trap:
+        # -TotalCount 2 returns a string (not array) when the file has 1
+        # line, making $hookLines[1] index into the STRING.
+        if (-not (Test-Path $hookPath)) {
+            throw 'Phase 12e: hook install reported exit 0 but .git/hooks/pre-commit does NOT exist'
+        }
+        $hookLines = @(Get-Content -Path $hookPath -TotalCount 2)
+        if ($hookLines.Count -lt 2) {
+            throw "Phase 12e: hook has fewer than 2 lines. Line count: $($hookLines.Count)"
+        }
+        if ($hookLines[0] -ne '#!/bin/sh') {
+            throw "Phase 12e: hook line 1 is not '#!/bin/sh'. Got: '$($hookLines[0])'"
+        }
+        $expectedMarker = '# managed-by: viberevert (https://github.com/madeinplutofabio/vibe-revert)'
+        if ($hookLines[1] -ne $expectedMarker) {
+            throw "Phase 12e: hook line 2 is not the managed-by marker. Expected: '$expectedMarker'. Got: '$($hookLines[1])'"
+        }
+        Write-Host '[ok] Phase 12e: hook line 1 = shebang, line 2 = managed-by marker (D98.G)'
+
+        # Step 4: Verify body substrings + NO `set -e` (regression guard for
+        # the plan-review bug: `set -e` would short-circuit before the EC=$?
+        # capture and bypass the exit-2 -> exit-1 translation in D98.U).
+        $hookContent = Get-Content -Path $hookPath -Raw
+        $expectedSubstrings = @(
+            'viberevert check --staged',
+            '--no-verify',
+            'viberevert prompt-fix'
+        )
+        foreach ($substr in $expectedSubstrings) {
+            if (-not $hookContent.Contains($substr)) {
+                throw "Phase 12e: hook body missing required substring: '$substr'"
+            }
+        }
+        if ($hookContent.Contains('set -e')) {
+            throw 'Phase 12e: hook body contains `set -e` (regression of plan-review bug)'
+        }
+        Write-Host '[ok] Phase 12e: hook body contains required substrings; no set -e (D98.U)'
+
+        # Step 5: (POSIX only) Assert hook is executable. $IsWindows is
+        # PSCore-only; $env:OS works in both Windows PS 5.1 AND PSCore.
+        if ($env:OS -eq 'Windows_NT') {
+            Write-Host '[skip] Phase 12e step 5 (executable bit): Windows -- chmod is a no-op per D98.J'
+        } else {
+            $mode = (Get-Item $hookPath).Mode
+            if ($mode -notmatch 'x') {
+                throw "Phase 12e step 5: hook is not executable. Mode: $mode"
+            }
+            Write-Host "[ok] Phase 12e step 5: hook is executable (mode: $mode)"
+        }
+
+        # Step 6: Block-commit verification with PATH shim + sh probe.
+        # The hook script invokes `viberevert check --staged`; the sh
+        # process spawned by git inherits PowerShell's PATH. Prepending
+        # the local node_modules/.bin (where pnpm install put the
+        # `viberevert` shim) ensures the hook resolves to the built CLI
+        # WITHOUT relying on the developer's global PATH.
+        #
+        # sh probe distinguishes "platform cannot run hooks at all"
+        # (legitimate skip per R1) from "hooks should run but didn't"
+        # (real regression). Post-tip commitWasCreated check catches
+        # the case where the hook prints the tip but the gate is broken.
+        $shProbe = $null
+        try {
+            $shProbe = Start-Process sh -ArgumentList '-c', 'exit 0' -Wait -PassThru -NoNewWindow -ErrorAction SilentlyContinue
+        } catch {
+            # sh genuinely unavailable on this platform.
+        }
+        $platformCanRunHooks = ($shProbe -ne $null -and $shProbe.ExitCode -eq 0)
+
+        & git add src/smoke-12d-trigger.py
+        if ($LASTEXITCODE -ne 0) {
+            throw "Phase 12e step 6: git add src/smoke-12d-trigger.py failed (exit $LASTEXITCODE)"
+        }
+
+        # Local-shim assertion: refuse to rely on the developer's global
+        # PATH. Without this guard, a globally-installed `viberevert`
+        # could falsely satisfy the hook on the dev box and fail CI.
+        $sep = [System.IO.Path]::PathSeparator
+        $binDir = Join-Path $scratch 'node_modules/.bin'
+        if (-not (Test-Path $binDir)) {
+            throw "Phase 12e step 6: local node_modules/.bin directory missing at $binDir"
+        }
+        $localViberevertShims = @(Get-ChildItem -Path $binDir -Filter 'viberevert*' -ErrorAction SilentlyContinue)
+        if ($localViberevertShims.Count -eq 0) {
+            throw "Phase 12e step 6: no local viberevert shim found in $binDir; refusing to rely on global PATH"
+        }
+
+        $originalPath = $env:PATH
+        $env:PATH = "$binDir$sep$env:PATH"
+
+        $commitStdoutFile = Join-Path $scratch 'phase-12e-commit-stdout.txt'
+        $commitStderrFile = Join-Path $scratch 'phase-12e-commit-stderr.txt'
+
+        # Initialize before try so the finally block can safely reference
+        # them even if Start-Process / git rev-parse throw early.
+        $headBefore = $null
+        $commitWasCreated = $false
+
+        try {
+            # Pre-test cleanup of capture files (defense against stale
+            # output if this phase is rerun after a partial failure).
+            Remove-Item -Path $commitStdoutFile -ErrorAction SilentlyContinue
+            Remove-Item -Path $commitStderrFile -ErrorAction SilentlyContinue
+
+            $headBefore = & git rev-parse HEAD
+            # Direct & git invocation (NOT Start-Process) -- PowerShell's
+            # native-command argument passing preserves each arg verbatim
+            # via the Win32 argv API; Start-Process collapses arrays into a
+            # cmd-line string that the receiving program re-splits on
+            # whitespace, causing pathspec-misparse when the commit message
+            # contains spaces. Single-token message kept as belt-and-
+            # suspenders defense in case this invocation is ever changed
+            # back to Start-Process.
+            #
+            # Lower ErrorActionPreference to 'Continue' for the duration of
+            # the call: the hook is EXPECTED to make git exit non-zero, and
+            # Windows PowerShell with $ErrorActionPreference='Stop' promotes
+            # a native command's non-zero exit + stderr output into a
+            # NativeCommandError that can terminate the pipeline BEFORE we
+            # can read $LASTEXITCODE. Even with `2> $file` redirection, PS
+            # 5.1 can route stderr through its error stream during redirect,
+            # so the Stop preference still fires. Mirrors the Invoke-Cli
+            # helper pattern.
+            $previousErrorActionPreference = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            try {
+                & git commit -m phase-12e-hook-block-expected > $commitStdoutFile 2> $commitStderrFile
+                $gitExit = $LASTEXITCODE
+            } finally {
+                $ErrorActionPreference = $previousErrorActionPreference
+            }
+            $stdoutContent = if (Test-Path $commitStdoutFile) { Get-Content -Path $commitStdoutFile -Raw } else { '' }
+            $stderrContent = if (Test-Path $commitStderrFile) { Get-Content -Path $commitStderrFile -Raw } else { '' }
+            $combined = "$stdoutContent$stderrContent"
+            $headAfter = & git rev-parse HEAD
+            $commitWasCreated = ($headAfter -ne $headBefore)
+
+            # D98.F + D98.U: hook exit-2 -> exit-1 translation prints this exact tip.
+            # Single-quoted PowerShell string -- backticks are literal (no PS escape).
+            $tip = 'Tip: run `viberevert prompt-fix` to generate a fix-prompt for your coding agent.'
+
+            if ($combined.Contains($tip)) {
+                if ($gitExit -ne 1) {
+                    throw "Phase 12e step 6: hook printed tip but git exit was $gitExit, expected 1 (D98.F translation broken)"
+                }
+                if ($commitWasCreated) {
+                    throw "Phase 12e step 6: hook printed tip but commit was created -- gate broken"
+                }
+                Write-Host '[ok] Phase 12e step 6: hook fired, blocked commit, printed prompt-fix tip (D98.F + D98.U)'
+            } elseif (-not $platformCanRunHooks) {
+                Write-Warning "Phase 12e step 6: sh probe failed; platform cannot execute git hooks. Treating as no-sh caveat per R1."
+            } else {
+                throw "Phase 12e step 6: sh probe succeeded so platform CAN run hooks, but the viberevert hook gate did NOT fire. git exit=$gitExit, tip present=$($combined.Contains($tip)), commit created=$commitWasCreated. Combined output:`n$combined"
+            }
+        } finally {
+            $env:PATH = $originalPath
+            # Centralized reset: if a commit was accidentally created
+            # (no-sh caveat OR pre-throw race), undo it so the scratch
+            # repo doesn't carry forward an advanced HEAD into later phases.
+            if ($commitWasCreated -and $null -ne $headBefore) {
+                & git reset --soft $headBefore | Out-Null
+            }
+            # Always unstage so the test file doesn't pollute later phases.
+            & git reset -- src/smoke-12d-trigger.py | Out-Null
+            Remove-Item -Path $commitStdoutFile -ErrorAction SilentlyContinue
+            Remove-Item -Path $commitStderrFile -ErrorAction SilentlyContinue
+        }
+
+        # Step 7: Uninstall. Exit 0 expected.
+        Invoke-Cli -CliArgs @('hook', 'uninstall') -ExpectedExit 0 -StepName 'hook-uninstall-managed'
+
+        # Step 8: Assert hook is gone.
+        if (Test-Path $hookPath) {
+            throw 'Phase 12e step 8: hook uninstall reported exit 0 but .git/hooks/pre-commit still exists'
+        }
+        Write-Host '[ok] Phase 12e step 8: hook removed'
+
+        # Step 9: Re-uninstall refuses with HookNotFoundError (D98.O).
+        Invoke-Cli -CliArgs @('hook', 'uninstall') -ExpectedExit 1 -StepName 'hook-uninstall-no-hook-found' `
+            -ExpectedOutputContains 'No viberevert hook found'
+
+        # Step 10: --force backup + --restore round-trip sub-scenario (D98.D + D98.P).
+        Write-Host '> Phase 12e step 10: --force backup + --restore round-trip'
+
+        $sentinelContent = "#!/bin/sh`necho user-managed-sentinel`n"
+        [System.IO.File]::WriteAllText($hookPath, $sentinelContent, (New-Object System.Text.UTF8Encoding($false)))
+        $sentinelBytes = [System.IO.File]::ReadAllBytes($hookPath)
+
+        # 10a. Install without --force refuses (existing non-vr hook per D98.D).
+        Invoke-Cli -CliArgs @('hook', 'install') -ExpectedExit 1 -StepName 'hook-install-refuses-without-force' `
+            -ExpectedOutputContains 'Refusing to overwrite existing non-viberevert pre-commit hook'
+
+        # Sentinel must be byte-for-byte untouched after refusal (D98
+        # no-mutation-on-refusal contract). Byte loop matches 10c/10e
+        # discipline -- length-only would miss same-size content mutation.
+        $sentinelAfterRefusal = [System.IO.File]::ReadAllBytes($hookPath)
+        if ($sentinelAfterRefusal.Length -ne $sentinelBytes.Length) {
+            throw "Phase 12e step 10a: sentinel size changed after refused install (was $($sentinelBytes.Length), now $($sentinelAfterRefusal.Length))"
+        }
+        for ($i = 0; $i -lt $sentinelBytes.Length; $i++) {
+            if ($sentinelAfterRefusal[$i] -ne $sentinelBytes[$i]) {
+                throw "Phase 12e step 10a: sentinel byte mismatch at offset $i after refused install"
+            }
+        }
+
+        # 10b. Install --force backs up + writes new hook (D98.D).
+        Invoke-Cli -CliArgs @('hook', 'install', '--force') -ExpectedExit 0 -StepName 'hook-install-force-backup'
+
+        # 10c. Assert backup exists at locked BACKUP_FILE_REGEX pattern.
+        $hooksDir = Join-Path $scratch '.git/hooks'
+        $backups = @(Get-ChildItem -Path $hooksDir -Filter 'pre-commit.viberevert-backup-*' -ErrorAction SilentlyContinue)
+        if ($backups.Count -ne 1) {
+            throw "Phase 12e step 10c: expected exactly 1 backup file, found $($backups.Count): $(($backups | ForEach-Object Name) -join ', ')"
+        }
+        $backupPath = $backups[0].FullName
+        if ($backups[0].Name -notmatch '^pre-commit\.viberevert-backup-\d{8}T\d{6}Z$') {
+            throw "Phase 12e step 10c: backup name '$($backups[0].Name)' does not match locked BACKUP_FILE_REGEX (^pre-commit\.viberevert-backup-\d{8}T\d{6}Z$)"
+        }
+        # Backup content byte-identical to sentinel.
+        $backupBytes = [System.IO.File]::ReadAllBytes($backupPath)
+        if ($backupBytes.Length -ne $sentinelBytes.Length) {
+            throw "Phase 12e step 10c: backup size ($($backupBytes.Length)) != sentinel size ($($sentinelBytes.Length))"
+        }
+        for ($i = 0; $i -lt $sentinelBytes.Length; $i++) {
+            if ($backupBytes[$i] -ne $sentinelBytes[$i]) {
+                throw "Phase 12e step 10c: backup byte mismatch at offset $i (backup=$($backupBytes[$i]) sentinel=$($sentinelBytes[$i]))"
+            }
+        }
+        Write-Host "[ok] Phase 12e step 10c: backup at $($backups[0].Name) byte-identical to sentinel ($($backupBytes.Length) bytes)"
+
+        # 10d. uninstall --restore renames backup back over the managed hook (D98.P).
+        Invoke-Cli -CliArgs @('hook', 'uninstall', '--restore') -ExpectedExit 0 -StepName 'hook-uninstall-restore'
+
+        # 10e. pre-commit matches sentinel byte-for-byte; backup gone (rename source).
+        $restoredBytes = [System.IO.File]::ReadAllBytes($hookPath)
+        if ($restoredBytes.Length -ne $sentinelBytes.Length) {
+            throw "Phase 12e step 10e: restored size ($($restoredBytes.Length)) != sentinel size ($($sentinelBytes.Length))"
+        }
+        for ($i = 0; $i -lt $sentinelBytes.Length; $i++) {
+            if ($restoredBytes[$i] -ne $sentinelBytes[$i]) {
+                throw "Phase 12e step 10e: restored byte mismatch at offset $i"
+            }
+        }
+        if (Test-Path $backupPath) {
+            throw "Phase 12e step 10e: backup file still present after --restore at $backupPath (rename should have consumed it)"
+        }
+        Write-Host "[ok] Phase 12e step 10e: --restore round-trip byte-identical; backup consumed by rename"
+
+        # Step 10 cleanup: remove the restored sentinel hook so Phase 12b-last
+        # operates against a clean .git/hooks/ state.
+        Remove-Item -Path $hookPath -Force
+        if (Test-Path $hookPath) {
+            throw 'Phase 12e cleanup: failed to remove sentinel hook before Phase 12b-last'
+        }
+        Write-Host '[ok] Phase 12e cleanup: sentinel removed'
+
         Write-Section 'M C 12b: missing config (LAST scenario - corrupts state for any later steps)'
         Remove-Item -Force '.viberevert.yml'
         if (Test-Path '.viberevert.yml') {

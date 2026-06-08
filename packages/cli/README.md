@@ -2,7 +2,7 @@
 
 > The VibeRevert CLI.
 
-The user-facing command-line tool. Provides `init`, `checkpoint`, `run`, `check`, `report`, `prompt-fix`, `rollback`, and integration installers.
+The user-facing command-line tool. Provides `init`, `checkpoint`, `run`, `check`, `report`, `prompt-fix`, `rollback`, `hook install`, `hook uninstall`, and integration installers.
 
 Part of [VibeRevert](https://github.com/madeinplutofabio/vibe-revert) — the safety belt for vibe coding.
 
@@ -31,6 +31,20 @@ The prompt template is injection-defended (three-paragraph preamble framing repo
 Out of scope in v0.7.0: no LLM API calls (`--llm` is a hidden reserved seam that exits 1), no repository source-file reads (renderer trusts the M C redactor's already-redacted evidence), no `--json` / `--markdown` flags, no `FixPromptFileSchema` sidecar. `fix-prompt.txt` is the v0.7.0 compatibility contract; structured wrappers are deferred until a real consumer (MCP `generate_fix_prompt`) needs them.
 
 See [`docs/prompt-fix-contract.md`](https://github.com/madeinplutofabio/vibe-revert/blob/main/docs/prompt-fix-contract.md) for the full contract: refusal table, template section details, dynamic-field normalization rules, drift guard, byte-identity write order, and architectural invariants (D90.1-8).
+
+## Hook install / uninstall
+
+`viberevert hook install` writes a deterministic POSIX `#!/bin/sh` pre-commit hook to `.git/hooks/pre-commit` that runs `viberevert check --staged` on every commit. The hook respects your `.viberevert.yml` `risk.block_on` threshold (default: `critical`); on exit 2 it prints a `viberevert prompt-fix` tip on stderr and translates to git-hook exit 1 so blocked commits abort uniformly. Use `git commit --no-verify` for a single-commit bypass; vibe-revert documents it but does not hide it.
+
+Refuses cleanly on husky / lefthook detection (those ecosystems own their own hook lifecycle — invoke `viberevert check --staged` from your manager's pre-commit instead), on git worktree / submodule layouts (`.git`-as-pointer-file is not yet supported), on shared-hooks-directory setups (`.git/hooks` as symlink), and on malformed `package.json`. `--force` overrides ONLY the existing-non-viberevert-hook case (backing it up to `.git/hooks/pre-commit.viberevert-backup-<UTC>`); it does NOT override hook-manager / layout / malformed-JSON refusals — those are absolute.
+
+`viberevert hook uninstall` removes the viberevert-managed hook (identified by an exact line-2 marker check with CRLF tolerance) and refuses to touch hooks it did not write. No `--force` flag: refusing to remove unknown hooks IS the safety belt. With `--restore`, it renames the most recent `pre-commit.viberevert-backup-<UTC>` file back to `.git/hooks/pre-commit` (validate-before-mutate per D98.P: the managed hook is NEVER deleted before backup existence is proven; metadata-fingerprint guard — dev + ino + size + mtimeMs + ctimeMs — catches in-place modification between the first and final stat). The safety posture is best-effort validate-before-mutate, not a cross-process lock.
+
+Re-installing an existing managed hook is byte-compare idempotent (D98.A11): byte-identical + executable → no-op; byte-identical + non-executable (Unix only) → chmod-only repair; bytes differ → atomic refresh to the current template via `writeFileAtomic`.
+
+Out of scope in v0.7.0-beta: husky / lefthook adapter integration (deferred to M G1's `installers` package — refusal-on-detection is intentional), worktree / submodule support (`.git`-as-pointer-file), git `core.hooksPath` redirect detection (install succeeds but the hook won't fire if `core.hooksPath` points elsewhere; a future `viberevert doctor` diagnostic will flag this), Windows-native git without `sh.exe` (git itself does not execute the hook on that platform — not a vibe-revert limitation), and any second severity threshold beyond what `check --staged` already enforces (`risk.block_on` is the single knob).
+
+See [`docs/hook-contract.md`](https://github.com/madeinplutofabio/vibe-revert/blob/main/docs/hook-contract.md) for the full contract: refusal copy table, exit-code policy (D98.K + D98.F translation), hook script verbatim text, `--force` scope lock, `--restore` validate-before-mutate semantics, metadata-fingerprint guard, and architectural invariants (D98.M.1-14).
 
 ## License
 

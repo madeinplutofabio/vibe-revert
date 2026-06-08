@@ -1160,3 +1160,854 @@ describe("Architectural invariants — M E D90 prompt-fix module boundaries", ()
     ).toBeLessThan(rollbackIdx);
   });
 });
+
+describe("Architectural invariants — M F D98.M hook subsystem boundaries", () => {
+  // D98.M locks 14 invariants for the hook install/uninstall subsystem.
+  // The locked boundaries:
+  //
+  //   hook-script.ts is a pure constants + pure-function module — NO
+  //   runtime imports (M.5), ASCII-only at byte level (M.4), and
+  //   HOOK_SCRIPT_TEMPLATE constructed via [...lines].join("\n") + "\n"
+  //   (M.14 — NOT a raw multi-line template literal which can pick up
+  //   CRLF on Windows + autocrlf).
+  //
+  //   hook-managers.ts is pure detection logic with a bounded fs surface
+  //   (M.11 — 6 path-specific lstats + 1 readFile of package.json = 7
+  //   total source call sites) and no child_process / @viberevert/checks
+  //   / LLM SDK (M.1/M.2/M.3).
+  //
+  //   hook-install.ts + hook-uninstall.ts have LOCKED filesystem surfaces
+  //   (M.6 install: 10 sites / 9 patterns; M.7 uninstall: 9 sites / 8
+  //   patterns) enforced by exact source-call-site grep counts AND
+  //   aggregate per-operation totals (catches `lstat(otherPath)` etc.
+  //   that bypasses the variable-specific pattern table). The flag-based
+  //   single-call-site pattern (D98.A11 for install; the mirrored
+  //   shouldRm/restorePlan pattern for uninstall) keeps each fs
+  //   operation at exactly one source location even when multiple
+  //   semantic branches need it. Import-count locks (M.8) ensure
+  //   HOOK_SCRIPT_TEMPLATE / MANAGED_BY_MARKER / detectHookManagers
+  //   are referenced via the locked symbol-name paths only.
+  //
+  //   index.ts exposes both commands via cli.register and preserves
+  //   the locked workflow ordering (M.9 + M.10: RollbackCommand <
+  //   HookInstallCommand < HookUninstallCommand, with HookUninstall
+  //   IMMEDIATELY after HookInstall).
+  //
+  //   Cross-command import lock (M.12) forbids hook-install.ts ↮
+  //   hook-uninstall.ts dependencies in either direction (all four
+  //   import forms; both .js and .ts subpath suffixes; both
+  //   sibling-relative `./hook-*` and parent-relative
+  //   `../commands/hook-*` specifier shapes); shared error classes
+  //   are duplicated locally rather than imported across.
+  //   M.13 extends M.4's ASCII-only scan to the three M F CLI source
+  //   files.
+  //
+  // 14 tests total — one per D98.M.X invariant. KNOWN_LLM_SDKS list +
+  // helpers (escapeRegExp, buildSdkForbiddenPattern) are DUPLICATED
+  // from the D90 block above for self-containment — each architectural
+  // describe block stands alone so changes to one block don't silently
+  // de-protect another.
+  //
+  // **Import-form coverage:** D98.M.1, D98.M.2, D98.M.3, and D98.M.12
+  // all scan FOUR import forms — static ESM (`from "..."`), dynamic
+  // ESM (`import("...")`), CommonJS require (`require("...")`), AND
+  // TS import-equals (`import x = require("...")`). Consistent with
+  // D90 to prevent bypass routes via tsconfig interop or copied
+  // snippet code.
+
+  const HOOK_INSTALL_REL = "packages/cli/src/commands/hook-install.ts";
+  const HOOK_UNINSTALL_REL = "packages/cli/src/commands/hook-uninstall.ts";
+  const HOOK_MANAGERS_REL = "packages/cli/src/hook-managers.ts";
+  const HOOK_SCRIPT_REL = "packages/cli/src/hook-script.ts";
+  const HOOK_SOURCE_RELS: ReadonlyArray<string> = [
+    HOOK_INSTALL_REL,
+    HOOK_UNINSTALL_REL,
+    HOOK_MANAGERS_REL,
+  ];
+  const CLI_INDEX_REL = "packages/cli/src/index.ts";
+
+  /**
+   * Known LLM-SDK package specifiers banned per D98.M.3. DUPLICATED
+   * from the D90 block's KNOWN_LLM_SDKS for self-containment — D98.M
+   * is a separate decision lock and the list MUST be authoritative
+   * within this block so a future M G1+ change to either list does
+   * not silently de-protect the other subsystem.
+   */
+  const KNOWN_LLM_SDKS: ReadonlyArray<string> = [
+    "@anthropic-ai/sdk",
+    "@anthropic-ai/bedrock-sdk",
+    "openai",
+    "cohere-ai",
+    "@google/generative-ai",
+    "replicate",
+    "mistralai",
+    "@mistralai/mistralai",
+    "ai",
+    "@ai-sdk/openai",
+    "@ai-sdk/anthropic",
+    "@ai-sdk/google",
+    "@ai-sdk/mistral",
+    "@langchain/openai",
+    "@langchain/anthropic",
+    "langchain",
+    "ollama",
+    "groq-sdk",
+    "@groq/sdk",
+    "@huggingface/inference",
+    "llamaindex",
+    "@aws-sdk/client-bedrock-runtime",
+  ];
+
+  /** Escape a string for use inside a RegExp constructor. */
+  function escapeRegExp(value: string): string {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  /**
+   * Build a regex that matches all four import forms of a given
+   * package name (allowing subpath imports via trailing `/`). Same
+   * shape as D90's buildSdkForbiddenPattern.
+   */
+  function buildSdkForbiddenPattern(sdkName: string): RegExp {
+    const escaped = escapeRegExp(sdkName);
+    return new RegExp(
+      `(?:from\\s+["']${escaped}(?:["'/])` +
+        `|import\\s*\\(\\s*["']${escaped}(?:["'/])` +
+        `|require\\s*\\(\\s*["']${escaped}(?:["'/])` +
+        `|import\\s+\\w+\\s*=\\s*require\\s*\\(\\s*["']${escaped}(?:["'/]))`,
+    );
+  }
+
+  // ===========================================================================
+  // D98.M.1, M.2, M.3 — forbidden imports across the hook subsystem
+  // ===========================================================================
+
+  it("D98.M.1: hook subsystem (install + uninstall + managers) does NOT import child_process in any form", () => {
+    // The hook subsystem MUST NOT spawn subprocesses. The on-disk
+    // hook script SHELLS OUT via the user's shell when the hook fires;
+    // the install/uninstall commands themselves never spawn anything.
+    // Pattern covers static ESM + dynamic ESM + CJS require + TS
+    // import-equals shapes for `child_process` / `node:child_process`.
+    const pattern =
+      /(?:from\s+["'](?:node:)?child_process["']|import\s*\(\s*["'](?:node:)?child_process["']\s*\)|require\s*\(\s*["'](?:node:)?child_process["']\s*\)|import\s+\w+\s*=\s*require\s*\(\s*["'](?:node:)?child_process["']\s*\))/;
+    for (const rel of HOOK_SOURCE_RELS) {
+      const offenders = findOffenders(readSource(rel), pattern);
+      expect(
+        offenders,
+        `${rel} must not import child_process / node:child_process in any form (D98.M.1 — static, dynamic, require, or import-equals). Matches: ${JSON.stringify(offenders)}`,
+      ).toEqual([]);
+    }
+  });
+
+  it("D98.M.2: hook subsystem does NOT import @viberevert/checks in any form", () => {
+    // The hook script SHELLS OUT to `viberevert check --staged` at
+    // commit time; install and uninstall commands NEVER link against
+    // the checks engine. Decoupling means changes to the checks engine
+    // never require re-running install. Scans all three M F CLI
+    // source files across all four import forms (static + dynamic +
+    // require + import-equals), plus subpath imports.
+    const pattern =
+      /(?:from\s+["']@viberevert\/checks(?:["'/])|import\s*\(\s*["']@viberevert\/checks(?:["'/])|require\s*\(\s*["']@viberevert\/checks(?:["'/])|import\s+\w+\s*=\s*require\s*\(\s*["']@viberevert\/checks(?:["'/]))/;
+    for (const rel of HOOK_SOURCE_RELS) {
+      const offenders = findOffenders(readSource(rel), pattern);
+      expect(
+        offenders,
+        `${rel} must not import @viberevert/checks in any form (D98.M.2 — static, dynamic, require, import-equals, exact or subpath). Matches: ${JSON.stringify(offenders)}`,
+      ).toEqual([]);
+    }
+  });
+
+  it("D98.M.3: hook subsystem does NOT import any known LLM SDK in any form", () => {
+    // The hook subsystem is config-blind and LLM-free in v0.7.0-beta.
+    // Any direct import of a known SDK would either signal an
+    // in-progress LLM implementation (which belongs to a different
+    // milestone) OR an accidental dependency creep through a
+    // transitive helper. Scans all three files across the broad
+    // KNOWN_LLM_SDKS list using buildSdkForbiddenPattern (all four
+    // import forms).
+    for (const rel of HOOK_SOURCE_RELS) {
+      const source = readSource(rel);
+      for (const sdk of KNOWN_LLM_SDKS) {
+        const pattern = buildSdkForbiddenPattern(sdk);
+        const offenders = findOffenders(source, pattern);
+        expect(
+          offenders,
+          `${rel} must not import ${sdk} in any form (D98.M.3 — known LLM SDK). Matches: ${JSON.stringify(offenders)}`,
+        ).toEqual([]);
+      }
+    }
+  });
+
+  // ===========================================================================
+  // D98.M.4 — hook-script.ts ASCII-only
+  // ===========================================================================
+
+  it("D98.M.4: hook-script.ts is ASCII-only at byte level", () => {
+    // hook-script.ts content is what gets written to .git/hooks/pre-
+    // commit on disk — a single non-ASCII byte (em-dash, smart quote,
+    // arrow) would corrupt the on-disk hook script. Byte-level scan
+    // catches accidental smart-quote / em-dash insertion in any
+    // context (output string literals, comments, identifiers, etc.)
+    // without needing a fragile string-literal parser.
+    const source = readSource(HOOK_SCRIPT_REL);
+    const nonAscii: Array<{ index: number; codePoint: number }> = [];
+    for (let i = 0; i < source.length; i++) {
+      const codePoint = source.charCodeAt(i);
+      if (codePoint >= 128) {
+        nonAscii.push({ index: i, codePoint });
+      }
+    }
+    expect(
+      nonAscii,
+      `hook-script.ts must be ASCII-only at byte level (D98.M.4). Non-ASCII chars (first 10): ${JSON.stringify(nonAscii.slice(0, 10))}`,
+    ).toEqual([]);
+  });
+
+  // ===========================================================================
+  // D98.M.5 — hook-script.ts pure module (no runtime imports)
+  // ===========================================================================
+
+  it("D98.M.5: hook-script.ts imports nothing except types (pure constants + pure-function module)", () => {
+    // hook-script.ts is a pure module: locked constants
+    // (MANAGED_BY_MARKER, HOOK_SCRIPT_TEMPLATE, BACKUP_FILE_PREFIX,
+    // BACKUP_FILE_REGEX) + pure formatBackupTimestamp(date). NO
+    // runtime imports (no node:fs, no @viberevert/*, no SDKs).
+    // Type-only imports (`import type { ... }`) are allowed because
+    // they erase at runtime and introduce no runtime dependency or
+    // side effect.
+    //
+    // Pattern catches three antipattern shapes:
+    //   - Line beginning with `import ...` that is NOT `import type ...`
+    //     (negative lookahead `(?!\s+type\b)` excludes the type-only form)
+    //   - Line containing `require("...")` (CJS or TS-import-equals)
+    //   - Line containing dynamic `import("...")`
+    const source = readSource(HOOK_SCRIPT_REL);
+    const runtimeImportPattern =
+      /^(?:import(?!\s+type\b)\s|.*\brequire\s*\(\s*["']|.*\bimport\s*\(\s*["'])/;
+    const offenders = findOffenders(source, runtimeImportPattern);
+    expect(
+      offenders,
+      `hook-script.ts must NOT have any runtime imports (D98.M.5 — pure constants module). Runtime-import lines: ${JSON.stringify(offenders)}`,
+    ).toEqual([]);
+  });
+
+  // ===========================================================================
+  // D98.M.6 — hook-install.ts fs source-call-site surface
+  // ===========================================================================
+
+  it("D98.M.6: hook-install.ts filesystem surface — exact source-call-site counts (10 sites / 9 patterns) + aggregate per-op guards + forbidden ops", () => {
+    // D98.I install list locks the EXACT source-call-site surface:
+    //   lstat(join(repoRoot, ".git")) x1, lstat(hooksDir) x2 (preflight
+    //   + post-mkdir per D98.X validate-before-mutate), lstat(hookPath)
+    //   x1, readFile(hookPath) x1, lstat(backupPath) x1,
+    //   rename(hookPath, backupPath) x1, mkdir(hooksDir) x1,
+    //   writeFileAtomic(hookPath) x1, chmod(hookPath) x1.
+    // 10 fs source call sites across 9 operation patterns.
+    //
+    // Plus: aggregate per-op guards (catches an extra `lstat(otherPath)`
+    // / `chmod(otherPath)` etc. that bypasses the variable-specific
+    // pattern table).
+    //
+    // Plus: forbid readdir, unlink, copyFile, rm, and bare stat
+    // (without `l` prefix) -- all explicitly excluded from the locked
+    // install surface.
+    const source = readSource(HOOK_INSTALL_REL);
+    const expectedCounts: ReadonlyArray<{ name: string; pattern: RegExp; expected: number }> = [
+      {
+        name: 'lstat(join(repoRoot, ".git")',
+        pattern: /lstat\(join\(repoRoot, "\.git"\)/,
+        expected: 1,
+      },
+      { name: "lstat(hooksDir", pattern: /lstat\(hooksDir/, expected: 2 },
+      { name: "lstat(hookPath", pattern: /lstat\(hookPath/, expected: 1 },
+      { name: "readFile(hookPath", pattern: /readFile\(hookPath/, expected: 1 },
+      { name: "lstat(backupPath", pattern: /lstat\(backupPath/, expected: 1 },
+      {
+        name: "rename(hookPath, backupPath",
+        pattern: /rename\(hookPath, backupPath/,
+        expected: 1,
+      },
+      { name: "mkdir(hooksDir", pattern: /mkdir\(hooksDir/, expected: 1 },
+      { name: "writeFileAtomic(hookPath", pattern: /writeFileAtomic\(hookPath/, expected: 1 },
+      { name: "chmod(hookPath", pattern: /chmod\(hookPath/, expected: 1 },
+    ];
+    for (const { name, pattern, expected } of expectedCounts) {
+      const offenders = findOffenders(source, pattern);
+      expect(
+        offenders.length,
+        `hook-install.ts must contain EXACTLY ${expected} \`${name}\` source call site(s) (D98.M.6). Found ${offenders.length}: ${JSON.stringify(offenders)}`,
+      ).toBe(expected);
+    }
+
+    // Aggregate guards: total counts per fs operation must match the
+    // per-variable sum. Catches an extra `lstat(otherPath)` /
+    // `chmod(otherPath)` etc. that bypasses the variable-specific
+    // pattern table.
+    expect(
+      findOffenders(source, /\blstat\(/).length,
+      "hook-install.ts must contain EXACTLY 5 lstat() source call sites total (1 .git + 2 hooksDir + 1 hookPath + 1 backupPath = 5) (D98.M.6 aggregate guard).",
+    ).toBe(5);
+    expect(
+      findOffenders(source, /\breadFile\(/).length,
+      "hook-install.ts must contain EXACTLY 1 readFile() source call site total (D98.M.6 aggregate guard).",
+    ).toBe(1);
+    expect(
+      findOffenders(source, /\brename\(/).length,
+      "hook-install.ts must contain EXACTLY 1 rename() source call site total (D98.M.6 aggregate guard).",
+    ).toBe(1);
+    expect(
+      findOffenders(source, /\bmkdir\(/).length,
+      "hook-install.ts must contain EXACTLY 1 mkdir() source call site total (D98.M.6 aggregate guard).",
+    ).toBe(1);
+    expect(
+      findOffenders(source, /\bwriteFileAtomic\(/).length,
+      "hook-install.ts must contain EXACTLY 1 writeFileAtomic() source call site total (D98.M.6 aggregate guard).",
+    ).toBe(1);
+    expect(
+      findOffenders(source, /\bchmod\(/).length,
+      "hook-install.ts must contain EXACTLY 1 chmod() source call site total (D98.M.6 aggregate guard).",
+    ).toBe(1);
+
+    const forbiddenOps: ReadonlyArray<{ name: string; pattern: RegExp }> = [
+      { name: "readdir(", pattern: /\breaddir\(/ },
+      { name: "unlink(", pattern: /\bunlink\(/ },
+      { name: "copyFile(", pattern: /\bcopyFile\(/ },
+      { name: "rm(", pattern: /\brm\(/ },
+      // `stat(` standalone — word boundary excludes `lstat(` since `l`
+      // and `s` are both word chars (no boundary between them).
+      { name: "stat( (without `l` prefix)", pattern: /\bstat\(/ },
+    ];
+    for (const { name, pattern } of forbiddenOps) {
+      const offenders = findOffenders(source, pattern);
+      expect(
+        offenders,
+        `hook-install.ts must NOT call \`${name}\` (D98.M.6 forbidden op). Matches: ${JSON.stringify(offenders)}`,
+      ).toEqual([]);
+    }
+  });
+
+  // ===========================================================================
+  // D98.M.7 — hook-uninstall.ts fs source-call-site surface
+  // ===========================================================================
+
+  it("D98.M.7: hook-uninstall.ts filesystem surface — exact source-call-site counts (9 sites / 8 patterns) + withFileTypes:true EXACTLY once + aggregate per-op guards + forbidden ops", () => {
+    // D98.I uninstall list locks the EXACT source-call-site surface:
+    //   lstat(join(repoRoot, ".git")) x1, lstat(hooksDir) x1 (uninstall
+    //   does NOT mkdir, so no post-mkdir re-check), lstat(hookPath) x2
+    //   (first for presence + marker check, second for --restore final
+    //   collision guard), readFile(hookPath) x1, rm(hookPath) x1
+    //   (default-uninstall AND --restore-rm-managed share via shouldRm
+    //   flag), readdir(hooksDir) x1 WITH locked `withFileTypes: true`
+    //   option, rename(backupPath, hookPath) x1, chmod(hookPath) x1.
+    // 9 fs source call sites across 8 operation patterns.
+    //
+    // Plus: sub-assertion for the `withFileTypes: true` literal token
+    // EXACTLY once (matches the single readdir(hooksDir) call site).
+    //
+    // Plus: aggregate per-op guards (catches an extra `lstat(otherPath)`
+    // / `readdir(otherPath)` that bypasses the variable-specific
+    // pattern table).
+    //
+    // Plus: forbid mkdir, writeFile/writeFileAtomic, unlink, copyFile,
+    // bare stat -- explicitly excluded from the locked uninstall surface.
+    const source = readSource(HOOK_UNINSTALL_REL);
+    const expectedCounts: ReadonlyArray<{ name: string; pattern: RegExp; expected: number }> = [
+      {
+        name: 'lstat(join(repoRoot, ".git")',
+        pattern: /lstat\(join\(repoRoot, "\.git"\)/,
+        expected: 1,
+      },
+      { name: "lstat(hooksDir", pattern: /lstat\(hooksDir/, expected: 1 },
+      { name: "lstat(hookPath", pattern: /lstat\(hookPath/, expected: 2 },
+      { name: "readFile(hookPath", pattern: /readFile\(hookPath/, expected: 1 },
+      { name: "rm(hookPath", pattern: /rm\(hookPath/, expected: 1 },
+      { name: "readdir(hooksDir", pattern: /readdir\(hooksDir/, expected: 1 },
+      {
+        name: "rename(backupPath, hookPath",
+        pattern: /rename\(backupPath, hookPath/,
+        expected: 1,
+      },
+      { name: "chmod(hookPath", pattern: /chmod\(hookPath/, expected: 1 },
+    ];
+    for (const { name, pattern, expected } of expectedCounts) {
+      const offenders = findOffenders(source, pattern);
+      expect(
+        offenders.length,
+        `hook-uninstall.ts must contain EXACTLY ${expected} \`${name}\` source call site(s) (D98.M.7). Found ${offenders.length}: ${JSON.stringify(offenders)}`,
+      ).toBe(expected);
+    }
+
+    // `withFileTypes: true` token must appear EXACTLY once (matches
+    // the single readdir(hooksDir) call site -- a second occurrence
+    // would imply a second readdir call which D98.M.7 forbids).
+    const withFileTypesOffenders = findOffenders(source, /withFileTypes:\s*true/);
+    expect(
+      withFileTypesOffenders.length,
+      `hook-uninstall.ts must contain the literal \`withFileTypes: true\` token EXACTLY once (D98.M.7 separate grep enforcement; matches the single readdir(hooksDir) call site). Found ${withFileTypesOffenders.length}.`,
+    ).toBe(1);
+
+    // Aggregate guards: total counts per fs operation must match the
+    // per-variable sum. Catches an extra `lstat(otherPath)` /
+    // `readdir(otherPath)` etc. that bypasses the variable-specific
+    // pattern table.
+    expect(
+      findOffenders(source, /\blstat\(/).length,
+      "hook-uninstall.ts must contain EXACTLY 4 lstat() source call sites total (1 .git + 1 hooksDir + 2 hookPath = 4) (D98.M.7 aggregate guard).",
+    ).toBe(4);
+    expect(
+      findOffenders(source, /\breadFile\(/).length,
+      "hook-uninstall.ts must contain EXACTLY 1 readFile() source call site total (D98.M.7 aggregate guard).",
+    ).toBe(1);
+    expect(
+      findOffenders(source, /\brm\(/).length,
+      "hook-uninstall.ts must contain EXACTLY 1 rm() source call site total (D98.M.7 aggregate guard).",
+    ).toBe(1);
+    expect(
+      findOffenders(source, /\breaddir\(/).length,
+      "hook-uninstall.ts must contain EXACTLY 1 readdir() source call site total (D98.M.7 aggregate guard).",
+    ).toBe(1);
+    expect(
+      findOffenders(source, /\brename\(/).length,
+      "hook-uninstall.ts must contain EXACTLY 1 rename() source call site total (D98.M.7 aggregate guard).",
+    ).toBe(1);
+    expect(
+      findOffenders(source, /\bchmod\(/).length,
+      "hook-uninstall.ts must contain EXACTLY 1 chmod() source call site total (D98.M.7 aggregate guard).",
+    ).toBe(1);
+
+    const forbiddenOps: ReadonlyArray<{ name: string; pattern: RegExp }> = [
+      { name: "mkdir(", pattern: /\bmkdir\(/ },
+      { name: "writeFile(", pattern: /\bwriteFile\(/ },
+      { name: "writeFileAtomic(", pattern: /\bwriteFileAtomic\(/ },
+      { name: "unlink(", pattern: /\bunlink\(/ },
+      { name: "copyFile(", pattern: /\bcopyFile\(/ },
+      { name: "stat( (without `l` prefix)", pattern: /\bstat\(/ },
+    ];
+    for (const { name, pattern } of forbiddenOps) {
+      const offenders = findOffenders(source, pattern);
+      expect(
+        offenders,
+        `hook-uninstall.ts must NOT call \`${name}\` (D98.M.7 forbidden op). Matches: ${JSON.stringify(offenders)}`,
+      ).toEqual([]);
+    }
+  });
+
+  // ===========================================================================
+  // D98.M.8 — import-count locks for cross-file symbols
+  // ===========================================================================
+
+  it("D98.M.8: HOOK_SCRIPT_TEMPLATE imported exactly once in hook-install.ts from ../hook-script.js; MANAGED_BY_MARKER imported exactly once in EACH of install + uninstall from ../hook-script.js; detectHookManagers imported once from ../hook-managers.js + called once in hook-install.ts", () => {
+    // D98.M.8 locks the symbol-import surface for cross-file symbols
+    // from hook-script.ts and hook-managers.ts. Catches accidental
+    // template inlining, marker drift, or duplicate detection
+    // invocations (one import does NOT prevent two calls — both
+    // locks are required for detectHookManagers).
+    //
+    // **Multi-line imports**: biome formats imports with >3 symbols as
+    // multi-line blocks where each symbol sits on its own line --
+    // findOffenders splits per-line and cannot match
+    // `import { ... SYMBOL ... }` when the symbol is on its own line.
+    // We use a local stripCommentsToString helper (same comment-filter
+    // logic as findOffenders) + multi-line regex matching against the
+    // joined non-comment source. Character class `[^}]*` matches
+    // across newlines naturally (no /s flag needed).
+    //
+    // **Source-module anchoring**: each named-import count is tied to
+    // the EXACT locked module specifier (../hook-script.js or
+    // ../hook-managers.js). Catches the bypass where a future
+    // maintainer might import HOOK_SCRIPT_TEMPLATE from a forked /
+    // re-exporting module like `./somewhere-else.js` -- the symbol
+    // would appear in an import block but NOT in our locked-source
+    // import. The `countNamedImportFrom` helper composes the symbol
+    // and specifier into one anchored regex.
+    //
+    // detectHookManagers's CALL site is still checked via findOffenders
+    // since function calls sit on one line.
+
+    function stripCommentsToString(source: string): string {
+      let inBlockComment = false;
+      return source
+        .split("\n")
+        .filter((line) => {
+          const trimmed = line.trim();
+          if (inBlockComment) {
+            if (trimmed.includes("*/")) inBlockComment = false;
+            return false;
+          }
+          if (trimmed.startsWith("//")) return false;
+          if (trimmed.startsWith("/*")) {
+            if (!trimmed.includes("*/")) inBlockComment = true;
+            return false;
+          }
+          if (trimmed.startsWith("*")) return false;
+          return true;
+        })
+        .join("\n");
+    }
+
+    function countNamedImportFrom(
+      source: string,
+      symbol: string,
+      specifierPattern: string,
+    ): number {
+      const pattern = new RegExp(
+        `(?:^|\\n)\\s*import\\s*\\{[^}]*\\b${symbol}\\b[^}]*\\}\\s*from\\s+["']${specifierPattern}["']`,
+        "g",
+      );
+      return (source.match(pattern) || []).length;
+    }
+
+    const installSource = readSource(HOOK_INSTALL_REL);
+    const uninstallSource = readSource(HOOK_UNINSTALL_REL);
+    const installSourceStripped = stripCommentsToString(installSource);
+    const uninstallSourceStripped = stripCommentsToString(uninstallSource);
+
+    const hookScriptSpecifier = String.raw`\.\.\/hook-script\.js`;
+    const hookManagersSpecifier = String.raw`\.\.\/hook-managers\.js`;
+
+    // HOOK_SCRIPT_TEMPLATE: exactly 1 import in install (from
+    // ../hook-script.js); absent in uninstall.
+    const tmplInInstall = countNamedImportFrom(
+      installSourceStripped,
+      "HOOK_SCRIPT_TEMPLATE",
+      hookScriptSpecifier,
+    );
+    expect(
+      tmplInInstall,
+      `hook-install.ts must import HOOK_SCRIPT_TEMPLATE exactly once from "../hook-script.js" (D98.M.8). Found ${tmplInInstall}.`,
+    ).toBe(1);
+    const tmplInUninstall = countNamedImportFrom(
+      uninstallSourceStripped,
+      "HOOK_SCRIPT_TEMPLATE",
+      hookScriptSpecifier,
+    );
+    expect(
+      tmplInUninstall,
+      `hook-uninstall.ts must NOT import HOOK_SCRIPT_TEMPLATE (D98.M.8 — uninstall does not write the template). Found ${tmplInUninstall}.`,
+    ).toBe(0);
+
+    // MANAGED_BY_MARKER: exactly 1 import in EACH of install + uninstall
+    // (both from ../hook-script.js).
+    const markerInInstall = countNamedImportFrom(
+      installSourceStripped,
+      "MANAGED_BY_MARKER",
+      hookScriptSpecifier,
+    );
+    expect(
+      markerInInstall,
+      `hook-install.ts must import MANAGED_BY_MARKER exactly once from "../hook-script.js" (D98.M.8). Found ${markerInInstall}.`,
+    ).toBe(1);
+    const markerInUninstall = countNamedImportFrom(
+      uninstallSourceStripped,
+      "MANAGED_BY_MARKER",
+      hookScriptSpecifier,
+    );
+    expect(
+      markerInUninstall,
+      `hook-uninstall.ts must import MANAGED_BY_MARKER exactly once from "../hook-script.js" (D98.M.8). Found ${markerInUninstall}.`,
+    ).toBe(1);
+
+    // detectHookManagers: exactly 1 import (from ../hook-managers.js)
+    // + exactly 1 call site in hook-install.ts. One import does NOT
+    // prevent two calls -- both locks are required to catch duplicate
+    // invocations.
+    const detectImports = countNamedImportFrom(
+      installSourceStripped,
+      "detectHookManagers",
+      hookManagersSpecifier,
+    );
+    expect(
+      detectImports,
+      `hook-install.ts must import detectHookManagers exactly once from "../hook-managers.js" (D98.M.8). Found ${detectImports}.`,
+    ).toBe(1);
+    const detectCalls = findOffenders(installSource, /\bdetectHookManagers\s*\(\s*repoRoot\s*\)/);
+    expect(
+      detectCalls.length,
+      `hook-install.ts must call detectHookManagers(repoRoot) exactly once (D98.M.8). Found ${detectCalls.length}: ${JSON.stringify(detectCalls)}`,
+    ).toBe(1);
+  });
+
+  // ===========================================================================
+  // D98.M.9 — CLI index.ts hook command exposure (import + register counts)
+  // ===========================================================================
+
+  it("D98.M.9: index.ts imports HookInstallCommand AND HookUninstallCommand exactly once each AND registers each via cli.register exactly once", () => {
+    // D98.M.9 locks command EXPOSURE through the binary — the
+    // integration tests register each command manually via their
+    // in-test Cli, so if a future maintainer removes the
+    // cli.register(...) line from index.ts EVERY test still passes
+    // but the binary `viberevert hook install` / `viberevert hook
+    // uninstall` becomes unreachable. This test closes that gap.
+    const source = readSource(CLI_INDEX_REL);
+
+    const installImports = findOffenders(
+      source,
+      /import\s*\{\s*HookInstallCommand\s*\}\s*from\s*["']\.\/commands\/hook-install\.js["']/,
+    );
+    expect(
+      installImports.length,
+      `index.ts must import HookInstallCommand exactly once from "./commands/hook-install.js" (D98.M.9). Found ${installImports.length}.`,
+    ).toBe(1);
+
+    const uninstallImports = findOffenders(
+      source,
+      /import\s*\{\s*HookUninstallCommand\s*\}\s*from\s*["']\.\/commands\/hook-uninstall\.js["']/,
+    );
+    expect(
+      uninstallImports.length,
+      `index.ts must import HookUninstallCommand exactly once from "./commands/hook-uninstall.js" (D98.M.9). Found ${uninstallImports.length}.`,
+    ).toBe(1);
+
+    const installRegisters = findOffenders(
+      source,
+      /\bcli\.register\s*\(\s*HookInstallCommand\s*\)/,
+    );
+    expect(
+      installRegisters.length,
+      `index.ts must register HookInstallCommand via cli.register(HookInstallCommand) exactly once (D98.M.9). Found ${installRegisters.length}.`,
+    ).toBe(1);
+
+    const uninstallRegisters = findOffenders(
+      source,
+      /\bcli\.register\s*\(\s*HookUninstallCommand\s*\)/,
+    );
+    expect(
+      uninstallRegisters.length,
+      `index.ts must register HookUninstallCommand via cli.register(HookUninstallCommand) exactly once (D98.M.9). Found ${uninstallRegisters.length}.`,
+    ).toBe(1);
+  });
+
+  // ===========================================================================
+  // D98.M.10 — index.ts registration ORDER + immediately-after lock
+  // ===========================================================================
+
+  it("D98.M.10: index.ts registration ORDER — RollbackCommand < HookInstallCommand < HookUninstallCommand AND HookUninstallCommand IMMEDIATELY after HookInstallCommand", () => {
+    // D98.M.10 locks the workflow-grouping convention from the M F
+    // plan: hook commands sit immediately after the rollback command,
+    // and the two hook commands are registered as a pair (no other
+    // command may be inserted between them). This mirrors D90's
+    // ReportCommand < PromptFixCommand < RollbackCommand pattern.
+    //
+    // Defensive: assert each anchor exists before comparing indices --
+    // indexOf returning -1 would silently satisfy `-1 < n` when `n`
+    // is also non-negative.
+    const source = readSource(CLI_INDEX_REL);
+
+    const rollbackIdx = source.indexOf("cli.register(RollbackCommand);");
+    const hookInstallIdx = source.indexOf("cli.register(HookInstallCommand);");
+    const hookUninstallIdx = source.indexOf("cli.register(HookUninstallCommand);");
+
+    expect(
+      rollbackIdx,
+      "RollbackCommand registration missing from index.ts (D98.M.10 anchor)",
+    ).toBeGreaterThanOrEqual(0);
+    expect(
+      hookInstallIdx,
+      "HookInstallCommand registration missing from index.ts (D98.M.10)",
+    ).toBeGreaterThanOrEqual(0);
+    expect(
+      hookUninstallIdx,
+      "HookUninstallCommand registration missing from index.ts (D98.M.10)",
+    ).toBeGreaterThanOrEqual(0);
+
+    expect(
+      rollbackIdx,
+      "HookInstallCommand must be registered AFTER RollbackCommand in index.ts (D98.M.10)",
+    ).toBeLessThan(hookInstallIdx);
+    expect(
+      hookInstallIdx,
+      "HookUninstallCommand must be registered AFTER HookInstallCommand in index.ts (D98.M.10)",
+    ).toBeLessThan(hookUninstallIdx);
+
+    // "Immediately after" lock: between the HookInstall register line
+    // and the HookUninstall register line, there must be NO other
+    // cli.register(...) call. This enforces the "register them as a
+    // pair" intent vs. allowing arbitrary commands to be inserted
+    // between them.
+    const between = source.slice(
+      hookInstallIdx + "cli.register(HookInstallCommand);".length,
+      hookUninstallIdx,
+    );
+    const interlopingRegisters = findOffenders(between, /\bcli\.register\s*\(/);
+    expect(
+      interlopingRegisters,
+      `HookUninstallCommand must be registered IMMEDIATELY after HookInstallCommand with no other cli.register() between them (D98.M.10). Interloping registrations: ${JSON.stringify(interlopingRegisters)}`,
+    ).toEqual([]);
+  });
+
+  // ===========================================================================
+  // D98.M.11 — hook-managers.ts fs source-call-site surface
+  // ===========================================================================
+
+  it("D98.M.11: hook-managers.ts filesystem surface — exact source-call-site counts (6 lstats + 1 readFile = 7 total sites) + aggregate per-op guards + forbidden ops", () => {
+    // D98.W locks the hook-managers.ts fs surface to EXACTLY these
+    // 7 source call sites:
+    //   lstat(huskyDirPath) x1, readFile(packageJsonPath) x1, plus one
+    //   lstat per lefthook file signal:
+    //     lstat(lefthookYmlPath), lstat(lefthookYamlPath),
+    //     lstat(dotLefthookYmlPath), lstat(dotLefthookYamlPath),
+    //     lstat(lefthookLocalYmlPath).
+    // 6 lstats + 1 readFile = 7 total fs source call sites.
+    //
+    // Plus: aggregate per-op guards (catches an extra
+    // `lstat(otherPath)` / `readFile(otherPath)` that bypasses the
+    // variable-specific pattern table).
+    //
+    // Plus: forbid readdir, stat without `l`, write, rename, chmod,
+    // unlink, rm -- hook-managers.ts is pure detection logic and
+    // never mutates.
+    const source = readSource(HOOK_MANAGERS_REL);
+    const expectedSingleSites: ReadonlyArray<{ name: string; pattern: RegExp }> = [
+      { name: "lstat(huskyDirPath", pattern: /lstat\(huskyDirPath/ },
+      { name: "readFile(packageJsonPath", pattern: /readFile\(packageJsonPath/ },
+      { name: "lstat(lefthookYmlPath", pattern: /lstat\(lefthookYmlPath/ },
+      { name: "lstat(lefthookYamlPath", pattern: /lstat\(lefthookYamlPath/ },
+      { name: "lstat(dotLefthookYmlPath", pattern: /lstat\(dotLefthookYmlPath/ },
+      { name: "lstat(dotLefthookYamlPath", pattern: /lstat\(dotLefthookYamlPath/ },
+      { name: "lstat(lefthookLocalYmlPath", pattern: /lstat\(lefthookLocalYmlPath/ },
+    ];
+    for (const { name, pattern } of expectedSingleSites) {
+      const offenders = findOffenders(source, pattern);
+      expect(
+        offenders.length,
+        `hook-managers.ts must contain EXACTLY 1 \`${name}\` source call site (D98.M.11). Found ${offenders.length}: ${JSON.stringify(offenders)}`,
+      ).toBe(1);
+    }
+
+    // Aggregate guards: total counts per fs operation must match the
+    // per-variable sum. Catches an extra `lstat(otherPath)` /
+    // `readFile(otherPath)` that bypasses the variable-specific
+    // pattern table.
+    expect(
+      findOffenders(source, /\blstat\(/).length,
+      "hook-managers.ts must contain EXACTLY 6 lstat() source call sites total (D98.M.11 aggregate guard).",
+    ).toBe(6);
+    expect(
+      findOffenders(source, /\breadFile\(/).length,
+      "hook-managers.ts must contain EXACTLY 1 readFile() source call site total (D98.M.11 aggregate guard).",
+    ).toBe(1);
+
+    const forbiddenOps: ReadonlyArray<{ name: string; pattern: RegExp }> = [
+      { name: "readdir(", pattern: /\breaddir\(/ },
+      { name: "mkdir(", pattern: /\bmkdir\(/ },
+      { name: "writeFile(", pattern: /\bwriteFile\(/ },
+      { name: "rename(", pattern: /\brename\(/ },
+      { name: "chmod(", pattern: /\bchmod\(/ },
+      { name: "rm(", pattern: /\brm\(/ },
+      { name: "unlink(", pattern: /\bunlink\(/ },
+      { name: "stat( (without `l` prefix)", pattern: /\bstat\(/ },
+    ];
+    for (const { name, pattern } of forbiddenOps) {
+      const offenders = findOffenders(source, pattern);
+      expect(
+        offenders,
+        `hook-managers.ts must NOT call \`${name}\` (D98.M.11 forbidden op). Matches: ${JSON.stringify(offenders)}`,
+      ).toEqual([]);
+    }
+  });
+
+  // ===========================================================================
+  // D98.M.12 — cross-command import lock
+  // ===========================================================================
+
+  it("D98.M.12: hook-install.ts and hook-uninstall.ts MUST NOT import from each other in any form (.js or .ts subpath; either `./hook-*` or `../commands/hook-*` specifier)", () => {
+    // Cross-command import would create coupling that fragments the
+    // single-responsibility boundary and risks circular-import
+    // surprises in M G1+. Shared error classes
+    // (UnsupportedGitHookLayoutError, UnsupportedGitHooksDirectoryError)
+    // are intentionally re-defined locally in each file rather than
+    // imported across. Catches all 4 import forms AND both .js / .ts
+    // subpath suffixes AND both sibling-relative (`./hook-*`) and
+    // parent-relative (`../commands/hook-*`) specifier shapes
+    // (future-proofs against a refactor that uses parent-relative
+    // paths in type-only or test-shaped imports); type-only imports
+    // are also caught by `from "..."` since the suffix is identical.
+    const installSource = readSource(HOOK_INSTALL_REL);
+    const uninstallSource = readSource(HOOK_UNINSTALL_REL);
+
+    const hookUninstallSpecifier = String.raw`(?:\.\/hook-uninstall|\.\.\/commands\/hook-uninstall)(?:\.(?:js|ts))?`;
+    const installToUninstallPattern = new RegExp(
+      `(?:from\\s+["']${hookUninstallSpecifier}["']` +
+        `|import\\s*\\(\\s*["']${hookUninstallSpecifier}["']\\s*\\)` +
+        `|require\\s*\\(\\s*["']${hookUninstallSpecifier}["']\\s*\\)` +
+        `|import\\s+\\w+\\s*=\\s*require\\s*\\(\\s*["']${hookUninstallSpecifier}["']\\s*\\))`,
+    );
+    const installOffenders = findOffenders(installSource, installToUninstallPattern);
+    expect(
+      installOffenders,
+      `hook-install.ts must NOT import from hook-uninstall.ts in any form (D98.M.12). Matches: ${JSON.stringify(installOffenders)}`,
+    ).toEqual([]);
+
+    const hookInstallSpecifier = String.raw`(?:\.\/hook-install|\.\.\/commands\/hook-install)(?:\.(?:js|ts))?`;
+    const uninstallToInstallPattern = new RegExp(
+      `(?:from\\s+["']${hookInstallSpecifier}["']` +
+        `|import\\s*\\(\\s*["']${hookInstallSpecifier}["']\\s*\\)` +
+        `|require\\s*\\(\\s*["']${hookInstallSpecifier}["']\\s*\\)` +
+        `|import\\s+\\w+\\s*=\\s*require\\s*\\(\\s*["']${hookInstallSpecifier}["']\\s*\\))`,
+    );
+    const uninstallOffenders = findOffenders(uninstallSource, uninstallToInstallPattern);
+    expect(
+      uninstallOffenders,
+      `hook-uninstall.ts must NOT import from hook-install.ts in any form (D98.M.12). Matches: ${JSON.stringify(uninstallOffenders)}`,
+    ).toEqual([]);
+  });
+
+  // ===========================================================================
+  // D98.M.13 — hook-install + hook-uninstall + hook-managers ASCII-only
+  // ===========================================================================
+
+  it("D98.M.13: hook-install.ts + hook-uninstall.ts + hook-managers.ts are ASCII-only at byte level", () => {
+    // Mirrors D98.M.4's byte-level scan applied to the three M F CLI
+    // source files. Catches em-dashes, smart quotes, arrows, ellipsis,
+    // and any other non-ASCII char anywhere in any context (output
+    // strings, comments, JSDoc, identifiers, default values) without
+    // needing a fragile string-literal parser. Extends D55's "no
+    // ANSI color" rule consistently across the M F surface.
+    for (const rel of HOOK_SOURCE_RELS) {
+      const source = readSource(rel);
+      const nonAscii: Array<{ index: number; codePoint: number }> = [];
+      for (let i = 0; i < source.length; i++) {
+        const codePoint = source.charCodeAt(i);
+        if (codePoint >= 128) {
+          nonAscii.push({ index: i, codePoint });
+        }
+      }
+      expect(
+        nonAscii,
+        `${rel} must be ASCII-only at byte level (D98.M.13). Non-ASCII chars (first 10): ${JSON.stringify(nonAscii.slice(0, 10))}`,
+      ).toEqual([]);
+    }
+  });
+
+  // ===========================================================================
+  // D98.M.14 — hook-script.ts: forbid raw multi-line template literal for HOOK_SCRIPT_TEMPLATE
+  // ===========================================================================
+
+  it("D98.M.14: hook-script.ts MUST NOT assign HOOK_SCRIPT_TEMPLATE via a raw multi-line template literal", () => {
+    // HOOK_SCRIPT_TEMPLATE must be constructed via
+    //   [...lines].join("\n") + "\n"
+    // (NOT a raw multi-line backtick template literal). The locked
+    // construction guarantees LF-only line endings; a raw template
+    // literal on Windows + autocrlf=true could pick up CRLF at
+    // checkout time, breaking the on-disk hook script.
+    //
+    // Broadened regex (\bHOOK_SCRIPT_TEMPLATE\b[^=]*=\s*`) catches:
+    //   const HOOK_SCRIPT_TEMPLATE = `...`
+    //   export const HOOK_SCRIPT_TEMPLATE = `...`
+    //   export const HOOK_SCRIPT_TEMPLATE: string = `...`
+    // and any future typed-assignment variant. Does NOT match
+    // legitimate uses like `HOOK_SCRIPT_TEMPLATE` referenced inside
+    // join-array expressions, function returns, or string
+    // interpolations elsewhere in the file. The `[^=]*` is greedy
+    // but bounded by the requirement of a subsequent `=` followed by
+    // optional whitespace then a backtick — only an actual assignment
+    // to a template literal satisfies that shape.
+    const source = readSource(HOOK_SCRIPT_REL);
+    const antipattern = /\bHOOK_SCRIPT_TEMPLATE\b[^=]*=\s*`/;
+    const offenders = findOffenders(source, antipattern);
+    expect(
+      offenders,
+      `hook-script.ts must NOT assign HOOK_SCRIPT_TEMPLATE via a raw multi-line template literal (D98.M.14). Use [...lines].join("\\n") + "\\n" instead. Matches: ${JSON.stringify(offenders)}`,
+    ).toEqual([]);
+  });
+});
