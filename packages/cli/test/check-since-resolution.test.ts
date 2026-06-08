@@ -101,7 +101,12 @@ async function setupRepo(): Promise<TestRepo> {
   return {
     repoRoot,
     cleanup: async () => {
-      await rm(tmp, { recursive: true, force: true });
+      await rm(tmp, {
+        recursive: true,
+        force: true,
+        maxRetries: 3,
+        retryDelay: 50,
+      });
     },
   };
 }
