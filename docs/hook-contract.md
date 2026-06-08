@@ -511,7 +511,7 @@ If <path> exists but is not viberevert-managed, leave it alone -- vibe-revert re
 
 **`HookNotViberevertManagedError`** (default uninstall when file exists but marker missing / non-regular):
 ```
-Pre-commit hook at <path> is not viberevert-managed (missing marker `# managed-by: viberevert`). Refusing to remove it.
+Pre-commit hook at <path> is not viberevert-managed (missing expected managed-by marker on line 2, or path is not a regular file). Refusing to remove it.
 If this is a stale viberevert hook from a future version, remove it manually.
 ```
 
@@ -520,9 +520,9 @@ If this is a stale viberevert hook from a future version, remove it manually.
 No backup files found matching `pre-commit.viberevert-backup-*` in <hooks-dir>. Nothing to restore.
 ```
 
-**`RestoreTargetExistsError`** (uninstall --restore when current pre-commit is non-viberevert OR the final-collision-guard inode mismatch fires):
+**`RestoreTargetExistsError`** (uninstall --restore when current pre-commit fails any validate-before-mutate guard: non-viberevert pre-condition, or final metadata-fingerprint mismatch from a concurrent change between the first and second `lstat(hookPath)` — fingerprint = dev + ino + size + mtimeMs + ctimeMs):
 ```
-Cannot restore: pre-commit hook already exists at <hookPath> and is not viberevert-managed. Remove it manually before `viberevert hook uninstall --restore`.
+Cannot restore safely: pre-commit target at <hookPath> is not the same viberevert-managed hook validated earlier, or already exists and is not viberevert-managed. Remove it manually before `viberevert hook uninstall --restore`.
 ```
 
 **`HookInstallIoError` / `HookUninstallIoError`** (generic I/O wrap; `<op>` in "stat" | "read" | "rename" | "write" | "chmod" | "remove" | "list" | "mkdir"):
