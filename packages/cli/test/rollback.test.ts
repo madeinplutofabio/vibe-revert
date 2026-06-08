@@ -165,7 +165,12 @@ beforeEach(async () => {
 
 afterEach(async () => {
   process.chdir(originalCwd);
-  await rm(tmpRoot, { recursive: true, force: true });
+  await rm(tmpRoot, {
+    recursive: true,
+    force: true,
+    maxRetries: 3,
+    retryDelay: 50,
+  });
 });
 
 // =============================================================================
