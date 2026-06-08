@@ -9,6 +9,7 @@ import { CheckpointCommand } from "./commands/checkpoint.js";
 import { CheckpointsCommand } from "./commands/checkpoints.js";
 import { DoctorCommand } from "./commands/doctor.js";
 import { EndCommand } from "./commands/end.js";
+import { HookInstallCommand } from "./commands/hook-install.js";
 import { InitCommand } from "./commands/init.js";
 import { PromptFixCommand } from "./commands/prompt-fix.js";
 import { ReportCommand } from "./commands/report.js";
@@ -36,5 +37,6 @@ cli.register(CheckCommand);
 cli.register(ReportCommand);
 cli.register(PromptFixCommand);
 cli.register(RollbackCommand);
+cli.register(HookInstallCommand);
 
 await cli.runExit(process.argv.slice(2));
