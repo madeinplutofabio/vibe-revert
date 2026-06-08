@@ -742,6 +742,7 @@ describe("viberevert hook install -- regular-file-only marker check (A36, A41)",
       const targetContent = `#!/bin/sh\n${MANAGED_BY_MARKER}\n# elsewhere\n`;
       await fsPromises.writeFile(targetPath, targetContent);
       const hookPath = path.join(repoRoot, ".git", "hooks", "pre-commit");
+      await fsPromises.mkdir(path.join(repoRoot, ".git", "hooks"), { recursive: true });
       await fsPromises.symlink(targetPath, hookPath);
       const result = await runHookInstall(repoRoot);
       expect(result.exitCode).toBe(1);
@@ -762,6 +763,7 @@ describe("viberevert hook install -- regular-file-only marker check (A36, A41)",
       const targetContent = `#!/bin/sh\n${MANAGED_BY_MARKER}\n# elsewhere\n`;
       await fsPromises.writeFile(targetPath, targetContent);
       const hookPath = path.join(repoRoot, ".git", "hooks", "pre-commit");
+      await fsPromises.mkdir(path.join(repoRoot, ".git", "hooks"), { recursive: true });
       await fsPromises.symlink(targetPath, hookPath);
       const result = await runHookInstall(repoRoot, ["--force"]);
       expect(result.exitCode).toBe(0);
