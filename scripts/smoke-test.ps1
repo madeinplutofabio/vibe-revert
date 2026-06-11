@@ -271,6 +271,7 @@ try {
                --filter '@viberevert/git' `
                --filter '@viberevert/checks' `
                --filter '@viberevert/reporters' `
+               --filter '@viberevert/cli-commands' `
                --filter 'viberevert' `
                pack --pack-destination $packDir
         if ($LASTEXITCODE -ne 0) { throw "pnpm pack failed (exit $LASTEXITCODE)" }
@@ -284,9 +285,10 @@ try {
     $tgzGi = (Get-ChildItem $packDir -Filter 'viberevert-git-*.tgz' | Select-Object -First 1).FullName
     $tgzCh = (Get-ChildItem $packDir -Filter 'viberevert-checks-*.tgz' | Select-Object -First 1).FullName
     $tgzRe = (Get-ChildItem $packDir -Filter 'viberevert-reporters-*.tgz' | Select-Object -First 1).FullName
+    $tgzCc = (Get-ChildItem $packDir -Filter 'viberevert-cli-commands-*.tgz' | Select-Object -First 1).FullName
     # `viberevert-<version>.tgz` -- match digit-leading suffix so we don't pick
-    # up viberevert-git/core/session-format/checks/reporters tarballs (which also
-    # start with `viberevert-`).
+    # up viberevert-git/core/session-format/checks/reporters/cli-commands tarballs
+    # (which also start with `viberevert-`). cli-commands is post-Step-1 (M G1a).
     # Note: PowerShell/Windows `-Filter` is filesystem-provider filtering, NOT a bash-style
     # glob -- character classes like `[0-9]` do NOT work. Use a `Where-Object` regex (.NET regex)
     # via `-match` instead. Sort-Object for deterministic selection if multiple matches ever exist.
@@ -295,7 +297,7 @@ try {
         Sort-Object Name |
         Select-Object -First 1).FullName
 
-    foreach ($tgz in @($tgzSf, $tgzCo, $tgzGi, $tgzCh, $tgzRe, $tgzCl)) {
+    foreach ($tgz in @($tgzSf, $tgzCo, $tgzGi, $tgzCh, $tgzRe, $tgzCc, $tgzCl)) {
         if (-not $tgz) {
             $listed = (Get-ChildItem $packDir).Name -join ', '
             throw "Expected tarball not found under $packDir (files: $listed)"
@@ -331,6 +333,7 @@ try {
         $pGi = $tgzGi -replace '\\', '/'
         $pCh = $tgzCh -replace '\\', '/'
         $pRe = $tgzRe -replace '\\', '/'
+        $pCc = $tgzCc -replace '\\', '/'
         $pCl = $tgzCl -replace '\\', '/'
 
         $packageJson = @"
@@ -352,7 +355,8 @@ try {
       "@viberevert/core": "file:$pCo",
       "@viberevert/git": "file:$pGi",
       "@viberevert/checks": "file:$pCh",
-      "@viberevert/reporters": "file:$pRe"
+      "@viberevert/reporters": "file:$pRe",
+      "@viberevert/cli-commands": "file:$pCc"
     }
   }
 }

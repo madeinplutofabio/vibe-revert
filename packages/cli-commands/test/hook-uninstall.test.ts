@@ -1297,25 +1297,6 @@ describe("hook-uninstall.ts source invariants (preview of D98.M Step 5)", () => 
     // Option-binding shape, not raw `--force` text.
     expect(source).not.toMatch(/Option\.[A-Za-z]+\(\s*["']--force["']/);
   });
-
-  it("D98.M.9/M.10: index.ts registers HookUninstallCommand exactly once after HookInstallCommand", async () => {
-    const indexSourcePath = fileURLToPath(new URL("../src/index.ts", import.meta.url));
-    const indexSource = await fsPromises.readFile(indexSourcePath, "utf8");
-    // Exactly ONE import statement containing the HookUninstallCommand identifier
-    const importCount = (
-      indexSource.match(/import\s*\{[^}]*\bHookUninstallCommand\b[^}]*\}/g) || []
-    ).length;
-    // Exactly ONE cli.register call
-    const registerCount = (indexSource.match(/cli\.register\(HookUninstallCommand\)/g) || [])
-      .length;
-    expect(importCount).toBe(1);
-    expect(registerCount).toBe(1);
-    // Registration ORDER: HookUninstallCommand AFTER HookInstallCommand (D98.M.10)
-    const installIdx = indexSource.indexOf("cli.register(HookInstallCommand);");
-    const uninstallIdx = indexSource.indexOf("cli.register(HookUninstallCommand);");
-    expect(installIdx).toBeGreaterThan(-1);
-    expect(uninstallIdx).toBeGreaterThan(installIdx);
-  });
 });
 
 // =============================================================================

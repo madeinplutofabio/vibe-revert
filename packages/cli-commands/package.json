@@ -1,0 +1,43 @@
+{
+  "name": "@viberevert/cli-commands",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "author": "Fabio Marcello Salvadori <fabio@madeinpluto.com>",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@viberevert/checks": "workspace:*",
+    "@viberevert/core": "workspace:*",
+    "@viberevert/git": "workspace:*",
+    "@viberevert/reporters": "workspace:*",
+    "@viberevert/session-format": "workspace:*",
+    "clipanion": "3.2.1",
+    "picomatch": "4.0.4"
+  },
+  "devDependencies": {
+    "@types/picomatch": "4.0.2"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  }
+}

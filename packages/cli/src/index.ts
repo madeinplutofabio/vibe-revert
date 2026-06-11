@@ -2,22 +2,24 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Fabio Marcello Salvadori
 
+import {
+  CheckCommand,
+  CheckpointCommand,
+  CheckpointsCommand,
+  DoctorCommand,
+  EndCommand,
+  HookInstallCommand,
+  HookUninstallCommand,
+  InitCommand,
+  PromptFixCommand,
+  ReportCommand,
+  RollbackCommand,
+  SessionsCommand,
+  StartCommand,
+  VersionCommand,
+} from "@viberevert/cli-commands";
 import { Builtins, Cli } from "clipanion";
 import pkg from "../package.json" with { type: "json" };
-import { CheckCommand } from "./commands/check.js";
-import { CheckpointCommand } from "./commands/checkpoint.js";
-import { CheckpointsCommand } from "./commands/checkpoints.js";
-import { DoctorCommand } from "./commands/doctor.js";
-import { EndCommand } from "./commands/end.js";
-import { HookInstallCommand } from "./commands/hook-install.js";
-import { HookUninstallCommand } from "./commands/hook-uninstall.js";
-import { InitCommand } from "./commands/init.js";
-import { PromptFixCommand } from "./commands/prompt-fix.js";
-import { ReportCommand } from "./commands/report.js";
-import { RollbackCommand } from "./commands/rollback.js";
-import { SessionsCommand } from "./commands/sessions.js";
-import { StartCommand } from "./commands/start.js";
-import { VersionCommand } from "./commands/version.js";
 
 const cli = new Cli({
   binaryName: "viberevert",

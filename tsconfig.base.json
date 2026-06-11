@@ -25,6 +25,7 @@
     "paths": {
       "@viberevert/adapters": ["packages/adapters/src/index.ts"],
       "@viberevert/checks": ["packages/checks/src/index.ts"],
+      "@viberevert/cli-commands": ["packages/cli-commands/src/index.ts"],
       "@viberevert/core": ["packages/core/src/index.ts"],
       "@viberevert/git": ["packages/git/src/index.ts"],
       "@viberevert/installers": ["packages/installers/src/index.ts"],

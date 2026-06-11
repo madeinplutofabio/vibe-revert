@@ -244,7 +244,11 @@ import {
 import { Command, Option } from "clipanion";
 
 import { renameDirAtomic, writeFileAtomic } from "../atomic.js";
-import { CollisionExitSentinel, safeListCheckpoints } from "../checkpoint-helpers.js";
+import {
+  CheckpointListLoadError,
+  CollisionExitSentinel,
+  safeListCheckpoints,
+} from "../checkpoint-helpers.js";
 import { ConcurrentOperationError, type LockInfo, withExclusiveLock } from "../locks.js";
 import {
   buildReceiptForApply,
@@ -625,9 +629,20 @@ async function createEmergencyCheckpoint(args: {
 
   return await withExclusiveLock(lockDir, lockInfo, async () => {
     // D5b name-collision scan + suffix-counter to find unique name.
-    const existing = await safeListCheckpoints(args.repoRoot, args.cmd);
-    if (existing === null) {
-      throw new CollisionExitSentinel();
+    // Post M G1a Step 1: safeListCheckpoints now throws
+    // CheckpointListLoadError instead of writing stderr + returning null.
+    // We catch it, write the same stderr the helper used to write, and
+    // throw CollisionExitSentinel — preserves the pre-refactor exit-1
+    // flow byte-identically.
+    let existing: Awaited<ReturnType<typeof safeListCheckpoints>>;
+    try {
+      existing = await safeListCheckpoints(args.repoRoot);
+    } catch (err) {
+      if (err instanceof CheckpointListLoadError) {
+        args.cmd.context.stderr.write(`Error reading existing checkpoints: ${err.message}\n`);
+        throw new CollisionExitSentinel();
+      }
+      throw err;
     }
     const existingNames = new Set(
       existing.map((c) => c.name).filter((n): n is string => n != null),

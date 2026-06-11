@@ -8,9 +8,6 @@ export default defineProject({
   resolve: {
     alias: {
       "@viberevert/checks": fileURLToPath(new URL("../checks/src/index.ts", import.meta.url)),
-      "@viberevert/cli-commands": fileURLToPath(
-        new URL("../cli-commands/src/index.ts", import.meta.url),
-      ),
       "@viberevert/core": fileURLToPath(new URL("../core/src/index.ts", import.meta.url)),
       "@viberevert/git": fileURLToPath(new URL("../git/src/index.ts", import.meta.url)),
       "@viberevert/reporters": fileURLToPath(new URL("../reporters/src/index.ts", import.meta.url)),

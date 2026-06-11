@@ -44,6 +44,15 @@ importers:
 
   packages/cli:
     dependencies:
+      '@viberevert/cli-commands':
+        specifier: workspace:*
+        version: link:../cli-commands
+      clipanion:
+        specifier: 3.2.1
+        version: 3.2.1
+
+  packages/cli-commands:
+    dependencies:
       '@viberevert/checks':
         specifier: workspace:*
         version: link:../checks
