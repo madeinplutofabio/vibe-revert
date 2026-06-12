@@ -2625,3 +2625,713 @@ describe("Architectural invariants — M G1a D99.M @viberevert/cli-commands boun
     }
   });
 });
+
+describe("Architectural invariants -- M G1a Step 2 D99.M @viberevert/mcp boundaries", () => {
+  const MCP_SRC_DIR = "packages/mcp/src";
+  const MCP_AUDIT_REL = "packages/mcp/src/audit.ts";
+  const MCP_PACKAGE_JSON_REL = "packages/mcp/package.json";
+  const CLI_COMMANDS_SRC_DIR_M2 = "packages/cli-commands/src";
+  const CLI_COMMANDS_PACKAGE_JSON_REL = "packages/cli-commands/package.json";
+
+  /**
+   * Known LLM-SDK package specifiers banned per D99.M.1. DUPLICATED
+   * from the D90 / D98.M blocks for self-containment -- D99.M is a
+   * separate decision lock and the list MUST be authoritative within
+   * this block so a future change to one list does not silently
+   * de-protect another subsystem.
+   */
+  const KNOWN_LLM_SDKS: ReadonlyArray<string> = [
+    "@anthropic-ai/sdk",
+    "@anthropic-ai/bedrock-sdk",
+    "openai",
+    "cohere-ai",
+    "@google/generative-ai",
+    "replicate",
+    "mistralai",
+    "@mistralai/mistralai",
+    "ai",
+    "@ai-sdk/openai",
+    "@ai-sdk/anthropic",
+    "@ai-sdk/google",
+    "@ai-sdk/mistral",
+    "@langchain/openai",
+    "@langchain/anthropic",
+    "langchain",
+    "ollama",
+    "groq-sdk",
+    "@groq/sdk",
+    "@huggingface/inference",
+    "llamaindex",
+    "@aws-sdk/client-bedrock-runtime",
+  ];
+
+  /** Escape a string for use inside a RegExp constructor. */
+  function escapeRegExp(value: string): string {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  /**
+   * Build a regex that matches all FIVE import forms of a given
+   * package name (allowing subpath imports via trailing `/`):
+   *
+   *   1. `from "<name>"`                           -- static ESM
+   *   2. `import("<name>")`                         -- dynamic ESM
+   *   3. `require("<name>")`                        -- CJS
+   *   4. `import x = require("<name>")`             -- TS import-equals
+   *   5. `import "<name>"`                          -- ESM side-effect
+   *
+   * The 5th form (side-effect import) was previously missing from
+   * the D90 / D98.M shape; carried here as a hardened version. A
+   * side-effect import triggers module-evaluation side effects
+   * (potentially the SDK's auto-registering handlers, clipanion's
+   * Command-class side effects, etc.) without giving a typed
+   * surface -- exactly the kind of opaque coupling these invariants
+   * exist to prevent.
+   */
+  function buildSdkForbiddenPattern(sdkName: string): RegExp {
+    const escaped = escapeRegExp(sdkName);
+    return new RegExp(
+      `(?:from\\s+["']${escaped}(?:["'/])` +
+        `|import\\s*\\(\\s*["']${escaped}(?:["'/])` +
+        `|require\\s*\\(\\s*["']${escaped}(?:["'/])` +
+        `|import\\s+\\w+\\s*=\\s*require\\s*\\(\\s*["']${escaped}(?:["'/])` +
+        `|import\\s+["']${escaped}(?:["'/]))`,
+    );
+  }
+
+  /**
+   * Collect all .ts files under packages/mcp/src and return their
+   * repo-relative posix-style paths plus absolute paths. Asserts the
+   * directory is non-empty as a self-check -- a typo in MCP_SRC_DIR
+   * or an accidental empty src directory must fail loudly, not
+   * silently pass every invariant.
+   */
+  function mcpSrcTsFiles(): ReadonlyArray<{ abs: string; rel: string }> {
+    const abs = join(REPO_ROOT, MCP_SRC_DIR);
+    const files = findTsFiles(abs);
+    expect(
+      files.length,
+      `Self-check: expected at least one .ts file under ${MCP_SRC_DIR}/. Got 0 -- typo in MCP_SRC_DIR or missing source?`,
+    ).toBeGreaterThan(0);
+    return files.map((a) => ({
+      abs: a,
+      rel: relative(REPO_ROOT, a).replace(/\\/g, "/"),
+    }));
+  }
+
+  // ===========================================================================
+  // D99.M.1 -- No LLM SDK
+  // ===========================================================================
+
+  it("D99.M.1: packages/mcp/src/** does NOT import any known LLM SDK (5 import forms x KNOWN_LLM_SDKS list)", () => {
+    // MCP is a protocol surface, not an LLM runtime. Source is
+    // pre-stripped via stripTsComments so a doc comment mentioning
+    // an SDK by name (e.g. `// see openai's chat API for parity`)
+    // cannot false-positive.
+    for (const { abs, rel } of mcpSrcTsFiles()) {
+      const source = stripTsComments(readFileSync(abs, "utf8"));
+      for (const sdk of KNOWN_LLM_SDKS) {
+        const pattern = buildSdkForbiddenPattern(sdk);
+        const offenders = findOffenders(source, pattern);
+        expect(
+          offenders,
+          `${rel} must not import ${sdk} in any form (D99.M.1 -- 5-form coverage). Matches: ${JSON.stringify(offenders)}`,
+        ).toEqual([]);
+      }
+    }
+  });
+
+  // ===========================================================================
+  // D99.M.2 -- No child_process
+  // ===========================================================================
+
+  it("D99.M.2: packages/mcp/src/** does NOT import child_process / node:child_process (5 import forms)", () => {
+    // MCP runs in-process via runCommandInProcess (D99.E / D99.F).
+    // Spawning a subprocess from mcp would (a) defeat the harness,
+    // (b) reintroduce ambient-environment risks the harness
+    // eliminates, (c) corrupt stdio framing if the subprocess
+    // inherits the parent's stdio. Source pre-stripped.
+    //
+    // 5-form coverage explicitly includes the side-effect import
+    // `import "node:child_process"` which the previous 4-form
+    // shape would have missed.
+    const pattern =
+      /(?:from\s+["'](?:node:)?child_process["']|import\s*\(\s*["'](?:node:)?child_process["']\s*\)|require\s*\(\s*["'](?:node:)?child_process["']\s*\)|import\s+\w+\s*=\s*require\s*\(\s*["'](?:node:)?child_process["']\s*\)|import\s+["'](?:node:)?child_process["'])/;
+    for (const { abs, rel } of mcpSrcTsFiles()) {
+      const source = stripTsComments(readFileSync(abs, "utf8"));
+      const offenders = findOffenders(source, pattern);
+      expect(
+        offenders,
+        `${rel} must not import child_process / node:child_process in any form (D99.M.2 -- 5-form coverage incl. side-effect). Matches: ${JSON.stringify(offenders)}`,
+      ).toEqual([]);
+    }
+  });
+
+  // ===========================================================================
+  // D99.M.6 -- @viberevert/core import carve-out (Step 2 surface, exact equality)
+  // ===========================================================================
+
+  it("D99.M.6 (Step 2 surface): packages/mcp/src/** core imports EQUAL exactly the Step 2 set; no default/namespace/side-effect/dynamic/require/import-equals/deep imports", () => {
+    // Step 2 source imports exactly six names from @viberevert/core:
+    //   - 5 error classes (in envelope.ts) keyed into MCP_ERROR_CODE_MAP
+    //     by constructor identity per D99.I.
+    //   - viberevertDir (in audit.ts) for the audit log path resolution
+    //     per D99.M.6 carve-out.
+    //
+    // Step 3 will add `loadConfig` (in tools/get-policy.ts) and Step 4
+    // will add `resolveRepoRoot` (in server.ts). Those names are
+    // INTENTIONALLY NOT in the Step 2 allowed set -- each must be
+    // added to ALLOWED in the SAME commit that introduces its real
+    // source usage. Pre-authorization is a contract leak.
+    //
+    // Enforcement is EQUALITY (not subset). Two-direction loops give
+    // per-name failure messages: one direction catches new
+    // unauthorized imports; the other catches stale or pre-authorized
+    // entries.
+    const ALLOWED: ReadonlySet<string> = new Set([
+      "ConfigNotFoundError",
+      "ConfigParseError",
+      "ConfigValidationError",
+      "RepoRootNotFoundError",
+      "SessionAlreadyActiveError",
+      "viberevertDir",
+    ]);
+
+    const SHAPE_FORBIDDEN: ReadonlyArray<{ name: string; pattern: RegExp }> = [
+      {
+        name: 'default import from "@viberevert/core"',
+        pattern: /(?:^|\n)\s*import\s+\w+\s+from\s+["']@viberevert\/core["']/,
+      },
+      {
+        name: 'namespace import from "@viberevert/core"',
+        pattern: /(?:^|\n)\s*import\s+\*\s+as\s+\w+\s+from\s+["']@viberevert\/core["']/,
+      },
+      {
+        name: 'side-effect import of "@viberevert/core"',
+        pattern: /(?:^|\n)\s*import\s+["']@viberevert\/core["']/,
+      },
+      {
+        name: 'dynamic import of "@viberevert/core"',
+        pattern: /\bimport\s*\(\s*["']@viberevert\/core["']/,
+      },
+      {
+        name: 'require of "@viberevert/core"',
+        pattern: /\brequire\s*\(\s*["']@viberevert\/core["']/,
+      },
+      {
+        name: 'import-equals of "@viberevert/core"',
+        pattern: /\bimport\s+\w+\s*=\s*require\s*\(\s*["']@viberevert\/core["']\s*\)/,
+      },
+      {
+        name: 'deep import from "@viberevert/core/..."',
+        pattern: /from\s+["']@viberevert\/core\/[^"']+["']/,
+      },
+    ];
+
+    const aggregate = new Set<string>();
+    const namedImportPattern =
+      /(?:^|\n)\s*import\s*(?:type\s+)?\{([^}]*?)\}\s*from\s*["']@viberevert\/core["']/g;
+
+    for (const { abs, rel } of mcpSrcTsFiles()) {
+      const stripped = stripTsComments(readFileSync(abs, "utf8"));
+
+      for (const { name, pattern } of SHAPE_FORBIDDEN) {
+        const offenders = findOffenders(stripped, pattern);
+        expect(
+          offenders,
+          `${rel} must NOT use ${name} (D99.M.6 -- named-barrel-only). Matches: ${JSON.stringify(offenders)}`,
+        ).toEqual([]);
+      }
+
+      for (const match of stripped.matchAll(namedImportPattern)) {
+        const body = match[1] ?? "";
+        for (const raw of body.split(",")) {
+          let symbol = raw.trim();
+          if (!symbol) continue;
+          symbol = symbol.replace(/^type\s+/, "");
+          const asMatch = symbol.match(/^(\w+)\s+as\s+(\w+)$/);
+          // For `X as Y`, the source-side name X is the public
+          // name the carve-out keys on.
+          const src = asMatch?.[1] ?? symbol;
+          if (/^\w+$/.test(src)) aggregate.add(src);
+        }
+      }
+    }
+
+    // Equality, both directions, with named per-element messages.
+    for (const name of aggregate) {
+      expect(
+        ALLOWED.has(name),
+        `@viberevert/core import "${name}" found in packages/mcp/src/** is NOT in the D99.M.6 Step 2 allowed set ${JSON.stringify([...ALLOWED].sort())}. If this is a legitimate new import, add the name to ALLOWED in the SAME commit.`,
+      ).toBe(true);
+    }
+    for (const name of ALLOWED) {
+      expect(
+        aggregate.has(name),
+        `D99.M.6 allowed name "${name}" is NOT actually imported anywhere in packages/mcp/src/** (pre-authorization gap). Remove from ALLOWED or add the real import.`,
+      ).toBe(true);
+    }
+  });
+
+  // ===========================================================================
+  // D99.M.7 -- Audit fs surface lock
+  // ===========================================================================
+
+  it("D99.M.7: packages/mcp/src/audit.ts fs surface -- exactly mkdir x 1, open x 1, fh.appendFile x 1, fh.close x 1; node:fs/promises imports EXACTLY {FileHandle, mkdir, open} with no aliasing; no alternate fs import shapes", () => {
+    // The audit writer's fs surface is exhaustively documented in
+    // the plan (D99.M.7) and forms the basis of the failure-policy
+    // matrix (D99.J). Drift here -- a second mkdir, a stat call, an
+    // unlink, a namespace fs import -- would silently expand the
+    // attack surface AND likely break failure-policy assumptions.
+    //
+    // Three-layer lock:
+    //   (a) Exact call-site counts (mkdir / open / appendFile / close).
+    //   (b) The fs/promises import line shape MUST be exactly
+    //       {FileHandle, mkdir, open}, no aliasing.
+    //   (c) Forbidden alternate fs import shapes -- closes the
+    //       "one correct import plus one hidden fs namespace
+    //       import" loophole. Covers namespace, default,
+    //       side-effect, dynamic, require, import-equals, the
+    //       bare `fs/promises` (non-node-prefixed) form, AND the
+    //       non-promise `fs` callback API. All must be empty.
+    //
+    // Source is pre-stripped for all checks.
+    const raw = readSource(MCP_AUDIT_REL);
+    const stripped = stripTsComments(raw);
+
+    // ----- (a) Call-site counts ----------------------------------------------
+    // Boundary patterns count call sites only:
+    //   - `\bmkdir\(`         -- function call
+    //   - `\bopen\(`          -- function call
+    //   - `\.appendFile\(`    -- method call (must follow `.`)
+    //   - `\.close\(`         -- method call (must follow `.`)
+    // The leading dot on appendFile/close excludes the interface
+    // method declaration `close(): Promise<void>` AND string
+    // literals like `"audit: record() after close()"`, neither of
+    // which has a `.` prefix.
+    const counts = {
+      mkdir: (stripped.match(/\bmkdir\(/g) ?? []).length,
+      open: (stripped.match(/\bopen\(/g) ?? []).length,
+      appendFile: (stripped.match(/\.appendFile\(/g) ?? []).length,
+      close: (stripped.match(/\.close\(/g) ?? []).length,
+    };
+    expect(
+      counts,
+      `${MCP_AUDIT_REL} fs surface counts must be {mkdir:1, open:1, appendFile:1, close:1}. Got: ${JSON.stringify(counts)}`,
+    ).toEqual({ mkdir: 1, open: 1, appendFile: 1, close: 1 });
+
+    // ----- (b) Allowed import line shape ------------------------------------
+    const fsImports = [
+      ...stripped.matchAll(/import\s*\{([^}]*?)\}\s*from\s*["']node:fs\/promises["']/g),
+    ];
+    expect(
+      fsImports.length,
+      `${MCP_AUDIT_REL} must import from node:fs/promises exactly once. Found ${fsImports.length}.`,
+    ).toBe(1);
+
+    const body = fsImports[0]?.[1] ?? "";
+    const names = body
+      .split(",")
+      .map((s) => s.trim().replace(/^type\s+/, ""))
+      .filter((s) => s.length > 0);
+
+    for (const name of names) {
+      expect(
+        /\s+as\s+/.test(name),
+        `${MCP_AUDIT_REL} fs/promises named import "${name}" uses aliasing (D99.M.7 forbids aliasing in this surface).`,
+      ).toBe(false);
+    }
+    expect(
+      new Set(names),
+      `${MCP_AUDIT_REL} fs/promises imports must be exactly {FileHandle, mkdir, open}. Got: ${JSON.stringify(names)}`,
+    ).toEqual(new Set(["FileHandle", "mkdir", "open"]));
+
+    // ----- (c) Forbidden alternate fs import shapes -------------------------
+    const FORBIDDEN_FS_IMPORT_SHAPES: ReadonlyArray<{ name: string; pattern: RegExp }> = [
+      {
+        name: 'bare "fs/promises" import (non-node-prefixed)',
+        pattern: /from\s+["']fs\/promises["']/,
+      },
+      {
+        name: "namespace import from fs/promises",
+        pattern: /import\s+\*\s+as\s+\w+\s+from\s+["'](?:node:)?fs\/promises["']/,
+      },
+      {
+        name: "default import from fs/promises",
+        pattern: /(?:^|\n)\s*import\s+\w+\s+from\s+["'](?:node:)?fs\/promises["']/,
+      },
+      {
+        name: "side-effect import of fs/promises",
+        pattern: /(?:^|\n)\s*import\s+["'](?:node:)?fs\/promises["']/,
+      },
+      {
+        name: "dynamic import of fs/promises",
+        pattern: /\bimport\s*\(\s*["'](?:node:)?fs\/promises["']/,
+      },
+      {
+        name: "require of fs/promises",
+        pattern: /\brequire\s*\(\s*["'](?:node:)?fs\/promises["']/,
+      },
+      {
+        name: "import-equals require of fs/promises",
+        pattern: /\bimport\s+\w+\s*=\s*require\s*\(\s*["'](?:node:)?fs\/promises["']/,
+      },
+      {
+        name: "any import of non-promise fs (callback API forbidden entirely)",
+        pattern:
+          /(?:from\s+["'](?:node:)?fs["']|import\s*\(\s*["'](?:node:)?fs["']|require\s*\(\s*["'](?:node:)?fs["']|import\s+\w+\s*=\s*require\s*\(\s*["'](?:node:)?fs["']|(?:^|\n)\s*import\s+["'](?:node:)?fs["'])/,
+      },
+    ];
+    for (const { name, pattern } of FORBIDDEN_FS_IMPORT_SHAPES) {
+      const offenders = findOffenders(stripped, pattern);
+      expect(
+        offenders,
+        `${MCP_AUDIT_REL} must NOT use ${name} (D99.M.7 -- alternate fs surface). Matches: ${JSON.stringify(offenders)}`,
+      ).toEqual([]);
+    }
+  });
+
+  // ===========================================================================
+  // D99.M.10 -- No network modules
+  // ===========================================================================
+
+  it("D99.M.10: packages/mcp/src/** does NOT import node:http / node:https / node:net / node:dgram (5 import forms; with or without node: prefix)", () => {
+    // MCP transport in v0.7.0-beta is stdio only (D99.D). Pulling
+    // in any network module here would either signal an in-progress
+    // HTTP/SSE transport (post-beta scope) or accidental transitive
+    // coupling. Source pre-stripped; 5-form coverage incl.
+    // side-effect imports.
+    const FORBIDDEN = ["http", "https", "net", "dgram"];
+    for (const { abs, rel } of mcpSrcTsFiles()) {
+      const source = stripTsComments(readFileSync(abs, "utf8"));
+      for (const mod of FORBIDDEN) {
+        const pattern = new RegExp(
+          `(?:from\\s+["'](?:node:)?${mod}["']` +
+            `|import\\s*\\(\\s*["'](?:node:)?${mod}["']\\s*\\)` +
+            `|require\\s*\\(\\s*["'](?:node:)?${mod}["']\\s*\\)` +
+            `|import\\s+\\w+\\s*=\\s*require\\s*\\(\\s*["'](?:node:)?${mod}["']\\s*\\)` +
+            `|import\\s+["'](?:node:)?${mod}["'])`,
+        );
+        const offenders = findOffenders(source, pattern);
+        expect(
+          offenders,
+          `${rel} must not import ${mod} / node:${mod} in any of 5 forms (D99.M.10). Matches: ${JSON.stringify(offenders)}`,
+        ).toEqual([]);
+      }
+    }
+  });
+
+  // ===========================================================================
+  // D99.M.11 -- packages/mcp/package.json dependency map (Step 2 surface)
+  // ===========================================================================
+
+  it("D99.M.11 (Step 2 surface): packages/mcp/package.json dependencies EXACTLY {zod: 4.4.1, @viberevert/cli-commands: workspace:*, @viberevert/core: workspace:*}; forbidden deps absent from all dep sections", () => {
+    // Step 2 ships envelope + audit + errors + timeout -- the MCP
+    // SDK is intentionally NOT yet a dependency (Step 3 adds it
+    // together with the first server-construction call site). Lock
+    // the Step 2 surface EXACTLY so a premature SDK add forces an
+    // explicit plan edit, AND so the negative-list (clipanion,
+    // viberevert binary, LLM SDKs, sibling internal packages)
+    // cannot creep in either.
+    //
+    // The exact-equality check fails LOUDLY when Step 3 adds
+    // @modelcontextprotocol/sdk -- that's the intended trigger for
+    // tightening this invariant in Step 3's own commit.
+    const pkg = JSON.parse(readSource(MCP_PACKAGE_JSON_REL));
+    expect(
+      pkg.dependencies,
+      `${MCP_PACKAGE_JSON_REL} dependencies must EXACTLY match the Step 2 surface (no more, no less). When Step 3 lands @modelcontextprotocol/sdk, update this assertion in the SAME commit that adds the dep.`,
+    ).toEqual({
+      "@viberevert/cli-commands": "workspace:*",
+      "@viberevert/core": "workspace:*",
+      zod: "4.4.1",
+    });
+
+    const FORBIDDEN: ReadonlyArray<string> = [
+      "@modelcontextprotocol/sdk",
+      "clipanion",
+      "zod-to-json-schema",
+      "viberevert",
+      "@viberevert/adapters",
+      "@viberevert/installers",
+      "@viberevert/checks",
+      "@viberevert/reporters",
+      "@viberevert/git",
+      ...KNOWN_LLM_SDKS,
+    ];
+    for (const section of ["dependencies", "devDependencies", "peerDependencies"]) {
+      const keys = Object.keys(pkg[section] ?? {});
+      for (const banned of FORBIDDEN) {
+        expect(
+          keys.includes(banned),
+          `${MCP_PACKAGE_JSON_REL} ${section} must NOT contain "${banned}" (D99.M.11 forbidden-deps list).`,
+        ).toBe(false);
+      }
+    }
+  });
+
+  // ===========================================================================
+  // D99.M.13 -- ASCII-only at byte level
+  // ===========================================================================
+
+  it("D99.M.13: packages/mcp/src/** is ASCII-only at the byte level (no byte > 0x7F)", () => {
+    // The MCP server runs in user terminals and pipes through stdio
+    // bytes. Non-ASCII source -- even comments -- risks (a) inducing
+    // an editor-encoding regression that corrupts the file, (b)
+    // surfacing in error messages we send back over the protocol,
+    // (c) leaking through if a string literal accidentally
+    // interpolates a non-ASCII byte. Byte-level (not codepoint-
+    // level) so a stray UTF-8 sequence fails too. INTENTIONALLY
+    // does NOT use stripTsComments -- bytes are bytes regardless
+    // of where they land.
+    for (const { abs, rel } of mcpSrcTsFiles()) {
+      const bytes = readFileSync(abs);
+      for (let i = 0; i < bytes.length; i++) {
+        const b = bytes[i] ?? 0;
+        if (b > 0x7f) {
+          throw new Error(
+            `${rel}: non-ASCII byte 0x${b.toString(16).padStart(2, "0")} at offset ${i} (D99.M.13 ASCII-only).`,
+          );
+        }
+      }
+    }
+  });
+
+  // ===========================================================================
+  // D99.M.14 -- No process.stdout.write / process.stderr.write / process.exit
+  // ===========================================================================
+
+  it("D99.M.14: packages/mcp/src/** does NOT call process.stdout.write / process.stderr.write / process.exit (library discipline; CLI command owns human stderr + exit codes)", () => {
+    // @viberevert/mcp is a library. The MCP SDK owns stdio for
+    // protocol traffic; the MCPCommand wrapper in packages/cli owns
+    // human-facing stderr and the process exit code. The library
+    // throws (boot failure) or returns (graceful shutdown), nothing
+    // else. NO carve-outs.
+    const FORBIDDEN: ReadonlyArray<{ name: string; pattern: RegExp }> = [
+      { name: "process.exit(", pattern: /\bprocess\.exit\s*\(/ },
+      { name: "process.stdout.write(", pattern: /\bprocess\.stdout\.write\s*\(/ },
+      { name: "process.stderr.write(", pattern: /\bprocess\.stderr\.write\s*\(/ },
+    ];
+    for (const { abs, rel } of mcpSrcTsFiles()) {
+      const stripped = stripTsComments(readFileSync(abs, "utf8"));
+      for (const { name, pattern } of FORBIDDEN) {
+        const offenders = findOffenders(stripped, pattern);
+        expect(
+          offenders,
+          `${rel} must NOT call ${name} (D99.M.14 library discipline). Matches: ${JSON.stringify(offenders)}`,
+        ).toEqual([]);
+      }
+    }
+  });
+
+  // ===========================================================================
+  // D99.M.15 -- No-reverse-cycle (cli-commands MUST NOT depend on mcp)
+  // ===========================================================================
+
+  it("D99.M.15: packages/cli-commands/src/** does NOT import @viberevert/mcp (5 import forms) AND packages/cli-commands/package.json does NOT depend on @viberevert/mcp", () => {
+    // Package graph: cli -> cli-commands AND cli -> mcp AND
+    // mcp -> cli-commands. A cli-commands -> mcp edge would close
+    // the cycle. Source grep + package.json check together cover
+    // the static side; the runtime side is impossible because a
+    // cycle would already break the build's `tsc` step.
+    const pattern = buildSdkForbiddenPattern("@viberevert/mcp");
+
+    const ccSrcAbs = join(REPO_ROOT, CLI_COMMANDS_SRC_DIR_M2);
+    const ccFiles = findTsFiles(ccSrcAbs);
+    expect(
+      ccFiles.length,
+      `Self-check: expected at least one .ts file under ${CLI_COMMANDS_SRC_DIR_M2}/.`,
+    ).toBeGreaterThan(0);
+    for (const abs of ccFiles) {
+      const rel = relative(REPO_ROOT, abs).replace(/\\/g, "/");
+      const source = stripTsComments(readFileSync(abs, "utf8"));
+      const offenders = findOffenders(source, pattern);
+      expect(
+        offenders,
+        `${rel} must NOT import @viberevert/mcp (D99.M.15 no-reverse-cycle). Matches: ${JSON.stringify(offenders)}`,
+      ).toEqual([]);
+    }
+
+    const ccPkg = JSON.parse(readSource(CLI_COMMANDS_PACKAGE_JSON_REL));
+    for (const section of ["dependencies", "devDependencies", "peerDependencies"]) {
+      const keys = Object.keys(ccPkg[section] ?? {});
+      expect(
+        keys.includes("@viberevert/mcp"),
+        `${CLI_COMMANDS_PACKAGE_JSON_REL} ${section} must NOT contain "@viberevert/mcp" (D99.M.15).`,
+      ).toBe(false);
+    }
+  });
+
+  // ===========================================================================
+  // D99.M.16 -- No-forward-cycle (mcp MUST NOT depend on viberevert CLI)
+  // ===========================================================================
+
+  it("D99.M.16: packages/mcp/src/** does NOT import `viberevert` (CLI binary, 5 forms) OR deep-import packages/cli/src/* AND packages/mcp/package.json does NOT depend on `viberevert`", () => {
+    // The CLI binary depends on mcp (Step 5 adds the dep). An
+    // mcp -> cli edge would close the cycle through the binary
+    // entry point. Both the binary specifier `viberevert` AND any
+    // deep path into packages/cli/src/* must be blocked.
+    const cliBinaryPattern = buildSdkForbiddenPattern("viberevert");
+    const cliDeepPathPattern =
+      /(?:from\s+["'][^"']*packages\/cli\/[^"']+["']|import\s*\(\s*["'][^"']*packages\/cli\/[^"']+["']\s*\)|require\s*\(\s*["'][^"']*packages\/cli\/[^"']+["']\s*\)|import\s+\w+\s*=\s*require\s*\(\s*["'][^"']*packages\/cli\/[^"']+["']\s*\)|(?:^|\n)\s*import\s+["'][^"']*packages\/cli\/[^"']+["'])/;
+
+    for (const { abs, rel } of mcpSrcTsFiles()) {
+      const source = stripTsComments(readFileSync(abs, "utf8"));
+      const binaryOffenders = findOffenders(source, cliBinaryPattern);
+      expect(
+        binaryOffenders,
+        `${rel} must NOT import "viberevert" (CLI binary) in any of 5 forms (D99.M.16). Matches: ${JSON.stringify(binaryOffenders)}`,
+      ).toEqual([]);
+      const deepOffenders = findOffenders(source, cliDeepPathPattern);
+      expect(
+        deepOffenders,
+        `${rel} must NOT deep-import from packages/cli/* (D99.M.16). Matches: ${JSON.stringify(deepOffenders)}`,
+      ).toEqual([]);
+    }
+
+    const mcpPkg = JSON.parse(readSource(MCP_PACKAGE_JSON_REL));
+    for (const section of ["dependencies", "devDependencies", "peerDependencies"]) {
+      const keys = Object.keys(mcpPkg[section] ?? {});
+      expect(
+        keys.includes("viberevert"),
+        `${MCP_PACKAGE_JSON_REL} ${section} must NOT contain "viberevert" (D99.M.16).`,
+      ).toBe(false);
+    }
+  });
+
+  // ===========================================================================
+  // D99.M.18 -- No clipanion in mcp/src OR deps (scope: src + package.json only)
+  // ===========================================================================
+
+  it("D99.M.18: packages/mcp/src/** does NOT import clipanion (5 forms) AND packages/mcp/package.json deps/devDeps/peerDeps do NOT contain clipanion. SCOPE: vitest.config.ts's `inline: ['clipanion']` is the locked test-runner bundling exception (outside src/** and outside package.json sections) -- both walls hold.", () => {
+    // Clipanion hosting is delegated to cli-commands via the
+    // runCommandInProcess harness. Pulling clipanion into mcp/src
+    // would either (a) duplicate the harness, (b) invite a
+    // mcp-owned Command class, or (c) link command argument parsing
+    // into the protocol surface.
+    //
+    // SCOPE: src/** + package.json sections ONLY. vitest.config.ts
+    // uses `inline: ["clipanion"]` so Vitest pre-bundles
+    // cli-commands' transitive clipanion import via esbuild -- that
+    // is a TEST-RUNNER bundling instruction, NOT a runtime import.
+    // vitest.config.ts lives OUTSIDE src/**; the deps-side check
+    // walks package.json sections (not transitive resolution) so
+    // the inline declaration is invisible to both halves of this
+    // test.
+    const pattern = buildSdkForbiddenPattern("clipanion");
+    for (const { abs, rel } of mcpSrcTsFiles()) {
+      const source = stripTsComments(readFileSync(abs, "utf8"));
+      const offenders = findOffenders(source, pattern);
+      expect(
+        offenders,
+        `${rel} must NOT import clipanion in any of 5 forms (D99.M.18). Matches: ${JSON.stringify(offenders)}`,
+      ).toEqual([]);
+    }
+
+    const mcpPkg = JSON.parse(readSource(MCP_PACKAGE_JSON_REL));
+    for (const section of ["dependencies", "devDependencies", "peerDependencies"]) {
+      const keys = Object.keys(mcpPkg[section] ?? {});
+      expect(
+        keys.includes("clipanion"),
+        `${MCP_PACKAGE_JSON_REL} ${section} must NOT contain "clipanion" (D99.M.18).`,
+      ).toBe(false);
+    }
+  });
+
+  // ===========================================================================
+  // D99.M.19c -- Barrel-only consumer side (mcp does not deep-import
+  //              cli-commands OR core)
+  // ===========================================================================
+
+  it("D99.M.19c: packages/mcp/src/** does NOT use deep imports from @viberevert/cli-commands OR @viberevert/core (5 deep-import forms each: static, side-effect, dynamic, require, import-equals)", () => {
+    // Step 1's D99.M.19a/b lock the PROVIDER side -- the
+    // cli-commands barrel must export the right surface. This is
+    // the CONSUMER side: mcp must use only the barrel, never deep
+    // paths. Extends to @viberevert/core for the same reason --
+    // D99.M.6 also forbids core deep imports as part of its
+    // named-barrel-only shape check; this is belt-and-suspenders.
+    //
+    // 5-form coverage per package: static, side-effect, dynamic,
+    // require, import-equals. Side-effect deep imports are
+    // particularly dangerous -- they trigger module-evaluation
+    // side effects from a specific internal file path without
+    // exposing any typed surface to the caller.
+    const deepImportPatterns: ReadonlyArray<{ name: string; pattern: RegExp }> = [
+      {
+        name: 'deep static import from "@viberevert/cli-commands/..."',
+        pattern: /from\s+["']@viberevert\/cli-commands\/[^"']+["']/,
+      },
+      {
+        name: 'deep side-effect import of "@viberevert/cli-commands/..."',
+        pattern: /(?:^|\n)\s*import\s+["']@viberevert\/cli-commands\/[^"']+["']/,
+      },
+      {
+        name: 'deep dynamic import of "@viberevert/cli-commands/..."',
+        pattern: /\bimport\s*\(\s*["']@viberevert\/cli-commands\/[^"']+["']/,
+      },
+      {
+        name: 'deep require of "@viberevert/cli-commands/..."',
+        pattern: /\brequire\s*\(\s*["']@viberevert\/cli-commands\/[^"']+["']/,
+      },
+      {
+        name: 'deep import-equals require of "@viberevert/cli-commands/..."',
+        pattern: /\bimport\s+\w+\s*=\s*require\s*\(\s*["']@viberevert\/cli-commands\/[^"']+["']/,
+      },
+      {
+        name: 'deep static import from "@viberevert/core/..."',
+        pattern: /from\s+["']@viberevert\/core\/[^"']+["']/,
+      },
+      {
+        name: 'deep side-effect import of "@viberevert/core/..."',
+        pattern: /(?:^|\n)\s*import\s+["']@viberevert\/core\/[^"']+["']/,
+      },
+      {
+        name: 'deep dynamic import of "@viberevert/core/..."',
+        pattern: /\bimport\s*\(\s*["']@viberevert\/core\/[^"']+["']/,
+      },
+      {
+        name: 'deep require of "@viberevert/core/..."',
+        pattern: /\brequire\s*\(\s*["']@viberevert\/core\/[^"']+["']/,
+      },
+      {
+        name: 'deep import-equals require of "@viberevert/core/..."',
+        pattern: /\bimport\s+\w+\s*=\s*require\s*\(\s*["']@viberevert\/core\/[^"']+["']/,
+      },
+    ];
+
+    for (const { abs, rel } of mcpSrcTsFiles()) {
+      const source = stripTsComments(readFileSync(abs, "utf8"));
+      for (const { name, pattern } of deepImportPatterns) {
+        const offenders = findOffenders(source, pattern);
+        expect(
+          offenders,
+          `${rel} must NOT use ${name} (D99.M.19c barrel-only consumer). Matches: ${JSON.stringify(offenders)}`,
+        ).toEqual([]);
+      }
+    }
+  });
+
+  // ===========================================================================
+  // Step 2 transient invariant -- no @modelcontextprotocol/sdk yet
+  // ===========================================================================
+
+  it("Step 2 transient: packages/mcp/src/** does NOT yet import @modelcontextprotocol/sdk (Step 3 lands the dep + first import; DELETE this `it` block in the same commit that adds the import)", () => {
+    // Belt-and-suspenders with D99.M.11's deps check: even if a
+    // future maintainer adds the SDK to package.json by mistake AND
+    // forgets to update D99.M.11 in the same commit, this src-side
+    // check still catches the first import attempt. When Step 3
+    // adds @modelcontextprotocol/sdk legitimately (server.ts call
+    // site for `new Server(...)`), DELETE this `it()` block in the
+    // SAME commit that adds the import. D99.M.8 (Step 4) will then
+    // lock the call-site count.
+    const pattern = buildSdkForbiddenPattern("@modelcontextprotocol/sdk");
+    for (const { abs, rel } of mcpSrcTsFiles()) {
+      const source = stripTsComments(readFileSync(abs, "utf8"));
+      const offenders = findOffenders(source, pattern);
+      expect(
+        offenders,
+        `${rel} must NOT yet import @modelcontextprotocol/sdk in Step 2 (Step 3 introduces it). Matches: ${JSON.stringify(offenders)}`,
+      ).toEqual([]);
+    }
+  });
+});

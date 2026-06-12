@@ -4,29 +4,40 @@
 // Workspace-level architecture invariants. Three complementary checks
 // that together prevent "works locally, fails on CI" drift:
 //
-//   1. TSCONFIG PATHS INVARIANT — every workspace package under
+//   1. TSCONFIG PATHS INVARIANT -- every workspace package under
 //      `packages/*` whose package.json has a `@viberevert/<name>` name
 //      AND a `src/index.ts` MUST have a matching entry in the root
 //      `tsconfig.base.json`'s `compilerOptions.paths` pointing at
 //      `packages/<name>/src/index.ts`. Catches the file-level
 //      resolution drift: without the mapping, TS falls back to
-//      `package.json#main` → `dist/index.js`, which exists locally
+//      `package.json#main` -> `dist/index.js`, which exists locally
 //      from prior builds but is absent on CI where typecheck runs
 //      BEFORE build.
 //
-//   2. PACKAGE.JSON DEPS INVARIANT — every workspace-package import
+//   2. PACKAGE.JSON DEPS INVARIANT -- every workspace-package import
 //      has to be declared in the CORRECT bucket of the consuming
 //      package's package.json:
 //        - src/ imports MUST be in `dependencies` (so production
-//          installs `pnpm install --prod` still resolve them — devDeps
+//          installs `pnpm install --prod` still resolve them -- devDeps
 //          are stripped on production install);
 //        - test/ imports may be in `dependencies` OR `devDependencies`
 //          (test code never ships to consumers).
+//      Import DETECTION uses the TypeScript compiler API to walk the
+//      AST and collect string-literal module specifiers from only the
+//      6 real import-statement shapes (see discoverWorkspaceImportsInSubdir
+//      below). Statement-aware detection is the correct fix for the
+//      "false positive on test description strings" failure mode the
+//      old regex-based detector hit: a test description like
+//      'default import from "@viberevert/core"' is just text inside a
+//      string literal -- the AST visitor sees a StringLiteral node in
+//      an ObjectLiteralExpression / PropertyAssignment context, NOT a
+//      module specifier of an ImportDeclaration, so it's correctly
+//      ignored.
 //
-//   3. VITEST CONFIG ALIAS INVARIANT — every workspace import in a
+//   3. VITEST CONFIG ALIAS INVARIANT -- every workspace import in a
 //      package that has a `vitest.config.ts` MUST appear as a string
 //      literal in that config (presumes a `resolve.alias` entry).
-//      Without an alias, vitest falls back to package.json#main →
+//      Without an alias, vitest falls back to package.json#main ->
 //      dist/index.js, which is absent on fresh clones. Phase C's
 //      checks and reporters configs had NO aliases at all and were
 //      surviving on stale local dist; CLI was missing the checks
@@ -38,19 +49,11 @@
 // fix. The CLI is the natural home: it's the "leaf consumer" of the
 // workspace and the future host of the broader D48 architectural-
 // invariants suite per the Phase F plan.
-//
-// IMPLEMENTATION NOTE: source scanning strips comments BEFORE regex
-// matching. This file itself contains comment-block examples that
-// would otherwise create false positives in invariant #2 (e.g. the
-// example imports in the file header and helper docstrings) and
-// false negatives in invariant #3 (e.g. an `// TODO: alias` comment
-// in a vitest config would satisfy a naive `.includes` check without
-// a real alias existing). The strip is applied in BOTH source-read
-// helpers for symmetric defense.
 
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import * as ts from "typescript";
 import { describe, expect, it } from "vitest";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -113,18 +116,22 @@ function readDeclaredDeps(pkgDir: string): DeclaredDeps {
 }
 
 /**
- * Strip block and line comments from TS source so the downstream
- * regex/string scans don't pick up code examples that live in
- * comments. Two important edge cases handled:
+ * Strip block and line comments from TS source. Still used by
+ * invariant #3 (vitest config alias check) so a `// TODO: alias`
+ * comment in a vitest config cannot satisfy the naive `.includes`
+ * check without a real alias actually existing.
+ *
+ * NO LONGER used by the package.json deps invariant (#2) -- that
+ * one now uses the TypeScript AST via discoverWorkspaceImportsInSubdir,
+ * which is structurally immune to source-text false positives
+ * (comments, string literals, regex literals, template literals
+ * all stay distinct from real import-statement nodes).
+ *
+ * Two edge cases handled:
  *   - URL-style `://` inside string literals (e.g. `"https://x"`) is
  *     NOT treated as the start of a line comment, thanks to the
  *     `[^:]` alternative in the line-comment regex.
  *   - Block comments are matched non-greedily and multi-line.
- *
- * False negatives possible inside template literals or regex literals
- * containing `//` (rare; the downstream invariants only LOSE matches
- * in those cases, never gain false ones — which is exactly the
- * conservative direction).
  */
 function stripTsComments(source: string): string {
   return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
@@ -151,34 +158,77 @@ function walkTsFiles(rootDir: string): string[] {
 }
 
 /**
- * Catches:
- *   - `from "<pkg>"` (incl. `import type … from`, `export … from`)
- *   - `import "<pkg>"` (side-effect import)
- *   - `import("<pkg>")` (dynamic import)
- *   - `from "<pkg>/sub"` (subpath imports — capture is the base
- *     package name; the `(?:\/[^"']*)?` group is non-capturing and discarded)
+ * Collect base @viberevert/<pkg> specifiers from every real import-
+ * shape AST node under `pkgDir/subdir`. Statement-aware: a string
+ * literal that merely CONTAINS the text `@viberevert/core` (such as
+ * a test description, an error message template, a regex pattern)
+ * is invisible here because it's a StringLiteral inside an unrelated
+ * AST context, not the moduleSpecifier of an ImportDeclaration.
  *
- * Regex-based (good enough for this invariant — a false positive would
- * just demand an extra declared dep, which is defensive, not wrong).
+ * Six AST shapes covered, matching the 5-form import surface from
+ * the M G1a D99.M block plus re-export:
+ *
+ *   1. ImportDeclaration                     `import ... from "X"`  and `import "X"`
+ *   2. ExportDeclaration (with from)         `export ... from "X"`
+ *   3. CallExpression (ImportKeyword)        `import("X")`
+ *   4. CallExpression (require identifier)   `require("X")`
+ *   5. ImportEqualsDeclaration               `import x = require("X")`
+ *
+ * Specifier-normalization regex: `/^(@viberevert\/[a-z0-9-]+)(?:\/|$)/`.
+ * Requires the captured base package name to be followed by either
+ * `/` (subpath import) or end-of-string (bare package). Rejects
+ * malformed strings like `@viberevert/core.foo` which would otherwise
+ * partial-match and pollute the discovered set with a non-existent
+ * package name.
+ *
+ * Returns a Set of base package names actually imported.
  */
-const WORKSPACE_IMPORT_RE =
-  /(?:from\s+|import\s*\(\s*|import\s+)["'](@viberevert\/[a-z0-9-]+)(?:\/[^"']*)?["']/g;
-
 function discoverWorkspaceImportsInSubdir(pkgDir: string, subdir: "src" | "test"): Set<string> {
   const imports = new Set<string>();
   const full = join(pkgDir, subdir);
   if (!existsSync(full)) return imports;
 
-  for (const file of walkTsFiles(full)) {
-    // Strip comments BEFORE regex scanning so the file's own JSDoc
-    // examples don't surface as fake imports (this very test file
-    // would otherwise self-fail on the example imports in its header).
-    const content = stripTsComments(readFileSync(file, "utf8"));
-    for (const m of content.matchAll(WORKSPACE_IMPORT_RE)) {
-      const packageName = m[1];
-      if (packageName !== undefined) imports.add(packageName);
+  const addIfWorkspace = (specifier: ts.Node | undefined): void => {
+    if (specifier === undefined) return;
+    if (!ts.isStringLiteralLike(specifier)) return;
+    const match = specifier.text.match(/^(@viberevert\/[a-z0-9-]+)(?:\/|$)/);
+    if (match !== null && match[1] !== undefined) imports.add(match[1]);
+  };
+
+  const visit = (node: ts.Node): void => {
+    if (ts.isImportDeclaration(node)) {
+      addIfWorkspace(node.moduleSpecifier);
+    } else if (ts.isExportDeclaration(node) && node.moduleSpecifier !== undefined) {
+      addIfWorkspace(node.moduleSpecifier);
+    } else if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+      if (node.arguments.length > 0) addIfWorkspace(node.arguments[0]);
+    } else if (
+      ts.isCallExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === "require"
+    ) {
+      if (node.arguments.length > 0) addIfWorkspace(node.arguments[0]);
+    } else if (
+      ts.isImportEqualsDeclaration(node) &&
+      ts.isExternalModuleReference(node.moduleReference)
+    ) {
+      addIfWorkspace(node.moduleReference.expression);
     }
+    ts.forEachChild(node, visit);
+  };
+
+  for (const file of walkTsFiles(full)) {
+    const source = readFileSync(file, "utf8");
+    const sourceFile = ts.createSourceFile(
+      file,
+      source,
+      ts.ScriptTarget.Latest,
+      /* setParentNodes */ false,
+      ts.ScriptKind.TS,
+    );
+    visit(sourceFile);
   }
+
   return imports;
 }
 
@@ -306,7 +356,7 @@ describe("workspace vitest config alias invariant", () => {
 
     for (const pkg of packages) {
       const cfgPath = join(pkg.pkgDir, "vitest.config.ts");
-      // No vitest config → no vitest runtime → nothing to alias.
+      // No vitest config -> no vitest runtime -> nothing to alias.
       if (!existsSync(cfgPath)) continue;
       // Strip comments for symmetric reasons: a `// TODO: alias`
       // comment would otherwise satisfy the naive `.includes` check
@@ -360,7 +410,7 @@ describe("workspace vitest config alias invariant", () => {
       `    test: { /* ... */ },`,
       `  });`,
       ``,
-      `Without the alias, vitest falls back to package.json#main →`,
+      `Without the alias, vitest falls back to package.json#main ->`,
       `dist/index.js, which is absent on fresh clones / clean CI runs.`,
     ];
     throw new Error(`\n${lines.join("\n")}`);
