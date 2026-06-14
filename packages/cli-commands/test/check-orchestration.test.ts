@@ -1,41 +1,28 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Fabio Marcello Salvadori
 //
-// check-orchestration.ts — C.6 targeted tests + M D Step 4b additions.
+// Tests for check orchestration helpers.
 //
-// 50 tests across 8 describe blocks. Explicit coverage for the
-// hardening paths C.5 introduced:
-//   - task drift guard (both set + disagree → throws)
-//   - staged_only literal-true emission + schema-refine throw on
-//     staged_only + session_bound
-//   - env SHA override flowing through buildReportFile via the C.1
-//     resolveSinceResolvedShaForReport call
-//   - line-number mapping (add/remove/context counters advancing
-//     through hunks; multi-hunk reset; binary suppression)
-//   - risk_level / summary aggregation per D52 / D53
-//   - risk_tags defensive dedupe + sort to satisfy
-//     sortedUniqueStringArray
-//   - exclude filtering glob semantics matching the locked picomatch
-//     options across git / checks / cli
+// This file covers the CLI-owned orchestration behavior that remains in
+// check-orchestration.ts after policy resolution was promoted to
+// @viberevert/core in M G1a Slice 3.5a.
 //
-// M D Step 4b additions (D72 strict rule for `rollback_available`):
-//   - computeRollbackAvailable: 6 tests pinning the locked decision
-//     branches — ad_hoc kind short-circuit, session_bound inner
-//     checkpoint present/missing/corrupt, the architectural canary
-//     proving the helper reads the SESSION-OWNED inner checkpoint
-//     (not the global `cp_<ULID>` store), and the fail-closed
-//     SESSION_ID_RE guard rejecting malformed reportId BEFORE any
-//     filesystem path interpolation.
+// Covered paths include:
+//   - raw diff parsing
+//   - path exclusion
+//   - risk aggregation
+//   - summary aggregation
+//   - ReportFile construction
+//   - rollback availability derivation
 
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { CheckContext, RunChecksResult } from "@viberevert/checks";
-import type { Config } from "@viberevert/core";
 import type { RawDiff, RawDiffEntry, RawDiffHunk } from "@viberevert/git";
 import { type CheckResult, type RiskLevel, SCHEMA_VERSION } from "@viberevert/session-format";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import {
   applyDiffPathExcludes,
@@ -44,11 +31,6 @@ import {
   computeRiskLevel,
   computeRollbackAvailable,
   computeSummary,
-  DEFAULT_CHECKS_CONFIG,
-  DEFAULT_FRAMEWORKS_POLICY,
-  DEFAULT_RISK_BLOCK_ON,
-  DEFAULT_RISK_WARN_ON,
-  mergeChecksConfig,
   parseRawDiffToInputs,
 } from "../src/check-orchestration.js";
 import { VIBEREVERT_TEST_FIXED_NOW, VIBEREVERT_TEST_FIXED_SHA } from "../src/runtime-env.js";
@@ -146,10 +128,6 @@ function makeAdHocSinceMeta(overrides: Partial<BuildReportSinceMeta> = {}): Buil
   };
 }
 
-function makeMinimalConfig(overrides: Partial<Config> = {}): Config {
-  return { version: 1, ...overrides };
-}
-
 function makeCheckResult(opts: {
   level: RiskLevel;
   category?: string;
@@ -171,119 +149,10 @@ function makeCheckResult(opts: {
 }
 
 // =============================================================================
-// Per-test temp repo (mergeChecksConfig → detectFrameworks does fs probes)
+// parseRawDiffToInputs -- line-number mapping
 // =============================================================================
 
-let tmpRoot: string;
-let repoRoot: string;
-
-beforeEach(async () => {
-  tmpRoot = await mkdtemp(join(tmpdir(), "viberevert-checkorch-test-"));
-  repoRoot = join(tmpRoot, "repo");
-  await mkdir(repoRoot, { recursive: true });
-});
-
-afterEach(async () => {
-  await rm(tmpRoot, { recursive: true, force: true });
-});
-
-// =============================================================================
-// D48 default constants
-// =============================================================================
-
-describe("D48 default constants", () => {
-  it("DEFAULT_RISK_BLOCK_ON === 'critical'", () => {
-    expect(DEFAULT_RISK_BLOCK_ON).toBe("critical");
-  });
-
-  it("DEFAULT_RISK_WARN_ON === 'medium'", () => {
-    expect(DEFAULT_RISK_WARN_ON).toBe("medium");
-  });
-
-  it("DEFAULT_CHECKS_CONFIG has all 8 toggle keys set to true", () => {
-    expect(DEFAULT_CHECKS_CONFIG).toEqual({
-      secrets: true,
-      dependencies: true,
-      migrations: true,
-      auth: true,
-      payments: true,
-      infra: true,
-      tests: true,
-      scope_expansion: true,
-    });
-  });
-
-  it("DEFAULT_FRAMEWORKS_POLICY === 'auto-detect'", () => {
-    expect(DEFAULT_FRAMEWORKS_POLICY).toBe("auto-detect");
-  });
-});
-
-// =============================================================================
-// mergeChecksConfig
-// =============================================================================
-
-describe("mergeChecksConfig — D57 default merging", () => {
-  it("empty config: applies all defaults; auto-detect returns [] on empty repo", async () => {
-    const result = await mergeChecksConfig(makeMinimalConfig(), repoRoot);
-    expect(result.riskBlockOn).toBe("critical");
-    expect(result.riskWarnOn).toBe("medium");
-    expect(result.checks).toEqual(DEFAULT_CHECKS_CONFIG);
-    expect(result.frameworks).toEqual([]);
-    expect(result.rollbackExclude).toEqual([]);
-  });
-
-  it("risk.block_on / warn_on overrides preserved", async () => {
-    const result = await mergeChecksConfig(
-      makeMinimalConfig({ risk: { block_on: "high", warn_on: "low" } }),
-      repoRoot,
-    );
-    expect(result.riskBlockOn).toBe("high");
-    expect(result.riskWarnOn).toBe("low");
-  });
-
-  it("explicit checks.* false overrides default true", async () => {
-    const result = await mergeChecksConfig(
-      makeMinimalConfig({ checks: { secrets: false, dependencies: false } }),
-      repoRoot,
-    );
-    expect(result.checks.secrets).toBe(false);
-    expect(result.checks.dependencies).toBe(false);
-    // Other keys remain default true.
-    expect(result.checks.migrations).toBe(true);
-    expect(result.checks.auth).toBe(true);
-  });
-
-  it("explicit frameworks array used verbatim (skips auto-detect)", async () => {
-    const result = await mergeChecksConfig(
-      makeMinimalConfig({ frameworks: ["laravel", "nextjs"] }),
-      repoRoot,
-    );
-    expect(result.frameworks).toEqual(["laravel", "nextjs"]);
-  });
-
-  it("frameworks omitted OR empty array → auto-detect invoked", async () => {
-    const omitted = await mergeChecksConfig(makeMinimalConfig(), repoRoot);
-    const empty = await mergeChecksConfig(makeMinimalConfig({ frameworks: [] }), repoRoot);
-    expect(omitted.frameworks).toEqual([]);
-    expect(empty.frameworks).toEqual([]);
-  });
-
-  it("rollback.exclude passed through; defaults to []", async () => {
-    const withExcludes = await mergeChecksConfig(
-      makeMinimalConfig({ rollback: { exclude: ["vendor/**"] } }),
-      repoRoot,
-    );
-    expect(withExcludes.rollbackExclude).toEqual(["vendor/**"]);
-    const without = await mergeChecksConfig(makeMinimalConfig(), repoRoot);
-    expect(without.rollbackExclude).toEqual([]);
-  });
-});
-
-// =============================================================================
-// parseRawDiffToInputs — line-number mapping
-// =============================================================================
-
-describe("parseRawDiffToInputs — D28 line-number mapping", () => {
+describe("parseRawDiffToInputs -- D28 line-number mapping", () => {
   it("add hunk: line numbers start at newStart and increment per add", () => {
     const raw: RawDiff = {
       entries: [
@@ -339,10 +208,10 @@ describe("parseRawDiffToInputs — D28 line-number mapping", () => {
 
   it("mixed add/remove/context: counters advance correctly through context", () => {
     // newStart=100, oldStart=100. Walk:
-    //   context  → newLine 100 → 101, oldLine 100 → 101  (emit neither)
-    //   remove   → oldLine 101 → 102  (emit { line:101, text:"removed" })
-    //   add      → newLine 101 → 102  (emit { line:101, text:"added" })
-    //   context  → newLine 102 → 103, oldLine 102 → 103  (emit neither)
+    //   context  -> newLine 100 -> 101, oldLine 100 -> 101  (emit neither)
+    //   remove   -> oldLine 101 -> 102  (emit { line:101, text:"removed" })
+    //   add      -> newLine 101 -> 102  (emit { line:101, text:"added" })
+    //   context  -> newLine 102 -> 103, oldLine 102 -> 103  (emit neither)
     const raw: RawDiff = {
       entries: [
         makeEntry({
@@ -427,10 +296,10 @@ describe("parseRawDiffToInputs — D28 line-number mapping", () => {
 });
 
 // =============================================================================
-// applyDiffPathExcludes — D3 symmetry filter
+// applyDiffPathExcludes -- D3 symmetry filter
 // =============================================================================
 
-describe("applyDiffPathExcludes — D3 symmetry filter", () => {
+describe("applyDiffPathExcludes -- D3 symmetry filter", () => {
   it("empty patterns: returns same RawDiff reference (no allocation)", () => {
     const raw: RawDiff = { entries: [makeEntry({ path: "src/foo.ts" })] };
     const result = applyDiffPathExcludes(raw, []);
@@ -503,18 +372,18 @@ describe("applyDiffPathExcludes — D3 symmetry filter", () => {
 // computeRiskLevel
 // =============================================================================
 
-describe("computeRiskLevel — D52", () => {
-  it("empty results → 'low'", () => {
+describe("computeRiskLevel -- D52", () => {
+  it("empty results -> 'low'", () => {
     expect(computeRiskLevel([])).toBe("low");
   });
 
-  it("all low → 'low'", () => {
+  it("all low -> 'low'", () => {
     expect(
       computeRiskLevel([makeCheckResult({ level: "low" }), makeCheckResult({ level: "low" })]),
     ).toBe("low");
   });
 
-  it("mixed levels → max via compareLevel", () => {
+  it("mixed levels -> max via compareLevel", () => {
     expect(
       computeRiskLevel([
         makeCheckResult({ level: "low" }),
@@ -524,7 +393,7 @@ describe("computeRiskLevel — D52", () => {
     ).toBe("high");
   });
 
-  it("any critical → 'critical'", () => {
+  it("any critical -> 'critical'", () => {
     expect(
       computeRiskLevel([
         makeCheckResult({ level: "low" }),
@@ -539,8 +408,8 @@ describe("computeRiskLevel — D52", () => {
 // computeSummary
 // =============================================================================
 
-describe("computeSummary — D53", () => {
-  it("empty results → undefined (field omitted from report)", () => {
+describe("computeSummary -- D53", () => {
+  it("empty results -> undefined (field omitted from report)", () => {
     expect(computeSummary([])).toBeUndefined();
   });
 
@@ -608,7 +477,7 @@ describe("buildReportFile", () => {
     expect(file.staged_only).toBe(true);
   });
 
-  it("staged_only NOT set → key absent from output (present-iff-true)", () => {
+  it("staged_only NOT set -> key absent from output (present-iff-true)", () => {
     const file = buildReportFile({
       ctx: makeCtx(),
       raw: { entries: [] },
@@ -619,7 +488,7 @@ describe("buildReportFile", () => {
     expect("staged_only" in file).toBe(false);
   });
 
-  it("staged_only + session_bound → ReportFileSchema.parse throws (D31 refine)", () => {
+  it("staged_only + session_bound -> ReportFileSchema.parse throws (D31 refine)", () => {
     expect(() =>
       buildReportFile({
         ctx: makeCtx(),
@@ -657,7 +526,7 @@ describe("buildReportFile", () => {
     expect(file.report.ended_at).toBe("2026-06-15T12:00:00Z");
   });
 
-  it("task drift guard: sinceMeta.task and ctx.task AGREE → no throw, value used", () => {
+  it("task drift guard: sinceMeta.task and ctx.task AGREE -> no throw, value used", () => {
     const file = buildReportFile({
       ctx: makeCtx({ task: "do the thing" }),
       raw: { entries: [] },
@@ -668,7 +537,7 @@ describe("buildReportFile", () => {
     expect(file.report.task).toBe("do the thing");
   });
 
-  it("task drift guard: sinceMeta.task and ctx.task DISAGREE → throws", () => {
+  it("task drift guard: sinceMeta.task and ctx.task DISAGREE -> throws", () => {
     expect(() =>
       buildReportFile({
         ctx: makeCtx({ task: "task A" }),
@@ -680,7 +549,7 @@ describe("buildReportFile", () => {
     ).toThrow(/disagree/);
   });
 
-  it("task only on sinceMeta → used", () => {
+  it("task only on sinceMeta -> used", () => {
     const file = buildReportFile({
       ctx: makeCtx(),
       raw: { entries: [] },
@@ -691,7 +560,7 @@ describe("buildReportFile", () => {
     expect(file.report.task).toBe("from sinceMeta");
   });
 
-  it("task only on ctx → used", () => {
+  it("task only on ctx -> used", () => {
     const file = buildReportFile({
       ctx: makeCtx({ task: "from ctx" }),
       raw: { entries: [] },
@@ -702,7 +571,7 @@ describe("buildReportFile", () => {
     expect(file.report.task).toBe("from ctx");
   });
 
-  it("task absent from both → omitted from report (key absent)", () => {
+  it("task absent from both -> omitted from report (key absent)", () => {
     const file = buildReportFile({
       ctx: makeCtx(),
       raw: { entries: [] },
@@ -749,9 +618,9 @@ describe("buildReportFile", () => {
   });
 });
 
-describe("computeRollbackAvailable — M D Step 4b D72", () => {
+describe("computeRollbackAvailable -- M D Step 4b D72", () => {
   // ---------------------------------------------------------------------------
-  // Local helpers — scoped to this describe block. The fixture-builder
+  // Local helpers -- scoped to this describe block. The fixture-builder
   // pattern (mkdtemp + try/finally cleanup) mirrors the convention used
   // across the codebase's filesystem-touching test suites.
   // ---------------------------------------------------------------------------
@@ -776,7 +645,7 @@ describe("computeRollbackAvailable — M D Step 4b D72", () => {
    * AND materialize empty stub files at every artifact path the
    * manifest references. Sufficient to make `loadCheckpoint` succeed.
    *
-   * Why the stub files: `loadCheckpoint` enforces TWO contracts —
+   * Why the stub files: `loadCheckpoint` enforces TWO contracts --
    *   (a) `ManifestSchema.parse` succeeds on the manifest JSON, AND
    *   (b) every referenced artifact path (`unstaged_patch_path`,
    *       `staged_patch_path`, `tracked_dirty_archive_path`,
@@ -785,7 +654,7 @@ describe("computeRollbackAvailable — M D Step 4b D72", () => {
    * Without (b), `loadCheckpoint` throws `CheckpointCorruptError`
    * ("referenced artifact missing"), which propagates from
    * `computeRollbackAvailable` as a non-CheckpointNotFoundError and
-   * makes test 1 fail. The stubs are 0-byte placeholders — content
+   * makes test 1 fail. The stubs are 0-byte placeholders -- content
    * is not validated, only existence is.
    */
   async function writeMinimalCheckpointManifest(
@@ -822,7 +691,7 @@ describe("computeRollbackAvailable — M D Step 4b D72", () => {
 
     // Materialize the four referenced artifact paths as empty files so
     // loadCheckpoint's lstat checks succeed. mkdir the two parent
-    // subdirs first (recursive is fine — both might or might not
+    // subdirs first (recursive is fine -- both might or might not
     // already exist depending on which path we touched first).
     await mkdir(join(checkpointDir, "diffs"), { recursive: true });
     await mkdir(join(checkpointDir, "snapshots"), { recursive: true });
@@ -841,7 +710,7 @@ describe("computeRollbackAvailable — M D Step 4b D72", () => {
   }
 
   // ---------------------------------------------------------------------------
-  // Tests — one per locked branch of the D72 rule
+  // Tests -- one per locked branch of the D72 rule
   // ---------------------------------------------------------------------------
 
   it("returns true when session_bound and the session's inner checkpoint manifest loads", async () => {
@@ -863,7 +732,7 @@ describe("computeRollbackAvailable — M D Step 4b D72", () => {
     const env = await setupRepoRoot();
     try {
       // No checkpoint written. loadCheckpoint will throw
-      // CheckpointNotFoundError, which the helper swallows → false.
+      // CheckpointNotFoundError, which the helper swallows -> false.
       const result = await computeRollbackAvailable(makeSessionBoundSinceMeta(), env.repoRoot);
       expect(result).toBe(false);
     } finally {
@@ -877,7 +746,7 @@ describe("computeRollbackAvailable — M D Step 4b D72", () => {
     // `.viberevert/checkpoints/<cp>/`. Without this test, a
     // regression that switched to the global store would pass tests
     // 1, 2, 4, 5 cleanly (those don't set up a global checkpoint at
-    // all). Here we set up ONLY the global checkpoint — a regression
+    // all). Here we set up ONLY the global checkpoint -- a regression
     // would erroneously return true and this test would fail.
     const env = await setupRepoRoot();
     try {
@@ -900,7 +769,7 @@ describe("computeRollbackAvailable — M D Step 4b D72", () => {
 
   it("returns false when kind is ad_hoc (M D rollback is session-only per D59; no I/O fires)", async () => {
     // The ad_hoc branch short-circuits BEFORE any filesystem access,
-    // so repoRoot pointing at a nonexistent path is fine — the test
+    // so repoRoot pointing at a nonexistent path is fine -- the test
     // also implicitly proves the no-I/O property.
     const result = await computeRollbackAvailable(
       makeAdHocSinceMeta(),
@@ -916,7 +785,7 @@ describe("computeRollbackAvailable — M D Step 4b D72", () => {
       await mkdir(checkpointDir, { recursive: true });
       // Malformed JSON triggers CheckpointCorruptError (or similar
       // non-CNF error) inside loadCheckpoint. The helper does NOT
-      // swallow this — propagation is the locked safety move: a
+      // swallow this -- propagation is the locked safety move: a
       // corrupted/tampered checkpoint must surface to the CLI, not
       // silently degrade rollback_available to false.
       await writeFile(join(checkpointDir, "manifest.json"), "{this is not valid JSON");
@@ -932,7 +801,7 @@ describe("computeRollbackAvailable — M D Step 4b D72", () => {
   it("fail-closed: rejects malformed reportId BEFORE any filesystem path interpolation", async () => {
     // The fail-closed SESSION_ID_RE guard fires before any join() or
     // loadCheckpoint call, so repoRoot pointing at a nonexistent path
-    // is irrelevant — the throw should fire from the regex check
+    // is irrelevant -- the throw should fire from the regex check
     // alone. Without this guard, a buggy upstream caller could make
     // the helper read outside the intended session checkpoint dir
     // via traversal-like segments. Same defense pattern as

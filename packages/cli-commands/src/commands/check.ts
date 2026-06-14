@@ -12,7 +12,7 @@
 // Architectural locks (must be preserved by all changes here)
 // =============================================================================
 //
-// 1. **D19 — REQUIRES valid config.** `risk.block_on` controls the exit
+// 1. **D19 -- REQUIRES valid config.** `risk.block_on` controls the exit
 //    code (D24), `risk.warn_on` controls the default output threshold
 //    (D38), `frameworks` flows into the checks engine context (D41/D42),
 //    `checks.*` toggles the per-category enable map (D28/D57), and
@@ -21,26 +21,26 @@
 //    filtered set from user expectations. Hard-fail on missing/invalid
 //    config with the locked directive copy.
 //
-// 2. **D24 — Exit codes are locked.** 0 = no findings at-or-above
+// 2. **D24 -- Exit codes are locked.** 0 = no findings at-or-above
 //    `resolved.riskBlockOn`. 1 = internal/config error (any typed-error
 //    catch, the persist-failure catch, OR the catch-all unknown-error
-//    rethrow Clipanion turns into its own non-zero). 2 = ≥1 finding
+//    rethrow Clipanion turns into its own non-zero). 2 = >= 1 finding
 //    at-or-above `resolved.riskBlockOn`. **--threshold does NOT affect
-//    exit code** per D38 — the gate always uses `resolved.riskBlockOn`
+//    exit code** per D38 -- the gate always uses `resolved.riskBlockOn`
 //    from `mergeChecksConfig`.
 //
-// 3. **D26 + D58 — --since dispatch via resolveCheckBase.** The
+// 3. **D26 + D58 -- --since dispatch via resolveCheckBase.** The
 //    resolver in `check-since-resolution.ts` owns the D26 resolution
-//    order (sess → cp → name → git-ref, with omitted-default and
+//    order (sess -> cp -> name -> git-ref, with omitted-default and
 //    --staged short-circuit rules) and the D58 mutual-exclusion check
 //    for --staged + snapshot bases. check.ts just passes the user's
 //    --since / --staged flags through and dispatches on the returned
 //    `base.mode` to call either getDiffSinceRef or getDiffSinceCheckpoint.
-//    Typed errors from the resolver (StagedIncompatibleWith…,
-//    CheckpointNameNotFound…) are surfaced via the centralized
+//    Typed errors from the resolver (StagedIncompatibleWith...,
+//    CheckpointNameNotFound...) are surfaced via the centralized
 //    handleKnownError helper.
 //
-// 4. **D29 — check.ts owns stderr/stdout writes.** No orchestration
+// 4. **D29 -- check.ts owns stderr/stdout writes.** No orchestration
 //    helper (check-orchestration.ts, check-since-resolution.ts,
 //    runtime-env.ts) writes to the terminal. The reporters package
 //    returns values that check.ts writes to stdout. The git package's
@@ -48,40 +48,40 @@
 //    (and attaches them to thrown errors); check.ts is the place that
 //    decides how to surface those.
 //
-// 5. **D38 — --threshold is OUTPUT-ONLY.** The persisted ReportFile
+// 5. **D38 -- --threshold is OUTPUT-ONLY.** The persisted ReportFile
 //    contains the FULL unfiltered findings set; only the rendered view
 //    is filtered. Default threshold (when --threshold not passed):
 //    `undefined` (no filter) under --json; `resolved.riskWarnOn`
 //    otherwise. Exit code uses `resolved.riskBlockOn` regardless of
 //    --threshold.
 //
-// 6. **D44 — no D22 lock for check.** Check is a read operation against
+// 6. **D44 -- no D22 lock for check.** Check is a read operation against
 //    the working tree + session/checkpoint state; it does not mutate
 //    session state. Writes are to `report.json` files at deterministic
 //    paths; atomic temp+rename (D13) makes concurrent overwrites safe
 //    (last-writer-wins, no corruption possible). Two parallel checks
 //    against different bases touch disjoint files. No lock acquisition.
 //
-// 7. **D56 — diff dispatch on base.mode.** "git-ref" → getDiffSinceRef
-//    with {staged: base.stagedOnly}. "checkpoint" →
+// 7. **D56 -- diff dispatch on base.mode.** "git-ref" -> getDiffSinceRef
+//    with {staged: base.stagedOnly}. "checkpoint" ->
 //    getDiffSinceCheckpoint with {liveExcludePatterns:
 //    resolved.rollbackExclude}. Both helpers return
 //    DiffResult { diff, cleanupWarnings }.
 //
-// 8. **D17b/D26 — atomic persistence dispatch on base.kind.**
-//    "session_bound" → file-level writeFileAtomic to
+// 8. **D17b/D26 -- atomic persistence dispatch on base.kind.**
+//    "session_bound" -> file-level writeFileAtomic to
 //    `.viberevert/sessions/<sess>/report.json` (the session dir already
-//    exists; re-runs OVERWRITE atomically per D44). "ad_hoc" → dir-level
+//    exists; re-runs OVERWRITE atomically per D44). "ad_hoc" -> dir-level
 //    rename: mkdir .viberevert/reports/ idempotent (always-shared
 //    parent), mkdir .viberevert/reports/.tmp-rpt-<hex>/ NON-recursively
 //    (so a stale or collision-reused dir fails loud with EEXIST rather
-//    than silently joining a dir we didn't create — without this guard,
+//    than silently joining a dir we didn't create -- without this guard,
 //    the renameDirAtomic step would move whatever the pre-existing dir
 //    contained to the final reportId location), writeFileAtomic the
 //    inner report.json, then renameDirAtomic to
 //    .viberevert/reports/<rpt_<ULID>>/. On any failure inside the
 //    ad-hoc path, best-effort rm -rf of the temp dir ONLY if we
-//    successfully created it (via the `tmpDirCreated` flag) — so the
+//    successfully created it (via the `tmpDirCreated` flag) -- so the
 //    cleanup never removes a pre-existing dir we didn't own. D13
 //    tolerates leftovers if cleanup also fails (loaders ignore .tmp-*).
 //    The persist step is wrapped in a TARGETED try/catch in execute()
@@ -89,19 +89,19 @@
 //    Windows rename quirks) as clean exit-1 errors rather than letting
 //    Clipanion print a stack trace for what are mundane I/O failures.
 //
-// 9. **D29 — cleanup warnings surfaced to stderr.** getDiffSinceCheckpoint
+// 9. **D29 -- cleanup warnings surfaced to stderr.** getDiffSinceCheckpoint
 //    returns DiffResult.cleanupWarnings on success; the inner-package
 //    finalizer attaches them to thrown errors as a `cleanupWarnings`
 //    property on the Error. check.ts surfaces both: from the happy path
 //    after the diff call, and from handleKnownError BEFORE the typed
 //    dispatch so the user sees the warnings in context with the error.
 //    The handleKnownError lookup is guarded against non-object thrown
-//    values (null, primitives) — a thrown `null` would otherwise
+//    values (null, primitives) -- a thrown `null` would otherwise
 //    TypeError on the property access and skip the typed-error
 //    dispatch entirely.
 //
 // 10. **exactOptionalPropertyTypes-safe spreads.** sinceMeta spreads
-//     `checkpointId`, `stagedOnly`, and `task` conditionally — no field
+//     `checkpointId`, `stagedOnly`, and `task` conditionally -- no field
 //     gets `: undefined` explicitly. Same pattern for RenderInput's
 //     optional `threshold`.
 
@@ -121,6 +121,7 @@ import {
   ConfigParseError,
   ConfigValidationError,
   loadConfig,
+  mergeChecksConfig,
   RepoRootNotFoundError,
   resolveRepoRoot,
   SessionNotFoundError,
@@ -144,7 +145,6 @@ import {
   applyDiffPathExcludes,
   buildReportFile,
   computeRollbackAvailable,
-  mergeChecksConfig,
   parseRawDiffToInputs,
 } from "../check-orchestration.js";
 import {
@@ -178,7 +178,7 @@ function isValidRiskLevel(value: string): value is RiskLevel {
  * D24 gate predicate: returns true iff any finding's level is at-or-above
  * `blockOn`. Uses compareLevel from @viberevert/checks (re-exported from
  * session-format); a return of >= 0 means level is at-or-above blockOn.
- * `--threshold` does NOT affect this — D38 lock.
+ * `--threshold` does NOT affect this -- D38 lock.
  */
 function shouldExitWithBlocker(results: readonly CheckResult[], blockOn: RiskLevel): boolean {
   for (const r of results) {
@@ -193,18 +193,18 @@ function shouldExitWithBlocker(results: readonly CheckResult[], blockOn: RiskLev
 
 /**
  * Persist the validated `ReportFile` per D26's storage rule:
- *   - session_bound → file-level writeFileAtomic to
+ *   - session_bound -> file-level writeFileAtomic to
  *     `.viberevert/sessions/<sess>/report.json`.
- *   - ad_hoc → dir-level: mkdir reports parent idempotent (always-
+ *   - ad_hoc -> dir-level: mkdir reports parent idempotent (always-
  *     shared `.viberevert/reports/`), mkdir `.tmp-rpt-<hex>/`
  *     NON-recursively (so a stale dir from a previous crash OR a hex
  *     collision fails loud with EEXIST rather than silently joining a
- *     dir we didn't create — without this guard, the subsequent
+ *     dir we didn't create -- without this guard, the subsequent
  *     renameDirAtomic would move whatever the pre-existing dir
  *     contained to the final reportId location), writeFileAtomic the
- *     inner report.json, then renameDirAtomic outer dir →
+ *     inner report.json, then renameDirAtomic outer dir ->
  *     `<rpt_<ULID>>/`. Best-effort `rm -rf` of the temp dir on any
- *     failure — but ONLY if we successfully created it (via the
+ *     failure -- but ONLY if we successfully created it (via the
  *     `tmpDirCreated` flag), so the cleanup never removes a
  *     pre-existing dir we didn't own.
  *
@@ -213,7 +213,7 @@ function shouldExitWithBlocker(results: readonly CheckResult[], blockOn: RiskLev
  * into that existing dir is the only mutation here, atomically via
  * writeFileAtomic's sibling-temp + rename.
  *
- * Failures rethrow unchanged — the targeted catch in execute()'s
+ * Failures rethrow unchanged -- the targeted catch in execute()'s
  * step 11 wraps them as clean exit-1 errors with the original message
  * surfaced to stderr.
  */
@@ -254,7 +254,7 @@ async function persistReportFile(
 }
 
 // =============================================================================
-// Centralized typed-error → stderr message mapping
+// Centralized typed-error -> stderr message mapping
 // =============================================================================
 
 /**
@@ -327,7 +327,7 @@ function handleKnownError(stderr: { write(s: string): unknown }, err: unknown): 
     stderr.write(`git is not available: ${err.message}\n`);
     return 1;
   }
-  // Unknown error — re-throw so Clipanion surfaces it as a crash.
+  // Unknown error -- re-throw so Clipanion surfaces it as a crash.
   throw err;
 }
 
@@ -346,19 +346,19 @@ configured risk checks against the changed files, persists a ReportFile
 artifact, and renders a human or JSON view to stdout.
 
 Base selection (--since):
-  - cp_<ULID>            → ad-hoc report against the named checkpoint
-  - sess_<ULID>          → session-bound report against the named session
-  - <name>               → ad-hoc report against the checkpoint with that name
-  - <git-ref>            → ad-hoc report against the git ref (HEAD~1, main, SHA, tag)
-  - (omitted, with active session) → session-bound report against the active session
-  - (omitted, no active session)   → ad-hoc against HEAD~1
-  - --staged                       → ad-hoc against HEAD, scoped to staged changes
+  - cp_<ULID>            -> ad-hoc report against the named checkpoint
+  - sess_<ULID>          -> session-bound report against the named session
+  - <name>               -> ad-hoc report against the checkpoint with that name
+  - <git-ref>            -> ad-hoc report against the git ref (HEAD~1, main, SHA, tag)
+  - (omitted, with active session) -> session-bound report against the active session
+  - (omitted, no active session)   -> ad-hoc against HEAD~1
+  - --staged                       -> ad-hoc against HEAD, scoped to staged changes
                                      (incompatible with --since cp_/sess_/<name>)
 
 Exit codes:
-  0  — no findings at or above risk.block_on (default: critical)
-  1  — internal or configuration error
-  2  — at least one finding at or above risk.block_on
+  0  -- no findings at or above risk.block_on (default: critical)
+  1  -- internal or configuration error
+  2  -- at least one finding at or above risk.block_on
        (--threshold does NOT affect this; it only filters output)`,
   });
 
@@ -403,7 +403,7 @@ Exit codes:
       }
       // --task: reject empty / whitespace-only strings up front. Without
       // this, the value would flow into ReportFileSchema.parse() and
-      // fail the nonBlankString constraint as an uncaught ZodError →
+      // fail the nonBlankString constraint as an uncaught ZodError ->
       // Clipanion stack trace. Mirrors checkpoint.ts's --name pattern:
       // CHECK trim() for rejection, but preserve the raw string value
       // (no silent trim) for non-empty inputs.
@@ -412,7 +412,7 @@ Exit codes:
         return 1;
       }
 
-      // Step 3: load config (D19 — REQUIRED for check).
+      // Step 3: load config (D19 -- REQUIRED for check).
       const config = await loadConfig(repoRoot);
 
       // Step 4: merge M C defaults (D57). Returns ResolvedChecksConfig
@@ -421,13 +421,13 @@ Exit codes:
       // rollback.exclude).
       const resolved = await mergeChecksConfig(config, repoRoot);
 
-      // Compute the OUTPUT threshold per D38 — distinct from the gate
+      // Compute the OUTPUT threshold per D38 -- distinct from the gate
       // threshold (resolved.riskBlockOn) which we use in step 13.
-      //   - --threshold set      → use it (validated above)
-      //   - else --json          → undefined (no filter; JSON consumers
+      //   - --threshold set      -> use it (validated above)
+      //   - else --json          -> undefined (no filter; JSON consumers
       //                            want the full set unless they
       //                            explicitly ask for filtering)
-      //   - else                 → resolved.riskWarnOn (default to
+      //   - else                 -> resolved.riskWarnOn (default to
       //                            "show me what's worth warning about")
       let renderThreshold: RiskLevel | undefined;
       if (this.threshold !== undefined) {
@@ -467,14 +467,14 @@ Exit codes:
         this.context.stderr.write(`warning: ${w}\n`);
       }
 
-      // Step 7: D3 symmetry filter (defense-in-depth — the checkpoint
+      // Step 7: D3 symmetry filter (defense-in-depth -- the checkpoint
       // helper already filters internally before mirror construction,
       // but this catches the git-ref path which doesn't, and acts as a
       // second pass for checkpoint paths in case any edge case slipped
       // through the internal filter).
       const filteredDiff = applyDiffPathExcludes(diff, resolved.rollbackExclude);
 
-      // Step 8: parse RawDiff → ChangedFileInput[] for the checks engine.
+      // Step 8: parse RawDiff -> ChangedFileInput[] for the checks engine.
       const changedFiles = parseRawDiffToInputs(filteredDiff);
 
       // Step 9: build CheckContext + run the engine. Task precedence
@@ -497,7 +497,7 @@ Exit codes:
       // rollbackAvailable=false. The provisional value is required
       // to satisfy BuildReportSinceMeta's type (rollbackAvailable
       // is a required boolean), but `computeRollbackAvailable`
-      // explicitly ignores the field — its docstring locks that
+      // explicitly ignores the field -- its docstring locks that
       // only `kind` and `reportId` are read. The real value is
       // computed in Step 10b and threaded into the final sinceMeta
       // for Step 10c.
@@ -509,7 +509,7 @@ Exit codes:
         reportId: base.reportId,
         startedAt: base.startedAt,
         rollbackAvailable: false,
-        // Conditional spreads keep exactOptionalPropertyTypes happy —
+        // Conditional spreads keep exactOptionalPropertyTypes happy --
         // no field gets explicit-undefined.
         ...(base.mode === "checkpoint" && base.checkpointId !== undefined
           ? { checkpointId: base.checkpointId }
@@ -521,7 +521,7 @@ Exit codes:
       // Step 10b: derive rollback_available per D72. Session-bound
       // reports probe the session's INNER checkpoint dir; ad-hoc
       // reports always get false (M D rollback is session-only per
-      // D59). CheckpointNotFoundError → false; any other error
+      // D59). CheckpointNotFoundError -> false; any other error
       // (corruption, I/O, malformed reportId rejecting the fail-
       // closed path guard) propagates as a stack trace per the
       // same "engine bug" rule applied to schema failures below.
@@ -529,10 +529,10 @@ Exit codes:
 
       // Step 10c: build the validated ReportFile. buildReportFile calls
       // ReportFileSchema.parse internally so noise-budget violations,
-      // identity-consistency drift, and since_kind ↔ kind / staged_only
-      // ↔ kind refines all surface as one typed throw here. Schema
+      // identity-consistency drift, and since_kind <-> kind / staged_only
+      // <-> kind refines all surface as one typed throw here. Schema
       // failures here are engine bugs and propagate to Clipanion as
-      // stack traces (intentional — these are bug surfaces, not
+      // stack traces (intentional -- these are bug surfaces, not
       // user-facing errors).
       const reportFile = buildReportFile({
         ctx,
@@ -545,7 +545,7 @@ Exit codes:
       // Wrap filesystem failures (EEXIST from the non-recursive
       // temp-dir mkdir or renameDirAtomic's no-replace check, ENOENT
       // from missing session dir, EACCES, Windows rename-on-open
-      // quirks, etc.) as clean exit-1 errors per D24 — these are
+      // quirks, etc.) as clean exit-1 errors per D24 -- these are
       // mundane I/O failures that don't deserve stack traces.
       try {
         await persistReportFile(repoRoot, base, reportFile);
@@ -572,7 +572,7 @@ Exit codes:
         this.context.stdout.write(renderTerminal(renderInput));
       }
 
-      // Step 13: exit code per D24. --threshold is NOT consulted here —
+      // Step 13: exit code per D24. --threshold is NOT consulted here --
       // the gate always uses resolved.riskBlockOn from mergeChecksConfig.
       return shouldExitWithBlocker(runResult.results, resolved.riskBlockOn) ? 2 : 0;
     } catch (err) {
