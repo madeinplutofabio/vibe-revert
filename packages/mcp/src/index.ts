@@ -3,9 +3,15 @@
 
 // @viberevert/mcp public barrel.
 //
-// Step 2 surface: envelope + audit + errors + timeout primitives. The
-// MCP server boot entry point (startServer) and tool definitions arrive
-// in Step 4 and Step 3 respectively; this file will grow then.
+// Current surface: Step 2 primitives (envelope + audit + errors +
+// timeout) plus the Step 3 SDK-free tool catalog contract
+// (TOOL_NAMES_IN_ORDER, RESERVED_TOOL_NAMES, ToolRegistration shape,
+// per-tool handler signature with ToolHandlerContext, D99.V
+// side-effect class map, defineToolRegistration helper) plus the
+// growing tool registry (TOOL_REGISTRATIONS_IN_ORDER) -- check_repo
+// landed in Slice 3.3, the remaining 7 tools land in Slices
+// 3.4-3.7. The MCP server boot entry point (startServer /
+// createServerForTests) arrives in Step 4.
 //
 // Discipline: external consumers (CLI's MCPCommand in Step 5, M G1b
 // installers, future MCP-aware integrations) MUST import from this
@@ -64,3 +70,30 @@ export {
 // ============================================================================
 
 export { withTimeout } from "./timeout.js";
+
+// ============================================================================
+// Tool catalog + per-tool registration contract (D99.A/B/V, SDK-free)
+// ============================================================================
+
+export {
+  defineToolRegistration,
+  type JsonObject,
+  type JsonSchemaObject,
+  type JsonValue,
+  RESERVED_TOOL_NAMES,
+  type ReservedToolName,
+  TOOL_NAMES_IN_ORDER,
+  TOOL_SIDE_EFFECT_CLASS_BY_NAME,
+  type ToolDefinition,
+  type ToolHandler,
+  type ToolHandlerContext,
+  type ToolName,
+  type ToolRegistration,
+  type ToolSideEffectClass,
+} from "./tools.js";
+
+// ============================================================================
+// Tool registry (D99.E, SDK-free aggregation of per-tool definitions)
+// ============================================================================
+
+export { TOOL_REGISTRATIONS_IN_ORDER } from "./tool-registry.js";

@@ -24,8 +24,10 @@
     "access": "public"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
     "@viberevert/cli-commands": "workspace:*",
     "@viberevert/core": "workspace:*",
+    "@viberevert/session-format": "workspace:*",
     "zod": "4.4.1"
   },
   "scripts": {

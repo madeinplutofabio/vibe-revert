@@ -3,7 +3,7 @@
 
 // Architectural-invariants tests.
 //
-// Grep-based tests that enforce locked architectural invariants — they
+// Grep-based tests that enforce locked architectural invariants -- they
 // catch regressions where source code drifts from a contractual
 // constraint that's not enforced by TypeScript types or runtime checks.
 // Each invariant references the originating M B plan section / decision
@@ -14,7 +14,7 @@
 // fixture or a temp dir. Fast (sub-100ms) and tightly scoped.
 //
 // File location (in cli/test/, not git/test/) is intentional per the
-// M B plan's literal specification — and pragmatic, since cli is the
+// M B plan's literal specification -- and pragmatic, since cli is the
 // orchestration layer that depends on all the others, so making cli's
 // test suite responsible for verifying workspace-wide invariants is
 // the right place for this kind of cross-cutting check.
@@ -35,6 +35,7 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, extname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
+import * as ts from "typescript";
 import { describe, expect, it } from "vitest";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -77,14 +78,14 @@ interface Offender {
  *
  *   - Line comments: trimmed start === "//"
  *   - Block comments: from a line containing "/*" through the line
- *     containing "*​/" (inclusive on both ends)
+ *     containing "*\/" (inclusive on both ends)
  *   - JSDoc continuation lines inside a block comment: trimmed start
- *     === "*" or "*​/" (handled by the in-block-comment branch above,
+ *     === "*" or "*\/" (handled by the in-block-comment branch above,
  *     but also defensively filtered for safety against non-standard
  *     comment shapes that don't start with /*)
  *
  * The block-comment tracking is stateful across the .filter() callback
- * — `inBlockComment` persists between iterations because the filter
+ * -- `inBlockComment` persists between iterations because the filter
  * runs sequentially over the lines array.
  */
 function findOffenders(source: string, pattern: RegExp): Offender[] {
@@ -108,7 +109,7 @@ function findOffenders(source: string, pattern: RegExp): Offender[] {
         if (!trimmed.includes("*/")) inBlockComment = true;
         return false;
       }
-      // JSDoc continuation line (* or */ at trimmed start) — should
+      // JSDoc continuation line (* or */ at trimmed start) -- should
       // already be covered by the inBlockComment branch above, but
       // defensive belt-and-suspenders catch for non-standard shapes.
       if (trimmed.startsWith("*")) return false;
@@ -148,7 +149,7 @@ function getCliCommandsBarrelImportBody(source: string): string {
  * would otherwise false-positive.
  *
  * Block-comment replacement preserves newline characters so the
- * stripped string's line numbering matches the original — important
+ * stripped string's line numbering matches the original -- important
  * for callers that pass the stripped output through `findOffenders`,
  * which reports 1-indexed line numbers from offender content.
  *
@@ -215,7 +216,7 @@ function collectBarrelExports(barrelSource: string): Set<string> {
   return exported;
 }
 
-describe("Architectural invariants — git invocation single-owner (D17c)", () => {
+describe("Architectural invariants -- git invocation single-owner (D17c)", () => {
   // The git binary may only be invoked from @viberevert/git. Other
   // packages (including the CLI) reach for git via @viberevert/git's
   // public helpers (probeGitVersion, getStatusPorcelainText, etc.).
@@ -225,7 +226,7 @@ describe("Architectural invariants — git invocation single-owner (D17c)", () =
   it('doctor.ts does NOT pass the literal "git" to spawn family functions or to its local probeVersion helper', () => {
     // The git probe in doctor.ts must go through @viberevert/git's
     // probeGitVersion() helper. This grep catches accidental regressions
-    // where someone reintroduces a direct spawn of "git" from doctor —
+    // where someone reintroduces a direct spawn of "git" from doctor --
     // OR re-routes it through the local `probeVersion` helper (which
     // was the actual historical regression path we fixed in M B Step 3f
     // when we swapped `probeVersion("git")` for `await probeGitVersion()`).
@@ -234,7 +235,7 @@ describe("Architectural invariants — git invocation single-owner (D17c)", () =
     // doctor.ts's CURRENT helper name. If a future change renames that
     // helper, this regex stops protecting against the historical
     // regression. That's acceptable because any such rename is a
-    // structural change inviting fresh review — but the maintainer
+    // structural change inviting fresh review -- but the maintainer
     // should update this regex (or remove it if `probeVersion` is
     // also removed) at the same time as the rename.
     const source = readSource("packages/cli-commands/src/commands/doctor.ts");
@@ -256,7 +257,7 @@ describe("Architectural invariants — git invocation single-owner (D17c)", () =
 
   it("packages/cli-commands/src/**/*.ts (excluding doctor.ts) does NOT import child_process", () => {
     // doctor.ts is the locked carve-out for diagnostic binary probing.
-    // No other CLI source file may import child_process — the rest of
+    // No other CLI source file may import child_process -- the rest of
     // the CLI is forbidden to spawn subprocesses, and any subprocess
     // need (git or otherwise) goes through the appropriate package's
     // public API. Regex matches both the modern `node:child_process`
@@ -274,18 +275,18 @@ describe("Architectural invariants — git invocation single-owner (D17c)", () =
       const offenders = findOffenders(source, childProcessImport);
       expect(
         offenders,
-        `${relative(REPO_ROOT, file).replace(/\\/g, "/")} must not import child_process — only doctor.ts is allowed (D17c carve-out). Matches: ${JSON.stringify(offenders)}`,
+        `${relative(REPO_ROOT, file).replace(/\\/g, "/")} must not import child_process -- only doctor.ts is allowed (D17c carve-out). Matches: ${JSON.stringify(offenders)}`,
       ).toEqual([]);
     }
   });
 });
 
-describe("Architectural invariants — restore.ts stream handling", () => {
+describe("Architectural invariants -- restore.ts stream handling", () => {
   // file-header invariant #2 of restore.ts locks two stream-handling
   // rules that aren't enforced by TypeScript:
-  //   1. `Readable.from([buf])` (single-chunk) — NOT `Readable.from(buf)`
+  //   1. `Readable.from([buf])` (single-chunk) -- NOT `Readable.from(buf)`
   //      (which iterates the Buffer as bytes and fragments archives).
-  //   2. `tar.list({ onentry })` / `tar.extract({ cwd, filter })` — NOT
+  //   2. `tar.list({ onentry })` / `tar.extract({ cwd, filter })` -- NOT
   //      `new tar.Parser()` / `new tar.Unpack()` (which don't
   //      auto-decompress gzip and would silently consume our .tar.gz
   //      bytes as raw tar headers).
@@ -307,7 +308,7 @@ describe("Architectural invariants — restore.ts stream handling", () => {
     ).toEqual([]);
   });
 
-  it("restore.ts does NOT use new tar.Parser() (must use tar.list named export — auto-detects gzip)", () => {
+  it("restore.ts does NOT use new tar.Parser() (must use tar.list named export -- auto-detects gzip)", () => {
     const source = readSource("packages/git/src/restore.ts");
     const antipattern = /new\s+tar\.Parser\b/;
     const offenders = findOffenders(source, antipattern);
@@ -317,7 +318,7 @@ describe("Architectural invariants — restore.ts stream handling", () => {
     ).toEqual([]);
   });
 
-  it("restore.ts does NOT use new tar.Unpack() (must use tar.extract named export — auto-detects gzip)", () => {
+  it("restore.ts does NOT use new tar.Unpack() (must use tar.extract named export -- auto-detects gzip)", () => {
     const source = readSource("packages/git/src/restore.ts");
     const antipattern = /new\s+tar\.Unpack\b/;
     const offenders = findOffenders(source, antipattern);
@@ -328,7 +329,7 @@ describe("Architectural invariants — restore.ts stream handling", () => {
   });
 });
 
-describe("Architectural invariants — D19 config-blind commands", () => {
+describe("Architectural invariants -- D19 config-blind commands", () => {
   // D19: `viberevert end`, `viberevert checkpoints`, and
   // `viberevert sessions` MUST NOT import or reference `loadConfig`
   // from @viberevert/core. They operate purely on persisted
@@ -354,9 +355,9 @@ describe("Architectural invariants — D19 config-blind commands", () => {
   });
 });
 
-describe("Architectural invariants — M D D77 rollback module boundaries", () => {
+describe("Architectural invariants -- M D D77 rollback module boundaries", () => {
   // D77 locks 5 invariants for the rollback subsystem. The locked
-  // layering (THIS IS THE CONTRACT — do not move the restoreCheckpoint
+  // layering (THIS IS THE CONTRACT -- do not move the restoreCheckpoint
   // call back into rollback.ts; do not call planRestoreCheckpoint from
   // orchestration):
   //
@@ -368,18 +369,18 @@ describe("Architectural invariants — M D D77 rollback module boundaries", () =
   //   rollback-orchestration.ts owns the apply receipt attempt and is
   //   the layer that calls restoreCheckpoint. Per Lock #16 (the apply
   //   receipt = ATTEMPT semantic), buildReceiptForApply wraps the call
-  //   so the receipt persists even when restoreCheckpoint throws —
+  //   so the receipt persists even when restoreCheckpoint throws --
   //   keeping that wrapping in one place is what makes the
   //   apply-receipt-ATTEMPT contract enforceable.
   //
   // Invariant 1 (`packages/cli-commands/src/commands/rollback.ts` MUST NOT
   // import `child_process`) is AUTO-COVERED by the workspace-wide
   // "cli/src/**/*.ts (excluding doctor.ts) does NOT import
-  // child_process" test in the D17c describe block above — no
+  // child_process" test in the D17c describe block above -- no
   // separate test needed because rollback.ts is under
   // packages/cli-commands/src/commands/ and is NOT the doctor.ts carve-out.
   //
-  // Invariant 2 splits into 2a (rollback.ts boundaries — has plan,
+  // Invariant 2 splits into 2a (rollback.ts boundaries -- has plan,
   // does NOT have restore) and 2b (rollback-orchestration.ts owns
   // the real restore call). Invariants 3, 4, 5 get one test each.
 
@@ -387,7 +388,7 @@ describe("Architectural invariants — M D D77 rollback module boundaries", () =
     // The rollback command owns the dry-run planning path (via
     // planRestoreCheckpoint) and orchestrates the apply path through
     // rollback-orchestration.ts's buildReceiptForApply. It does NOT
-    // call restoreCheckpoint directly — that call lives in the
+    // call restoreCheckpoint directly -- that call lives in the
     // orchestration module so Lock #16 (apply receipt = ATTEMPT)
     // can wrap it in one place.
     //
@@ -395,11 +396,11 @@ describe("Architectural invariants — M D D77 rollback module boundaries", () =
     // would either bypass the receipt-ATTEMPT wrapping (breaking
     // the "receipt persists on restore throw" contract) or duplicate
     // it across layers (drift risk). Either way, the layering is
-    // wrong — fail the test loudly.
+    // wrong -- fail the test loudly.
     const source = readSource("packages/cli-commands/src/commands/rollback.ts");
     expect(
       findOffenders(source, /\bplanRestoreCheckpoint\b/),
-      "rollback.ts must reference planRestoreCheckpoint in non-comment code (D77 invariant 2a — dry-run planning path)",
+      "rollback.ts must reference planRestoreCheckpoint in non-comment code (D77 invariant 2a -- dry-run planning path)",
     ).not.toEqual([]);
     expect(
       findOffenders(source, /\brestoreCheckpoint\b/),
@@ -409,7 +410,7 @@ describe("Architectural invariants — M D D77 rollback module boundaries", () =
 
   it("rollback-orchestration.ts references restoreCheckpoint (D77 invariant 2b)", () => {
     // The orchestration module's buildReceiptForApply wraps
-    // restoreCheckpoint per Lock #16 (apply receipt = ATTEMPT — the
+    // restoreCheckpoint per Lock #16 (apply receipt = ATTEMPT -- the
     // receipt persists even when the restore throws partway). A
     // regression that loses this reference would mean either the
     // apply path is broken (no real restore happens) OR it moved to
@@ -418,7 +419,7 @@ describe("Architectural invariants — M D D77 rollback module boundaries", () =
     const source = readSource("packages/cli-commands/src/rollback-orchestration.ts");
     expect(
       findOffenders(source, /\brestoreCheckpoint\b/),
-      "rollback-orchestration.ts must reference restoreCheckpoint in non-comment code (D77 invariant 2b — apply path owns the real restore call)",
+      "rollback-orchestration.ts must reference restoreCheckpoint in non-comment code (D77 invariant 2b -- apply path owns the real restore call)",
     ).not.toEqual([]);
   });
 
@@ -427,7 +428,7 @@ describe("Architectural invariants — M D D77 rollback module boundaries", () =
     // session-format primitives only. Reporters render the receipt
     // at the CLI layer (rollback.ts owns format dispatch); checks is
     // irrelevant to rollback. A regression that pulls either in here
-    // would muddle the layering — orchestration is supposed to be a
+    // would muddle the layering -- orchestration is supposed to be a
     // pure-data-shaping module potentially reusable by future
     // entrypoints (MCP, hook), not coupled to CLI-specific render or
     // check-domain code.
@@ -440,7 +441,7 @@ describe("Architectural invariants — M D D77 rollback module boundaries", () =
     // The trailing `(?:["'/])` after the package name matches either
     // the closing quote (exact import) OR a forward slash (subpath
     // import). Without subpath coverage, `from "@viberevert/reporters
-    // /receipt-render"` would slip through — a clear D29 violation
+    // /receipt-render"` would slip through -- a clear D29 violation
     // since orchestration is forbidden to depend on reporters at all.
     const source = readSource("packages/cli-commands/src/rollback-orchestration.ts");
     const antipatterns: ReadonlyArray<{ name: string; pattern: RegExp }> = [
@@ -473,15 +474,15 @@ describe("Architectural invariants — M D D77 rollback module boundaries", () =
     // mechanism for regressions before code review.
     //
     // The forbidden-imports checks cover BOTH static `from "..."` and
-    // dynamic `import("...")` forms — same dynamic-bypass concern as
+    // dynamic `import("...")` forms -- same dynamic-bypass concern as
     // invariant 3 above. Two paths:
-    //   - `from "node:..."` OR `import("node:...")` — any Node
+    //   - `from "node:..."` OR `import("node:...")` -- any Node
     //     built-in (I/O, child_process, etc.). Biome's
     //     useNodejsImportProtocol="error" already forbids the bare
     //     `from "fs"` legacy form, so we don't need to enumerate
     //     built-in names.
     //   - `from "@viberevert/X"` OR `import("@viberevert/X")` where
-    //     X !== "session-format" — any other workspace package
+    //     X !== "session-format" -- any other workspace package
     //     (D29's "session-format only" rule).
     const reportersSrcDir = join(REPO_ROOT, "packages/reporters/src");
     const receiptFiles = readdirSync(reportersSrcDir)
@@ -489,7 +490,7 @@ describe("Architectural invariants — M D D77 rollback module boundaries", () =
       .map((name) => join(reportersSrcDir, name));
     // Sanity: Step 5 shipped at least 5 receipt-*.ts files (types,
     // json, render, terminal, markdown). A regression that removed
-    // files would silently pass this test — fail loudly instead.
+    // files would silently pass this test -- fail loudly instead.
     expect(
       receiptFiles.length,
       `expected at least 5 receipt-*.ts files under packages/reporters/src; got ${receiptFiles.length}`,
@@ -541,7 +542,7 @@ describe("Architectural invariants — M D D77 rollback module boundaries", () =
     // recovery path).
     //
     // The single regex `viberevert end && viberevert rollback` locks
-    // BOTH pieces in one shot — proximity is intrinsic because both
+    // BOTH pieces in one shot -- proximity is intrinsic because both
     // pieces share the same match. findOffenders' comment filter
     // (line + block + JSDoc) ensures we assert on the ACTUAL stderr-
     // bound refusal copy at the implementation site, not on the
@@ -550,12 +551,12 @@ describe("Architectural invariants — M D D77 rollback module boundaries", () =
     const source = readSource("packages/cli-commands/src/commands/start.ts");
     expect(
       findOffenders(source, /viberevert end && viberevert rollback/),
-      "start.ts must contain the literal 'viberevert end && viberevert rollback' paired sequence in non-comment code (D77 invariant 5 / D74 unlock — locks both the rollback reference AND the D63-required end-before-rollback sequencing in one assertion)",
+      "start.ts must contain the literal 'viberevert end && viberevert rollback' paired sequence in non-comment code (D77 invariant 5 / D74 unlock -- locks both the rollback reference AND the D63-required end-before-rollback sequencing in one assertion)",
     ).not.toEqual([]);
   });
 });
 
-describe("Architectural invariants — M E D90 prompt-fix module boundaries", () => {
+describe("Architectural invariants -- M E D90 prompt-fix module boundaries", () => {
   // D90 locks 8 invariants for the prompt-fix subsystem. The locked
   // boundaries:
   //
@@ -568,24 +569,24 @@ describe("Architectural invariants — M E D90 prompt-fix module boundaries", ()
   //   target helpers).
   //
   //   prompt-fix-targets.ts is a pure path-math wrapper around
-  //   resolveReportPaths — the resolver's no-fs invariant is locked
+  //   resolveReportPaths -- the resolver's no-fs invariant is locked
   //   by its own test file (prompt-fix-targets.test.ts Section 5).
   //
   //   packages/reporters/src/fix-prompt-*.ts are D29-pure renderers
   //   covered by D90.5 (mirrors D77 invariant 4 for receipt renderers).
   //
-  // 14 tests total — 13 D90.X invariant tests plus one M E command
+  // 14 tests total -- 13 D90.X invariant tests plus one M E command
   // exposure test (locks the CLI registration in packages/cli/src/
   // index.ts so a future maintainer that removes the
   // cli.register(PromptFixCommand) line cannot ship a CLI binary
   // where the command is unreachable while the integration tests
   // continue to pass via their in-test Cli registration; also locks
   // the registration ORDER between ReportCommand and RollbackCommand
-  // to preserve the locked check → report → prompt-fix → rollback
+  // to preserve the locked check -> report -> prompt-fix -> rollback
   // workflow grouping).
   //
   // **Import-form coverage:** D90.1, D90.2, D90.3, and D90.6f all
-  // scan for FOUR import forms — static ESM (`from "..."`), dynamic
+  // scan for FOUR import forms -- static ESM (`from "..."`), dynamic
   // ESM (`import("...")`), CommonJS require (`require("...")`), AND
   // TS import-equals (`import x = require("...")`). The project is
   // ESM, but an invariant block should not have CJS-shaped escape
@@ -594,7 +595,7 @@ describe("Architectural invariants — M E D90 prompt-fix module boundaries", ()
   // realistic bypass routes.
   //
   // All 8 D90 invariants get explicit tests inside this describe
-  // block — including D90.1 (no child_process imports). Although the
+  // block -- including D90.1 (no child_process imports). Although the
   // workspace-wide D17c "cli/src/**/*.ts (excluding doctor.ts)" check
   // also covers prompt-fix.ts, that defense is indirect (different
   // describe block, different decision lock). Making D90 self-
@@ -602,7 +603,7 @@ describe("Architectural invariants — M E D90 prompt-fix module boundaries", ()
   // or moves prompt-fix.ts out from under packages/cli-commands/src/commands/
   // would not silently de-protect the prompt-fix subsystem. The
   // D90.1/D90.2/D90.3 tests scan BOTH prompt-fix.ts AND
-  // prompt-fix-targets.ts — the resolver is part of the subsystem
+  // prompt-fix-targets.ts -- the resolver is part of the subsystem
   // and must honor the same forbidden-import contract.
   //
   // D90.6 splits into SIX sub-tests (a-f) so each failure carries a
@@ -614,13 +615,13 @@ describe("Architectural invariants — M E D90 prompt-fix module boundaries", ()
   // require/import-equals forms) and forbids ALL other fs call
   // tokens.
   //
-  // D90.6 and D90.7 stay scoped to prompt-fix.ts only — the
+  // D90.6 and D90.7 stay scoped to prompt-fix.ts only -- the
   // fs-surface lock and single-renderer-call contract are command-
   // specific (the resolver has its own no-fs purity test in
   // prompt-fix-targets.test.ts Section 5, and only the command
   // invokes the renderer).
   //
-  // The KNOWN_LLM_SDKS list is deliberately broad — it covers not
+  // The KNOWN_LLM_SDKS list is deliberately broad -- it covers not
   // just the direct provider SDKs but also the high-level framework
   // SDKs (Vercel's `ai`, `@ai-sdk/*`, LangChain, llamaindex, etc.)
   // and the runtime adapters (`ollama`, `@aws-sdk/client-bedrock-
@@ -657,14 +658,14 @@ describe("Architectural invariants — M E D90 prompt-fix module boundaries", ()
 
   /**
    * Known LLM-SDK package specifiers banned per D90.3 (imports) and
-   * D90.8 (package.json dependency maps). Deliberately broad — covers
+   * D90.8 (package.json dependency maps). Deliberately broad -- covers
    * direct provider SDKs (@anthropic-ai/sdk, openai, cohere-ai,
    * @google/generative-ai, replicate, mistralai, @mistralai/mistralai),
    * AWS Bedrock runtime adapters (@anthropic-ai/bedrock-sdk,
    * @aws-sdk/client-bedrock-runtime), high-level framework SDKs
    * (Vercel's `ai`, `@ai-sdk/*`, LangChain ecosystem, llamaindex),
    * and other realistic adapters (ollama, groq-sdk, @groq/sdk,
-   * @huggingface/inference). NOT exhaustive — but the list covers
+   * @huggingface/inference). NOT exhaustive -- but the list covers
    * the realistic precursor packages a maintainer would add before
    * wiring the hidden --llm path.
    */
@@ -707,7 +708,7 @@ describe("Architectural invariants — M E D90 prompt-fix module boundaries", ()
    *   - TS import-equals:  `import x = require("name")` or `require("name/sub")`
    * Used by D90.3's per-SDK loop. D90.1 and D90.2 use hand-written
    * patterns with the same structure (they have package-specific
-   * shapes — `(?:node:)?` for child_process, exact `@viberevert/checks`
+   * shapes -- `(?:node:)?` for child_process, exact `@viberevert/checks`
    * package for the checks dep).
    */
   function buildSdkForbiddenPattern(sdkName: string): RegExp {
@@ -734,7 +735,7 @@ describe("Architectural invariants — M E D90 prompt-fix module boundaries", ()
       const offenders = findOffenders(readSource(rel), pattern);
       expect(
         offenders,
-        `${rel} must not import child_process / node:child_process in any form (D90.1 — static, dynamic, require, or import-equals). Matches: ${JSON.stringify(offenders)}`,
+        `${rel} must not import child_process / node:child_process in any form (D90.1 -- static, dynamic, require, or import-equals). Matches: ${JSON.stringify(offenders)}`,
       ).toEqual([]);
     }
   });
@@ -754,7 +755,7 @@ describe("Architectural invariants — M E D90 prompt-fix module boundaries", ()
       const offenders = findOffenders(readSource(rel), pattern);
       expect(
         offenders,
-        `${rel} must not import @viberevert/checks in any form (D90.2 — static, dynamic, require, import-equals, exact or subpath). Matches: ${JSON.stringify(offenders)}`,
+        `${rel} must not import @viberevert/checks in any form (D90.2 -- static, dynamic, require, import-equals, exact or subpath). Matches: ${JSON.stringify(offenders)}`,
       ).toEqual([]);
     }
   });
@@ -774,7 +775,7 @@ describe("Architectural invariants — M E D90 prompt-fix module boundaries", ()
         const offenders = findOffenders(source, pattern);
         expect(
           offenders,
-          `${rel} must not import ${sdk} in any form (D90.3 — known LLM SDK). Matches: ${JSON.stringify(offenders)}`,
+          `${rel} must not import ${sdk} in any form (D90.3 -- known LLM SDK). Matches: ${JSON.stringify(offenders)}`,
         ).toEqual([]);
       }
     }
@@ -790,7 +791,7 @@ describe("Architectural invariants — M E D90 prompt-fix module boundaries", ()
     // Option.Boolean opening paren and the `hidden: true` token.
     //
     // Defensive comment-strip via the shared stripTsComments helper
-    // BEFORE the multi-line regex test — even though prompt-fix.ts's
+    // BEFORE the multi-line regex test -- even though prompt-fix.ts's
     // comments are already prose-safe per Step 3's hygiene
     // discipline, stripping survives future comment-style changes
     // that might accidentally form the
@@ -816,7 +817,7 @@ describe("Architectural invariants — M E D90 prompt-fix module boundaries", ()
       .map((name) => join(reportersSrcDir, name));
     // Sanity: Step 2 shipped at least 3 fix-prompt-*.ts files
     // (types, template, render). A regression that removed files
-    // would silently pass this test — fail loudly instead.
+    // would silently pass this test -- fail loudly instead.
     expect(
       fixPromptFiles.length,
       `expected at least 3 fix-prompt-*.ts files under packages/reporters/src; got ${fixPromptFiles.length}`,
@@ -858,8 +859,8 @@ describe("Architectural invariants — M E D90 prompt-fix module boundaries", ()
     }
   });
 
-  it("generate-fix-prompt.ts has exactly two readFile calls AND every readFile call targets target.reportPath (D90.6a — D88 drift-guard reads A + B)", () => {
-    // D90.6a locks the D88 drift-guard reads — exactly two source
+  it("generate-fix-prompt.ts has exactly two readFile calls AND every readFile call targets target.reportPath (D90.6a -- D88 drift-guard reads A + B)", () => {
+    // D90.6a locks the D88 drift-guard reads -- exactly two source
     // occurrences of `readFile(target.reportPath`, one inside
     // `readReportBytes` (read A) and one inside
     // `assertSourceReportUnchanged` (read B). Both helpers take
@@ -883,7 +884,7 @@ describe("Architectural invariants — M E D90 prompt-fix module boundaries", ()
     const correctTarget = findOffenders(source, /\breadFile\s*\(\s*target\.reportPath\b/);
     expect(
       correctTarget.length,
-      `generate-fix-prompt.ts must call readFile(target.reportPath, ...) EXACTLY twice (D90.6a — D88 reads A + B). Found ${correctTarget.length} occurrences: ${JSON.stringify(correctTarget)}`,
+      `generate-fix-prompt.ts must call readFile(target.reportPath, ...) EXACTLY twice (D90.6a -- D88 reads A + B). Found ${correctTarget.length} occurrences: ${JSON.stringify(correctTarget)}`,
     ).toBe(2);
 
     const wrongTarget = findOffenders(source, /\breadFile\s*\((?!\s*target\.reportPath\b)/);
@@ -893,8 +894,8 @@ describe("Architectural invariants — M E D90 prompt-fix module boundaries", ()
     ).toEqual([]);
   });
 
-  it("generate-fix-prompt.ts has exactly one rm call AND every rm / unlink call targets target.fixPromptPath (D90.6b — D86 empty-findings stale removal)", () => {
-    // D90.6b locks the D86 empty-findings stale-removal — exactly
+  it("generate-fix-prompt.ts has exactly one rm call AND every rm / unlink call targets target.fixPromptPath (D90.6b -- D86 empty-findings stale removal)", () => {
+    // D90.6b locks the D86 empty-findings stale-removal -- exactly
     // one source occurrence of `rm(target.fixPromptPath` inside
     // `removeStaleFixPrompt`. NO other rm targets are allowed
     // (catches accidental `rm(target.reportPath)` which would
@@ -911,7 +912,7 @@ describe("Architectural invariants — M E D90 prompt-fix module boundaries", ()
     const correctTarget = findOffenders(source, /\brm\s*\(\s*target\.fixPromptPath\b/);
     expect(
       correctTarget.length,
-      `generate-fix-prompt.ts must call rm(target.fixPromptPath, ...) EXACTLY once (D90.6b — D86 stale removal). Found ${correctTarget.length} occurrences: ${JSON.stringify(correctTarget)}`,
+      `generate-fix-prompt.ts must call rm(target.fixPromptPath, ...) EXACTLY once (D90.6b -- D86 stale removal). Found ${correctTarget.length} occurrences: ${JSON.stringify(correctTarget)}`,
     ).toBe(1);
 
     const wrongRmTarget = findOffenders(source, /\brm\s*\((?!\s*target\.fixPromptPath\b)/);
@@ -923,12 +924,12 @@ describe("Architectural invariants — M E D90 prompt-fix module boundaries", ()
     const anyUnlink = findOffenders(source, /\bunlink\s*\(/);
     expect(
       anyUnlink,
-      `generate-fix-prompt.ts must not call unlink (D90.6b — locked operation is rm with force-removal). Call sites: ${JSON.stringify(anyUnlink)}`,
+      `generate-fix-prompt.ts must not call unlink (D90.6b -- locked operation is rm with force-removal). Call sites: ${JSON.stringify(anyUnlink)}`,
     ).toEqual([]);
   });
 
-  it("generate-fix-prompt.ts has exactly one writeFileAtomic call AND it targets target.fixPromptPath (D90.6c — D81 file-before-stdout write order)", () => {
-    // D90.6c locks the D81 success-path write — exactly one
+  it("generate-fix-prompt.ts has exactly one writeFileAtomic call AND it targets target.fixPromptPath (D90.6c -- D81 file-before-stdout write order)", () => {
+    // D90.6c locks the D81 success-path write -- exactly one
     // source occurrence of `writeFileAtomic(target.fixPromptPath`
     // inside `persistFixPrompt`. NO other writeFileAtomic targets
     // are allowed (catches accidental `writeFileAtomic(target.reportPath`
@@ -942,7 +943,7 @@ describe("Architectural invariants — M E D90 prompt-fix module boundaries", ()
     const correctTarget = findOffenders(source, /\bwriteFileAtomic\s*\(\s*target\.fixPromptPath\b/);
     expect(
       correctTarget.length,
-      `generate-fix-prompt.ts must call writeFileAtomic(target.fixPromptPath, ...) EXACTLY once (D90.6c — D81 success path). Found ${correctTarget.length} occurrences: ${JSON.stringify(correctTarget)}`,
+      `generate-fix-prompt.ts must call writeFileAtomic(target.fixPromptPath, ...) EXACTLY once (D90.6c -- D81 success path). Found ${correctTarget.length} occurrences: ${JSON.stringify(correctTarget)}`,
     ).toBe(1);
 
     const wrongTarget = findOffenders(
@@ -955,7 +956,7 @@ describe("Architectural invariants — M E D90 prompt-fix module boundaries", ()
     ).toEqual([]);
   });
 
-  it("generate-fix-prompt.ts contains NO readdir or lstat calls (D90.6d — fs-surface lock)", () => {
+  it("generate-fix-prompt.ts contains NO readdir or lstat calls (D90.6d -- fs-surface lock)", () => {
     // D90.6d: the locked fs surface is readFile + rm +
     // writeFileAtomic only. Any readdir or lstat call would
     // indicate a broader fs operation creeping in (e.g.,
@@ -982,17 +983,17 @@ describe("Architectural invariants — M E D90 prompt-fix module boundaries", ()
     ).toEqual([]);
   });
 
-  it("generate-fix-prompt.ts does NOT alias any filesystem helper via const/let assignment OR import rename (D90.6e — code-review mechanical-check lock)", () => {
+  it("generate-fix-prompt.ts does NOT alias any filesystem helper via const/let assignment OR import rename (D90.6e -- code-review mechanical-check lock)", () => {
     // D90.6e: the D90.6 grep invariants depend on the literal
     // call-site patterns being legible. Aliasing
     // (`const myRead = readFile`) or import renaming
     // (`import { readFile as foo }`) would bypass the grep
-    // without changing observable behavior — that drift class
+    // without changing observable behavior -- that drift class
     // is what this lock prevents.
     //
     // Two patterns checked:
     //   - const/let/var assignment of one of the fs helpers
-    //     (matched by helper NOT being followed by `(` — i.e.,
+    //     (matched by helper NOT being followed by `(` -- i.e.,
     //     it's a value reference, not a call).
     //   - import { X as Y } rename inside an import statement.
     //
@@ -1018,7 +1019,7 @@ describe("Architectural invariants — M E D90 prompt-fix module boundaries", ()
     ).toEqual([]);
   });
 
-  it("generate-fix-prompt.ts imports only readFile/rm from node:fs/promises via a single un-aliased named-import statement and uses no other fs call tokens (D90.6f — broad future-proofing surface lock)", () => {
+  it("generate-fix-prompt.ts imports only readFile/rm from node:fs/promises via a single un-aliased named-import statement and uses no other fs call tokens (D90.6f -- broad future-proofing surface lock)", () => {
     // D90.6f future-proofs the fs surface against ANY new fs
     // operation a future maintainer might add. D90.6a-e enforce
     // the specific locked operations; D90.6f locks the surface
@@ -1029,7 +1030,7 @@ describe("Architectural invariants — M E D90 prompt-fix module boundaries", ()
     //
     //   2. The raw imported names MUST NOT contain any `as`-rename
     //      (aliases are also forbidden by D90.6e, but D90.6f is
-    //      self-contained — locks the canonical shape directly so
+    //      self-contained -- locks the canonical shape directly so
     //      each test can be read in isolation without depending on
     //      another test's coverage).
     //
@@ -1045,10 +1046,10 @@ describe("Architectural invariants — M E D90 prompt-fix module boundaries", ()
     //   6. NO dynamic import of `node:fs` OR `node:fs/promises`.
     //
     //   7. NO CJS `require("node:fs[/promises]")` OR TS
-    //      `import x = require("node:fs[/promises]")` — same
+    //      `import x = require("node:fs[/promises]")` -- same
     //      routing-around concern as the dynamic-import case.
     //
-    //   8. NO call to any other fs-promises function token —
+    //   8. NO call to any other fs-promises function token --
     //      access / appendFile / chmod / chown / copyFile / cp /
     //      lstat / mkdir / mkdtemp / open / opendir / readdir /
     //      readlink / realpath / rename / rmdir / stat /
@@ -1063,7 +1064,7 @@ describe("Architectural invariants — M E D90 prompt-fix module boundaries", ()
     // defined identifiers that contain those substrings.
     //
     // M G1a Step 1: targets generate-fix-prompt.ts (operation).
-    // The comment-strip uses the shared stripTsComments helper —
+    // The comment-strip uses the shared stripTsComments helper --
     // its block-comment replacement preserves newline characters
     // so findOffenders line numbers stay accurate.
     const source = readSource(GENERATE_FIX_PROMPT_OPERATION_REL);
@@ -1089,12 +1090,12 @@ describe("Architectural invariants — M E D90 prompt-fix module boundaries", ()
     // Check 2: no aliased names in the raw imported parts.
     expect(
       importedRaw.some((part) => /\s+as\s+\w+$/.test(part)),
-      `generate-fix-prompt.ts node:fs/promises import must not use aliased names (D90.6f — canonical shape). Got: ${JSON.stringify(importedRaw)}`,
+      `generate-fix-prompt.ts node:fs/promises import must not use aliased names (D90.6f -- canonical shape). Got: ${JSON.stringify(importedRaw)}`,
     ).toBe(false);
 
     // Check 3: exactly {readFile, rm} with no duplicates. Since
     // alias check above already passed, importedRaw contains
-    // plain identifier names — no need to strip `as X` suffixes.
+    // plain identifier names -- no need to strip `as X` suffixes.
     expect(
       importedRaw.length,
       `generate-fix-prompt.ts node:fs/promises import must contain exactly 2 names (catches duplicates) (D90.6f). Got ${importedRaw.length}: ${JSON.stringify(importedRaw)}`,
@@ -1118,7 +1119,7 @@ describe("Architectural invariants — M E D90 prompt-fix module boundaries", ()
     const bareFsStaticImports = findOffenders(stripped, /from\s+["']node:fs["']/);
     expect(
       bareFsStaticImports,
-      `generate-fix-prompt.ts must not import from the bare node:fs (sync) API — only node:fs/promises (D90.6f). Matches: ${JSON.stringify(bareFsStaticImports)}`,
+      `generate-fix-prompt.ts must not import from the bare node:fs (sync) API -- only node:fs/promises (D90.6f). Matches: ${JSON.stringify(bareFsStaticImports)}`,
     ).toEqual([]);
 
     // Check 6: no dynamic import of node:fs or node:fs/promises.
@@ -1161,9 +1162,9 @@ describe("Architectural invariants — M E D90 prompt-fix module boundaries", ()
     ).toEqual([]);
   });
 
-  it("generate-fix-prompt.ts contains EXACTLY ONE renderFixPrompt call site (D90.7 — single renderer call lock)", () => {
+  it("generate-fix-prompt.ts contains EXACTLY ONE renderFixPrompt call site (D90.7 -- single renderer call lock)", () => {
     // D90.7: the renderer is invoked exactly once per execution
-    // and the source MUST reflect that — a second call site
+    // and the source MUST reflect that -- a second call site
     // would risk drift if any future template helper accidentally
     // sneaks in a clock/random/ulid read (which D90.5 currently
     // prohibits, but defense-in-depth). The single call lives on
@@ -1172,7 +1173,7 @@ describe("Architectural invariants — M E D90 prompt-fix module boundaries", ()
     // Comments in generate-fix-prompt.ts are written as prose
     // ("the renderer call" / "the render invocation") rather than
     // the literal name-plus-paren form per the M E #6 prose-comment
-    // discipline carried over into the operation — findOffenders
+    // discipline carried over into the operation -- findOffenders
     // strips comments anyway, but the prose convention adds a
     // second layer of safety against this grep false-matching.
     //
@@ -1187,7 +1188,7 @@ describe("Architectural invariants — M E D90 prompt-fix module boundaries", ()
     ).toBe(1);
   });
 
-  it("no known LLM SDK appears in any package.json dependency map (D90.8 — workspace-wide LLM-free contract)", () => {
+  it("no known LLM SDK appears in any package.json dependency map (D90.8 -- workspace-wide LLM-free contract)", () => {
     // D90.8 catches the "dependency added but not yet imported"
     // drift class. Even if no source file imports an LLM SDK,
     // declaring one in any package.json signals intent to land
@@ -1216,7 +1217,7 @@ describe("Architectural invariants — M E D90 prompt-fix module boundaries", ()
           pkgJsonPaths.push(candidate);
         }
       } catch {
-        // not present — skip
+        // not present -- skip
       }
     }
     const scriptsPkgJson = join(REPO_ROOT, "scripts", "package.json");
@@ -1225,7 +1226,7 @@ describe("Architectural invariants — M E D90 prompt-fix module boundaries", ()
         pkgJsonPaths.push(scriptsPkgJson);
       }
     } catch {
-      // not present — skip (the project's scripts/ may or may not
+      // not present -- skip (the project's scripts/ may or may not
       // have its own package.json)
     }
 
@@ -1238,7 +1239,7 @@ describe("Architectural invariants — M E D90 prompt-fix module boundaries", ()
         for (const sdk of KNOWN_LLM_SDKS) {
           if (sdk in (deps as Record<string, unknown>)) {
             violations.push(
-              `${relative(REPO_ROOT, pkgPath).replace(/\\/g, "/")} → ${depField}.${sdk}`,
+              `${relative(REPO_ROOT, pkgPath).replace(/\\/g, "/")} -> ${depField}.${sdk}`,
             );
           }
         }
@@ -1250,10 +1251,10 @@ describe("Architectural invariants — M E D90 prompt-fix module boundaries", ()
     ).toEqual([]);
   });
 
-  it("CLI index imports and registers PromptFixCommand exactly once AND preserves the Report → PromptFix → Rollback workflow order (M E command exposure lock)", () => {
+  it("CLI index imports and registers PromptFixCommand exactly once AND preserves the Report -> PromptFix -> Rollback workflow order (M E command exposure lock)", () => {
     // Locked separately from D90.X because this is about EXPOSURE
     // (the command is reachable through the binary) and ORDER (the
-    // intentional check → report → prompt-fix → rollback workflow
+    // intentional check -> report -> prompt-fix -> rollback workflow
     // grouping), not internal code-level boundaries. The
     // integration tests in prompt-fix.test.ts register
     // PromptFixCommand manually via their in-test Cli, so if a
@@ -1306,27 +1307,27 @@ describe("Architectural invariants — M E D90 prompt-fix module boundaries", ()
 
     expect(
       reportIdx,
-      "ReportCommand must be registered BEFORE PromptFixCommand in index.ts (workflow order: check → report → prompt-fix → rollback)",
+      "ReportCommand must be registered BEFORE PromptFixCommand in index.ts (workflow order: check -> report -> prompt-fix -> rollback)",
     ).toBeLessThan(promptFixIdx);
     expect(
       promptFixIdx,
-      "PromptFixCommand must be registered BEFORE RollbackCommand in index.ts (workflow order: check → report → prompt-fix → rollback)",
+      "PromptFixCommand must be registered BEFORE RollbackCommand in index.ts (workflow order: check -> report -> prompt-fix -> rollback)",
     ).toBeLessThan(rollbackIdx);
   });
 });
 
-describe("Architectural invariants — M F D98.M hook subsystem boundaries", () => {
+describe("Architectural invariants -- M F D98.M hook subsystem boundaries", () => {
   // D98.M locks 14 invariants for the hook install/uninstall subsystem.
   // The locked boundaries:
   //
-  //   hook-script.ts is a pure constants + pure-function module — NO
+  //   hook-script.ts is a pure constants + pure-function module -- NO
   //   runtime imports (M.5), ASCII-only at byte level (M.4), and
   //   HOOK_SCRIPT_TEMPLATE constructed via [...lines].join("\n") + "\n"
-  //   (M.14 — NOT a raw multi-line template literal which can pick up
+  //   (M.14 -- NOT a raw multi-line template literal which can pick up
   //   CRLF on Windows + autocrlf).
   //
   //   hook-managers.ts is pure detection logic with a bounded fs surface
-  //   (M.11 — 6 path-specific lstats + 1 readFile of package.json = 7
+  //   (M.11 -- 6 path-specific lstats + 1 readFile of package.json = 7
   //   total source call sites) and no child_process / @viberevert/checks
   //   / LLM SDK (M.1/M.2/M.3).
   //
@@ -1347,8 +1348,8 @@ describe("Architectural invariants — M F D98.M hook subsystem boundaries", () 
   //   HookInstallCommand < HookUninstallCommand, with HookUninstall
   //   IMMEDIATELY after HookInstall).
   //
-  //   Cross-command import lock (M.12) forbids hook-install.ts ↮
-  //   hook-uninstall.ts dependencies in either direction (all four
+  //   Cross-command import lock (M.12) forbids cross-imports between
+  //   hook-install.ts and hook-uninstall.ts in either direction (all four
   //   import forms; both .js and .ts subpath suffixes; both
   //   sibling-relative `./hook-*` and parent-relative
   //   `../commands/hook-*` specifier shapes); shared error classes
@@ -1356,14 +1357,14 @@ describe("Architectural invariants — M F D98.M hook subsystem boundaries", () 
   //   M.13 extends M.4's ASCII-only scan to the three M F CLI source
   //   files.
   //
-  // 14 tests total — one per D98.M.X invariant. KNOWN_LLM_SDKS list +
+  // 14 tests total -- one per D98.M.X invariant. KNOWN_LLM_SDKS list +
   // helpers (escapeRegExp, buildSdkForbiddenPattern) are DUPLICATED
-  // from the D90 block above for self-containment — each architectural
+  // from the D90 block above for self-containment -- each architectural
   // describe block stands alone so changes to one block don't silently
   // de-protect another.
   //
   // **Import-form coverage:** D98.M.1, D98.M.2, D98.M.3, and D98.M.12
-  // all scan FOUR import forms — static ESM (`from "..."`), dynamic
+  // all scan FOUR import forms -- static ESM (`from "..."`), dynamic
   // ESM (`import("...")`), CommonJS require (`require("...")`), AND
   // TS import-equals (`import x = require("...")`). Consistent with
   // D90 to prevent bypass routes via tsconfig interop or copied
@@ -1382,7 +1383,7 @@ describe("Architectural invariants — M F D98.M hook subsystem boundaries", () 
 
   /**
    * Known LLM-SDK package specifiers banned per D98.M.3. DUPLICATED
-   * from the D90 block's KNOWN_LLM_SDKS for self-containment — D98.M
+   * from the D90 block's KNOWN_LLM_SDKS for self-containment -- D98.M
    * is a separate decision lock and the list MUST be authoritative
    * within this block so a future M G1+ change to either list does
    * not silently de-protect the other subsystem.
@@ -1433,7 +1434,7 @@ describe("Architectural invariants — M F D98.M hook subsystem boundaries", () 
   }
 
   // ===========================================================================
-  // D98.M.1, M.2, M.3 — forbidden imports across the hook subsystem
+  // D98.M.1, M.2, M.3 -- forbidden imports across the hook subsystem
   // ===========================================================================
 
   it("D98.M.1: hook subsystem (install + uninstall + managers) does NOT import child_process in any form", () => {
@@ -1448,7 +1449,7 @@ describe("Architectural invariants — M F D98.M hook subsystem boundaries", () 
       const offenders = findOffenders(readSource(rel), pattern);
       expect(
         offenders,
-        `${rel} must not import child_process / node:child_process in any form (D98.M.1 — static, dynamic, require, or import-equals). Matches: ${JSON.stringify(offenders)}`,
+        `${rel} must not import child_process / node:child_process in any form (D98.M.1 -- static, dynamic, require, or import-equals). Matches: ${JSON.stringify(offenders)}`,
       ).toEqual([]);
     }
   });
@@ -1466,7 +1467,7 @@ describe("Architectural invariants — M F D98.M hook subsystem boundaries", () 
       const offenders = findOffenders(readSource(rel), pattern);
       expect(
         offenders,
-        `${rel} must not import @viberevert/checks in any form (D98.M.2 — static, dynamic, require, import-equals, exact or subpath). Matches: ${JSON.stringify(offenders)}`,
+        `${rel} must not import @viberevert/checks in any form (D98.M.2 -- static, dynamic, require, import-equals, exact or subpath). Matches: ${JSON.stringify(offenders)}`,
       ).toEqual([]);
     }
   });
@@ -1486,19 +1487,19 @@ describe("Architectural invariants — M F D98.M hook subsystem boundaries", () 
         const offenders = findOffenders(source, pattern);
         expect(
           offenders,
-          `${rel} must not import ${sdk} in any form (D98.M.3 — known LLM SDK). Matches: ${JSON.stringify(offenders)}`,
+          `${rel} must not import ${sdk} in any form (D98.M.3 -- known LLM SDK). Matches: ${JSON.stringify(offenders)}`,
         ).toEqual([]);
       }
     }
   });
 
   // ===========================================================================
-  // D98.M.4 — hook-script.ts ASCII-only
+  // D98.M.4 -- hook-script.ts ASCII-only
   // ===========================================================================
 
   it("D98.M.4: hook-script.ts is ASCII-only at byte level", () => {
     // hook-script.ts content is what gets written to .git/hooks/pre-
-    // commit on disk — a single non-ASCII byte (em-dash, smart quote,
+    // commit on disk -- a single non-ASCII byte (em-dash, smart quote,
     // arrow) would corrupt the on-disk hook script. Byte-level scan
     // catches accidental smart-quote / em-dash insertion in any
     // context (output string literals, comments, identifiers, etc.)
@@ -1518,7 +1519,7 @@ describe("Architectural invariants — M F D98.M hook subsystem boundaries", () 
   });
 
   // ===========================================================================
-  // D98.M.5 — hook-script.ts pure module (no runtime imports)
+  // D98.M.5 -- hook-script.ts pure module (no runtime imports)
   // ===========================================================================
 
   it("D98.M.5: hook-script.ts imports nothing except types (pure constants + pure-function module)", () => {
@@ -1541,15 +1542,15 @@ describe("Architectural invariants — M F D98.M hook subsystem boundaries", () 
     const offenders = findOffenders(source, runtimeImportPattern);
     expect(
       offenders,
-      `hook-script.ts must NOT have any runtime imports (D98.M.5 — pure constants module). Runtime-import lines: ${JSON.stringify(offenders)}`,
+      `hook-script.ts must NOT have any runtime imports (D98.M.5 -- pure constants module). Runtime-import lines: ${JSON.stringify(offenders)}`,
     ).toEqual([]);
   });
 
   // ===========================================================================
-  // D98.M.6 — hook-install.ts fs source-call-site surface
+  // D98.M.6 -- hook-install.ts fs source-call-site surface
   // ===========================================================================
 
-  it("D98.M.6: hook-install.ts filesystem surface — exact source-call-site counts (10 sites / 9 patterns) + aggregate per-op guards + forbidden ops", () => {
+  it("D98.M.6: hook-install.ts filesystem surface -- exact source-call-site counts (10 sites / 9 patterns) + aggregate per-op guards + forbidden ops", () => {
     // D98.I install list locks the EXACT source-call-site surface:
     //   lstat(join(repoRoot, ".git")) x1, lstat(hooksDir) x2 (preflight
     //   + post-mkdir per D98.X validate-before-mutate), lstat(hookPath)
@@ -1627,7 +1628,7 @@ describe("Architectural invariants — M F D98.M hook subsystem boundaries", () 
       { name: "unlink(", pattern: /\bunlink\(/ },
       { name: "copyFile(", pattern: /\bcopyFile\(/ },
       { name: "rm(", pattern: /\brm\(/ },
-      // `stat(` standalone — word boundary excludes `lstat(` since `l`
+      // `stat(` standalone -- word boundary excludes `lstat(` since `l`
       // and `s` are both word chars (no boundary between them).
       { name: "stat( (without `l` prefix)", pattern: /\bstat\(/ },
     ];
@@ -1641,10 +1642,10 @@ describe("Architectural invariants — M F D98.M hook subsystem boundaries", () 
   });
 
   // ===========================================================================
-  // D98.M.7 — hook-uninstall.ts fs source-call-site surface
+  // D98.M.7 -- hook-uninstall.ts fs source-call-site surface
   // ===========================================================================
 
-  it("D98.M.7: hook-uninstall.ts filesystem surface — exact source-call-site counts (9 sites / 8 patterns) + withFileTypes:true EXACTLY once + aggregate per-op guards + forbidden ops", () => {
+  it("D98.M.7: hook-uninstall.ts filesystem surface -- exact source-call-site counts (9 sites / 8 patterns) + withFileTypes:true EXACTLY once + aggregate per-op guards + forbidden ops", () => {
     // D98.I uninstall list locks the EXACT source-call-site surface:
     //   lstat(join(repoRoot, ".git")) x1, lstat(hooksDir) x1 (uninstall
     //   does NOT mkdir, so no post-mkdir re-check), lstat(hookPath) x2
@@ -1747,14 +1748,14 @@ describe("Architectural invariants — M F D98.M hook subsystem boundaries", () 
   });
 
   // ===========================================================================
-  // D98.M.8 — import-count locks for cross-file symbols
+  // D98.M.8 -- import-count locks for cross-file symbols
   // ===========================================================================
 
   it("D98.M.8: HOOK_SCRIPT_TEMPLATE imported exactly once in hook-install.ts from ../hook-script.js; MANAGED_BY_MARKER imported exactly once in EACH of install + uninstall from ../hook-script.js; detectHookManagers imported once from ../hook-managers.js + called once in hook-install.ts", () => {
     // D98.M.8 locks the symbol-import surface for cross-file symbols
     // from hook-script.ts and hook-managers.ts. Catches accidental
     // template inlining, marker drift, or duplicate detection
-    // invocations (one import does NOT prevent two calls — both
+    // invocations (one import does NOT prevent two calls -- both
     // locks are required for detectHookManagers).
     //
     // **Multi-line imports**: biome formats imports with >3 symbols as
@@ -1837,7 +1838,7 @@ describe("Architectural invariants — M F D98.M hook subsystem boundaries", () 
     );
     expect(
       tmplInUninstall,
-      `hook-uninstall.ts must NOT import HOOK_SCRIPT_TEMPLATE (D98.M.8 — uninstall does not write the template). Found ${tmplInUninstall}.`,
+      `hook-uninstall.ts must NOT import HOOK_SCRIPT_TEMPLATE (D98.M.8 -- uninstall does not write the template). Found ${tmplInUninstall}.`,
     ).toBe(0);
 
     // MANAGED_BY_MARKER: exactly 1 import in EACH of install + uninstall
@@ -1882,11 +1883,11 @@ describe("Architectural invariants — M F D98.M hook subsystem boundaries", () 
   });
 
   // ===========================================================================
-  // D98.M.9 — CLI index.ts hook command exposure (import + register counts)
+  // D98.M.9 -- CLI index.ts hook command exposure (import + register counts)
   // ===========================================================================
 
   it("D98.M.9: index.ts imports HookInstallCommand AND HookUninstallCommand exactly once each AND registers each via cli.register exactly once", () => {
-    // D98.M.9 locks command EXPOSURE through the binary — the
+    // D98.M.9 locks command EXPOSURE through the binary -- the
     // integration tests register each command manually via their
     // in-test Cli, so if a future maintainer removes the
     // cli.register(...) line from index.ts EVERY test still passes
@@ -1932,10 +1933,10 @@ describe("Architectural invariants — M F D98.M hook subsystem boundaries", () 
   });
 
   // ===========================================================================
-  // D98.M.10 — index.ts registration ORDER + immediately-after lock
+  // D98.M.10 -- index.ts registration ORDER + immediately-after lock
   // ===========================================================================
 
-  it("D98.M.10: index.ts registration ORDER — RollbackCommand < HookInstallCommand < HookUninstallCommand AND HookUninstallCommand IMMEDIATELY after HookInstallCommand", () => {
+  it("D98.M.10: index.ts registration ORDER -- RollbackCommand < HookInstallCommand < HookUninstallCommand AND HookUninstallCommand IMMEDIATELY after HookInstallCommand", () => {
     // D98.M.10 locks the workflow-grouping convention from the M F
     // plan: hook commands sit immediately after the rollback command,
     // and the two hook commands are registered as a pair (no other
@@ -1990,10 +1991,10 @@ describe("Architectural invariants — M F D98.M hook subsystem boundaries", () 
   });
 
   // ===========================================================================
-  // D98.M.11 — hook-managers.ts fs source-call-site surface
+  // D98.M.11 -- hook-managers.ts fs source-call-site surface
   // ===========================================================================
 
-  it("D98.M.11: hook-managers.ts filesystem surface — exact source-call-site counts (6 lstats + 1 readFile = 7 total sites) + aggregate per-op guards + forbidden ops", () => {
+  it("D98.M.11: hook-managers.ts filesystem surface -- exact source-call-site counts (6 lstats + 1 readFile = 7 total sites) + aggregate per-op guards + forbidden ops", () => {
     // D98.W locks the hook-managers.ts fs surface to EXACTLY these
     // 7 source call sites:
     //   lstat(huskyDirPath) x1, readFile(packageJsonPath) x1, plus one
@@ -2061,7 +2062,7 @@ describe("Architectural invariants — M F D98.M hook subsystem boundaries", () 
   });
 
   // ===========================================================================
-  // D98.M.12 — cross-command import lock
+  // D98.M.12 -- cross-command import lock
   // ===========================================================================
 
   it("D98.M.12: hook-install.ts and hook-uninstall.ts MUST NOT import from each other in any form (.js or .ts subpath; either `./hook-*` or `../commands/hook-*` specifier)", () => {
@@ -2107,7 +2108,7 @@ describe("Architectural invariants — M F D98.M hook subsystem boundaries", () 
   });
 
   // ===========================================================================
-  // D98.M.13 — hook-install + hook-uninstall + hook-managers ASCII-only
+  // D98.M.13 -- hook-install + hook-uninstall + hook-managers ASCII-only
   // ===========================================================================
 
   it("D98.M.13: hook-install.ts + hook-uninstall.ts + hook-managers.ts are ASCII-only at byte level", () => {
@@ -2134,7 +2135,7 @@ describe("Architectural invariants — M F D98.M hook subsystem boundaries", () 
   });
 
   // ===========================================================================
-  // D98.M.14 — hook-script.ts: forbid raw multi-line template literal for HOOK_SCRIPT_TEMPLATE
+  // D98.M.14 -- hook-script.ts: forbid raw multi-line template literal for HOOK_SCRIPT_TEMPLATE
   // ===========================================================================
 
   it("D98.M.14: hook-script.ts MUST NOT assign HOOK_SCRIPT_TEMPLATE via a raw multi-line template literal", () => {
@@ -2154,7 +2155,7 @@ describe("Architectural invariants — M F D98.M hook subsystem boundaries", () 
     // join-array expressions, function returns, or string
     // interpolations elsewhere in the file. The `[^=]*` is greedy
     // but bounded by the requirement of a subsequent `=` followed by
-    // optional whitespace then a backtick — only an actual assignment
+    // optional whitespace then a backtick -- only an actual assignment
     // to a template literal satisfies that shape.
     const source = readSource(HOOK_SCRIPT_REL);
     const antipattern = /\bHOOK_SCRIPT_TEMPLATE\b[^=]*=\s*`/;
@@ -2167,29 +2168,29 @@ describe("Architectural invariants — M F D98.M hook subsystem boundaries", () 
 });
 
 // =============================================================================
-// M G1a D99.M — @viberevert/cli-commands package boundaries
+// M G1a D99.M -- @viberevert/cli-commands package boundaries
 // =============================================================================
 //
 // Four invariants lock the new public seam created by M G1a Step 1:
 //
-//   - D99.M.19 — Barrel guard: required public symbols (runtime AND
+//   - D99.M.19 -- Barrel guard: required public symbols (runtime AND
 //     TypeScript types) are exported AND known package-internal symbols
 //     stay un-exported.
-//   - D99.M.20 — cli-commands process hygiene: no direct writes to
+//   - D99.M.20 -- cli-commands process hygiene: no direct writes to
 //     process.stdout / process.stderr / process.exit / console.* anywhere
 //     under packages/cli-commands/src/**. Commands route output through
 //     this.context.stdout / this.context.stderr (BaseContext) so the
 //     in-process Clipanion harness (D99.W) can capture into bounded
 //     memory sinks instead of corrupting the MCP server's stdio framing
 //     (D99.X).
-//   - D99.M.21 — Operation contract: the 3 typed operations exist as
+//   - D99.M.21 -- Operation contract: the 3 typed operations exist as
 //     standalone files exporting their named function AND obey a STRICTER
 //     hygiene rule than Commands do (no process.cwd, no Clipanion
 //     context, no Clipanion imports, no stream imports, no streams,
 //     no console). Their lock-path constants stay declared in the
-//     operation files but are NOT barrel-exported — defense in depth
+//     operation files but are NOT barrel-exported -- defense in depth
 //     with D99.M.19b.
-//   - D99.M.22 — Drift detection: each of the 3 refactored Commands
+//   - D99.M.22 -- Drift detection: each of the 3 refactored Commands
 //     (start, checkpoint, prompt-fix) imports AND calls its corresponding
 //     operation AND does NOT embed any of the old domain helpers the
 //     operation now owns. Prevents a future maintainer from re-embedding
@@ -2201,10 +2202,10 @@ describe("Architectural invariants — M F D98.M hook subsystem boundaries", () 
 // are NOT in this file; they will land in the @viberevert/mcp test suite
 // when Step 2+ ships. This file owns only the cli-commands-side
 // invariants because cli-commands is the dependency target for both
-// the CLI binary and the future mcp package — invariants on the
+// the CLI binary and the future mcp package -- invariants on the
 // EXPORTED seam live with the EXPORTER.
 
-describe("Architectural invariants — M G1a D99.M @viberevert/cli-commands boundaries", () => {
+describe("Architectural invariants -- M G1a D99.M @viberevert/cli-commands boundaries", () => {
   const CLI_COMMANDS_BARREL_REL = "packages/cli-commands/src/index.ts";
   const CLI_COMMANDS_SRC_DIR = "packages/cli-commands/src";
   const CLI_COMMANDS_OPERATIONS_DIR = "packages/cli-commands/src/operations";
@@ -2220,7 +2221,7 @@ describe("Architectural invariants — M G1a D99.M @viberevert/cli-commands boun
   const PROMPT_FIX_COMMAND_REL = "packages/cli-commands/src/commands/prompt-fix.ts";
 
   // ===========================================================================
-  // D99.M.19 — Barrel guard
+  // D99.M.19 -- Barrel guard
   // ===========================================================================
 
   it("D99.M.19a: @viberevert/cli-commands barrel re-exports every required public symbol (runtime + types)", () => {
@@ -2228,12 +2229,12 @@ describe("Architectural invariants — M G1a D99.M @viberevert/cli-commands boun
     // and @viberevert/mcp (Step 2+) consume cli-commands. M G1a Step 1
     // locks both the runtime AND type surface; this invariant asserts
     // each locked symbol remains reachable. Type re-exports (Opts/Result)
-    // are part of the public seam — losing them would compile-break MCP
+    // are part of the public seam -- losing them would compile-break MCP
     // consumers even when runtime exports stay intact.
     const exported = collectBarrelExports(readSource(CLI_COMMANDS_BARREL_REL));
 
     const REQUIRED_PRESENT: ReadonlyArray<string> = [
-      // ----- 14 Command classes — consumed by the `viberevert` CLI binary.
+      // ----- 14 Command classes -- consumed by the `viberevert` CLI binary.
       "CheckCommand",
       "CheckpointCommand",
       "CheckpointsCommand",
@@ -2259,7 +2260,7 @@ describe("Architectural invariants — M G1a D99.M @viberevert/cli-commands boun
       "generateFixPromptOperation",
       "GenerateFixPromptOperationOpts",
       "GenerateFixPromptOperationResult",
-      // ----- 9 operation-public typed errors — consumed by MCP_ERROR_CODE_MAP.
+      // ----- 9 operation-public typed errors -- consumed by MCP_ERROR_CODE_MAP.
       "CheckpointNameCollisionError",
       "CreateCheckpointListLoadError",
       "PromptFixTargetResolutionError",
@@ -2269,7 +2270,7 @@ describe("Architectural invariants — M G1a D99.M @viberevert/cli-commands boun
       "PromptFixStaleRemovalFailureError",
       "PromptFixIoFailureError",
       "PromptFixEmptyFindingsError",
-      // ----- 5 package-local passthrough errors — re-exported for MCP
+      // ----- 5 package-local passthrough errors -- re-exported for MCP
       //       envelope mapping.
       "ConcurrentOperationError",
       "AmbiguousReportSelectionError",
@@ -2291,7 +2292,7 @@ describe("Architectural invariants — M G1a D99.M @viberevert/cli-commands boun
   });
 
   it("D99.M.19b: @viberevert/cli-commands barrel does NOT export known package-internal symbols", () => {
-    // The barrel must not leak helper internals — other packages would
+    // The barrel must not leak helper internals -- other packages would
     // then key on them, freezing the cli-commands internal layout.
     // These symbols are documented at the bottom of index.ts as
     // "intentionally NOT exported"; this test enforces that prose
@@ -2299,28 +2300,28 @@ describe("Architectural invariants — M G1a D99.M @viberevert/cli-commands boun
     const exported = collectBarrelExports(readSource(CLI_COMMANDS_BARREL_REL));
 
     const FORBIDDEN_ABSENT: ReadonlyArray<string> = [
-      // Lock-path constants — internal display plumbing for Commands' stderr templates.
+      // Lock-path constants -- internal display plumbing for Commands' stderr templates.
       "START_LOCK_REL",
       "CHECKPOINT_NAME_LOCK_REL",
-      // checkpoint-helpers internals — operation wraps CheckpointListLoadError
+      // checkpoint-helpers internals -- operation wraps CheckpointListLoadError
       // into CreateCheckpointListLoadError (operation-public) so MCP keys on
       // the wrap, not the helper.
       "safeListCheckpoints",
       "CheckpointListLoadError",
       "CollisionExitSentinel",
-      // prompt-fix-targets resolver internals — operations consume them; MCP does not.
+      // prompt-fix-targets resolver internals -- operations consume them; MCP does not.
       "resolvePromptFixReportTarget",
       "PromptFixReportTarget",
       // report-paths resolver internals.
       "resolveReportPaths",
-      // Atomic-IO helpers — package-private per D17c.
+      // Atomic-IO helpers -- package-private per D17c.
       "writeFileAtomic",
       "renameDirAtomic",
-      // locks.ts internals — only ConcurrentOperationError is exported;
+      // locks.ts internals -- only ConcurrentOperationError is exported;
       // LockInfo + withExclusiveLock stay package-internal.
       "LockInfo",
       "withExclusiveLock",
-      // runtime-env CLI-side utilities — operations consume them
+      // runtime-env CLI-side utilities -- operations consume them
       // internally; barrel-exporting them would invite MCP to grow
       // a parallel timestamp/version surface.
       "resolveProductVersionForReport",
@@ -2329,13 +2330,13 @@ describe("Architectural invariants — M G1a D99.M @viberevert/cli-commands boun
     for (const symbol of FORBIDDEN_ABSENT) {
       expect(
         exported.has(symbol),
-        `@viberevert/cli-commands barrel must NOT export ${symbol} (D99.M.19b — package-internal symbol; barrel-guard exclusion).`,
+        `@viberevert/cli-commands barrel must NOT export ${symbol} (D99.M.19b -- package-internal symbol; barrel-guard exclusion).`,
       ).toBe(false);
     }
   });
 
   // ===========================================================================
-  // D99.M.20 — cli-commands process hygiene
+  // D99.M.20 -- cli-commands process hygiene
   // ===========================================================================
 
   it("D99.M.20: packages/cli-commands/src/** MUST NOT call process.exit / process.stdout.write / process.stderr.write / console.*", () => {
@@ -2347,10 +2348,10 @@ describe("Architectural invariants — M G1a D99.M @viberevert/cli-commands boun
     // The forbidden patterns target `process.*` and `console.*`
     // specifically. `this.context.stdout.write` is a DIFFERENT
     // textual pattern (no `process.` prefix) so it passes through
-    // unaffected — no carve-out logic needed.
+    // unaffected -- no carve-out logic needed.
     //
     // Source is passed through `stripTsComments` before `findOffenders`
-    // — `findOffenders` does line-level comment skip on its own, but
+    // -- `findOffenders` does line-level comment skip on its own, but
     // pre-stripping closes inline mid-line block-comment gaps.
     const FORBIDDEN: ReadonlyArray<{ name: string; pattern: RegExp }> = [
       { name: "process.exit(", pattern: /\bprocess\.exit\s*\(/ },
@@ -2384,7 +2385,7 @@ describe("Architectural invariants — M G1a D99.M @viberevert/cli-commands boun
   });
 
   // ===========================================================================
-  // D99.M.21 — Operation contract
+  // D99.M.21 -- Operation contract
   // ===========================================================================
 
   it("D99.M.21a: the 3 typed operations exist as standalone files exporting their named operation function", () => {
@@ -2418,13 +2419,13 @@ describe("Architectural invariants — M G1a D99.M @viberevert/cli-commands boun
     // Operations are pure domain functions. They receive `cwd` via
     // their typed Opts; reading `process.cwd()` would silently bind
     // to the wrong directory when called from MCP's boot-time repo
-    // binding (D99.P). Operations also write to NOTHING — output is
+    // binding (D99.P). Operations also write to NOTHING -- output is
     // via the typed return value only.
     //
     // Stricter than D99.M.20: operations are NOT Commands and have
     // no BaseContext, so `this.context.*` is also forbidden here.
     // AND operations must not IMPORT clipanion or node:stream/stream
-    // at all — pulling `Command`/`Option`/`BaseContext` would
+    // at all -- pulling `Command`/`Option`/`BaseContext` would
     // couple pure domain logic to the CLI framework; pulling stream
     // machinery would invite a parallel non-Command output path
     // that bypasses the typed return value. Forbidding the IMPORT
@@ -2462,7 +2463,7 @@ describe("Architectural invariants — M G1a D99.M @viberevert/cli-commands boun
         const offenders = findOffenders(source, pattern);
         expect(
           offenders,
-          `${rel} must NOT match ${name} (D99.M.21b operation contract — stricter than D99.M.20). Matches: ${JSON.stringify(offenders)}`,
+          `${rel} must NOT match ${name} (D99.M.21b operation contract -- stricter than D99.M.20). Matches: ${JSON.stringify(offenders)}`,
         ).toEqual([]);
       }
     }
@@ -2471,7 +2472,7 @@ describe("Architectural invariants — M G1a D99.M @viberevert/cli-commands boun
   it("D99.M.21c: lock-path constants are top-level `export const` declarations in operation files AND NOT barrel-exported (defense-in-depth with D99.M.19b)", () => {
     // Belt-and-suspenders with D99.M.19b's absent-list check.
     //
-    // Half 1 — DECLARATION FORM: the operation files DEFINE these
+    // Half 1 -- DECLARATION FORM: the operation files DEFINE these
     // constants as top-level `export const`; the line-anchored
     // regex requires the actual declaration form on stripped source,
     // NOT just a textual mention (so a comment saying "//
@@ -2489,23 +2490,23 @@ describe("Architectural invariants — M G1a D99.M @viberevert/cli-commands boun
       `${CREATE_CHECKPOINT_OPERATION_REL} must declare \`export const CHECKPOINT_NAME_LOCK_REL\` at top level (D99.M.21c operation file source-of-truth; comment mentions do not satisfy).`,
     ).toBe(true);
 
-    // Half 2 — BARREL ABSENCE: the cli-commands barrel must NOT
+    // Half 2 -- BARREL ABSENCE: the cli-commands barrel must NOT
     // re-export either constant. Redundant with D99.M.19b but kept
     // here so a single test failure points directly at the
     // lock-constant contract.
     const barrelExports = collectBarrelExports(readSource(CLI_COMMANDS_BARREL_REL));
     expect(
       barrelExports.has("START_LOCK_REL"),
-      "@viberevert/cli-commands barrel must NOT export START_LOCK_REL (D99.M.21c — internal display plumbing).",
+      "@viberevert/cli-commands barrel must NOT export START_LOCK_REL (D99.M.21c -- internal display plumbing).",
     ).toBe(false);
     expect(
       barrelExports.has("CHECKPOINT_NAME_LOCK_REL"),
-      "@viberevert/cli-commands barrel must NOT export CHECKPOINT_NAME_LOCK_REL (D99.M.21c — internal display plumbing).",
+      "@viberevert/cli-commands barrel must NOT export CHECKPOINT_NAME_LOCK_REL (D99.M.21c -- internal display plumbing).",
     ).toBe(false);
   });
 
   // ===========================================================================
-  // D99.M.22 — Drift detection
+  // D99.M.22 -- Drift detection
   // ===========================================================================
 
   it("D99.M.22: each refactored Command imports + calls its operation AND does NOT embed old domain helpers (drift wall)", () => {
@@ -2513,8 +2514,8 @@ describe("Architectural invariants — M G1a D99.M @viberevert/cli-commands boun
     //   (a) the operation import statement is present;
     //   (b) the operation function name appears in a call site
     //       (parenthesis-followed mention anywhere in the file);
-    //   (c) none of the old domain helpers — now owned by the
-    //       operation — appear in the Command file.
+    //   (c) none of the old domain helpers -- now owned by the
+    //       operation -- appear in the Command file.
     //
     // (a) + (b) alone are necessary but not sufficient: a Command
     // could call the operation AND still keep old domain logic
@@ -2563,7 +2564,7 @@ describe("Architectural invariants — M G1a D99.M @viberevert/cli-commands boun
       );
       expect(
         importPattern.test(source),
-        `${commandRel} must import ${operationName} from "${operationImportPath}" (D99.M.22 drift wall — import).`,
+        `${commandRel} must import ${operationName} from "${operationImportPath}" (D99.M.22 drift wall -- import).`,
       ).toBe(true);
 
       const callSiteMatches = [
@@ -2571,7 +2572,7 @@ describe("Architectural invariants — M G1a D99.M @viberevert/cli-commands boun
       ];
       expect(
         callSiteMatches.length,
-        `${commandRel} must invoke ${operationName}(...) at least once (D99.M.22 drift wall — call site).`,
+        `${commandRel} must invoke ${operationName}(...) at least once (D99.M.22 drift wall -- call site).`,
       ).toBeGreaterThanOrEqual(1);
     }
 
@@ -2619,7 +2620,7 @@ describe("Architectural invariants — M G1a D99.M @viberevert/cli-commands boun
       for (const needle of forbidden) {
         expect(
           source.includes(needle),
-          `${commandRel} must NOT reference \`${needle}\` (D99.M.22 drift wall — old helper absence; operation now owns this).`,
+          `${commandRel} must NOT reference \`${needle}\` (D99.M.22 drift wall -- old helper absence; operation now owns this).`,
         ).toBe(false);
       }
     }
@@ -2768,21 +2769,24 @@ describe("Architectural invariants -- M G1a Step 2 D99.M @viberevert/mcp boundar
   });
 
   // ===========================================================================
-  // D99.M.6 -- @viberevert/core import carve-out (Step 2 surface, exact equality)
+  // D99.M.6 -- @viberevert/core import carve-out (allowed core surface, exact equality)
   // ===========================================================================
 
-  it("D99.M.6 (Step 2 surface): packages/mcp/src/** core imports EQUAL exactly the Step 2 set; no default/namespace/side-effect/dynamic/require/import-equals/deep imports", () => {
-    // Step 2 source imports exactly six names from @viberevert/core:
-    //   - 5 error classes (in envelope.ts) keyed into MCP_ERROR_CODE_MAP
-    //     by constructor identity per D99.I.
-    //   - viberevertDir (in audit.ts) for the audit log path resolution
-    //     per D99.M.6 carve-out.
+  it("D99.M.6 (allowed core surface): packages/mcp/src/** core imports EQUAL exactly the allowed set; no default/namespace/side-effect/dynamic/require/import-equals/deep imports", () => {
+    // The MCP src tree may import EXACTLY the names listed in
+    // ALLOWED below from @viberevert/core. Current breakdown by
+    // consumer:
+    //   - 5 error classes (in envelope.ts) keyed into
+    //     MCP_ERROR_CODE_MAP by constructor identity per D99.I.
+    //   - viberevertDir (in audit.ts) for the audit log path
+    //     resolution per D99.M.6 carve-out.
+    //   - loadConfig + mergeChecksConfig (in tools/get-policy.ts)
+    //     added in M G1a Step 3.5 for the get_policy tool.
     //
-    // Step 3 will add `loadConfig` (in tools/get-policy.ts) and Step 4
-    // will add `resolveRepoRoot` (in server.ts). Those names are
-    // INTENTIONALLY NOT in the Step 2 allowed set -- each must be
-    // added to ALLOWED in the SAME commit that introduces its real
-    // source usage. Pre-authorization is a contract leak.
+    // Step 4 will add `resolveRepoRoot` (in server.ts). That name is
+    // INTENTIONALLY NOT in ALLOWED yet -- each new name must be
+    // added in the SAME commit that introduces its real source
+    // usage. Pre-authorization is a contract leak.
     //
     // Enforcement is EQUALITY (not subset). Two-direction loops give
     // per-name failure messages: one direction catches new
@@ -2794,6 +2798,8 @@ describe("Architectural invariants -- M G1a Step 2 D99.M @viberevert/mcp boundar
       "ConfigValidationError",
       "RepoRootNotFoundError",
       "SessionAlreadyActiveError",
+      "loadConfig",
+      "mergeChecksConfig",
       "viberevertDir",
     ]);
 
@@ -2862,7 +2868,7 @@ describe("Architectural invariants -- M G1a Step 2 D99.M @viberevert/mcp boundar
     for (const name of aggregate) {
       expect(
         ALLOWED.has(name),
-        `@viberevert/core import "${name}" found in packages/mcp/src/** is NOT in the D99.M.6 Step 2 allowed set ${JSON.stringify([...ALLOWED].sort())}. If this is a legitimate new import, add the name to ALLOWED in the SAME commit.`,
+        `@viberevert/core import "${name}" found in packages/mcp/src/** is NOT in the D99.M.6 allowed core surface ${JSON.stringify([...ALLOWED].sort())}. If this is a legitimate new import, add the name to ALLOWED in the SAME commit.`,
       ).toBe(true);
     }
     for (const name of ALLOWED) {
@@ -3022,33 +3028,29 @@ describe("Architectural invariants -- M G1a Step 2 D99.M @viberevert/mcp boundar
   });
 
   // ===========================================================================
-  // D99.M.11 -- packages/mcp/package.json dependency map (Step 2 surface)
+  // D99.M.11 -- packages/mcp/package.json dependency map (Step 3 surface)
   // ===========================================================================
 
-  it("D99.M.11 (Step 2 surface): packages/mcp/package.json dependencies EXACTLY {zod: 4.4.1, @viberevert/cli-commands: workspace:*, @viberevert/core: workspace:*}; forbidden deps absent from all dep sections", () => {
-    // Step 2 ships envelope + audit + errors + timeout -- the MCP
-    // SDK is intentionally NOT yet a dependency (Step 3 adds it
-    // together with the first server-construction call site). Lock
-    // the Step 2 surface EXACTLY so a premature SDK add forces an
-    // explicit plan edit, AND so the negative-list (clipanion,
-    // viberevert binary, LLM SDKs, sibling internal packages)
-    // cannot creep in either.
-    //
-    // The exact-equality check fails LOUDLY when Step 3 adds
-    // @modelcontextprotocol/sdk -- that's the intended trigger for
-    // tightening this invariant in Step 3's own commit.
+  it("D99.M.11 (Step 3 surface, post-3.3): packages/mcp/package.json dependencies EXACTLY {@modelcontextprotocol/sdk: 1.29.0, zod: 4.4.1, @viberevert/cli-commands: workspace:*, @viberevert/core: workspace:*, @viberevert/session-format: workspace:*}; forbidden deps absent from all dep sections", () => {
+    // Step 3 surface post-3.3: MCP SDK + zod + 3 workspace deps
+    // (cli-commands + core + session-format -- the last added in
+    // slice 3.3 because check_repo's handler uses ReportFileSchema
+    // for stdout validation). Lock the dependencies map EXACTLY so
+    // unauthorized additions (clipanion, viberevert binary, LLM
+    // SDKs, sibling internal packages) cannot creep in.
     const pkg = JSON.parse(readSource(MCP_PACKAGE_JSON_REL));
     expect(
       pkg.dependencies,
-      `${MCP_PACKAGE_JSON_REL} dependencies must EXACTLY match the Step 2 surface (no more, no less). When Step 3 lands @modelcontextprotocol/sdk, update this assertion in the SAME commit that adds the dep.`,
+      `${MCP_PACKAGE_JSON_REL} dependencies must EXACTLY match the Step 3 surface (no more, no less).`,
     ).toEqual({
+      "@modelcontextprotocol/sdk": "1.29.0",
       "@viberevert/cli-commands": "workspace:*",
       "@viberevert/core": "workspace:*",
+      "@viberevert/session-format": "workspace:*",
       zod: "4.4.1",
     });
 
     const FORBIDDEN: ReadonlyArray<string> = [
-      "@modelcontextprotocol/sdk",
       "clipanion",
       "zod-to-json-schema",
       "viberevert",
@@ -3243,13 +3245,15 @@ describe("Architectural invariants -- M G1a Step 2 D99.M @viberevert/mcp boundar
   //              cli-commands OR core)
   // ===========================================================================
 
-  it("D99.M.19c: packages/mcp/src/** does NOT use deep imports from @viberevert/cli-commands OR @viberevert/core (5 deep-import forms each: static, side-effect, dynamic, require, import-equals)", () => {
+  it("D99.M.19c: packages/mcp/src/** does NOT use deep imports from @viberevert/cli-commands, @viberevert/core, OR @viberevert/session-format (5 deep-import forms each: static, side-effect, dynamic, require, import-equals)", () => {
     // Step 1's D99.M.19a/b lock the PROVIDER side -- the
     // cli-commands barrel must export the right surface. This is
     // the CONSUMER side: mcp must use only the barrel, never deep
-    // paths. Extends to @viberevert/core for the same reason --
-    // D99.M.6 also forbids core deep imports as part of its
-    // named-barrel-only shape check; this is belt-and-suspenders.
+    // paths. Extends to @viberevert/core + @viberevert/session-format
+    // for the same reason -- D99.M.6 also forbids core deep imports
+    // as part of its named-barrel-only shape check; this is
+    // belt-and-suspenders. session-format added in Slice 3.3
+    // when check_repo's handler started importing ReportFileSchema.
     //
     // 5-form coverage per package: static, side-effect, dynamic,
     // require, import-equals. Side-effect deep imports are
@@ -3257,6 +3261,7 @@ describe("Architectural invariants -- M G1a Step 2 D99.M @viberevert/mcp boundar
     // side effects from a specific internal file path without
     // exposing any typed surface to the caller.
     const deepImportPatterns: ReadonlyArray<{ name: string; pattern: RegExp }> = [
+      // @viberevert/cli-commands (5 forms)
       {
         name: 'deep static import from "@viberevert/cli-commands/..."',
         pattern: /from\s+["']@viberevert\/cli-commands\/[^"']+["']/,
@@ -3277,6 +3282,7 @@ describe("Architectural invariants -- M G1a Step 2 D99.M @viberevert/mcp boundar
         name: 'deep import-equals require of "@viberevert/cli-commands/..."',
         pattern: /\bimport\s+\w+\s*=\s*require\s*\(\s*["']@viberevert\/cli-commands\/[^"']+["']/,
       },
+      // @viberevert/core (5 forms)
       {
         name: 'deep static import from "@viberevert/core/..."',
         pattern: /from\s+["']@viberevert\/core\/[^"']+["']/,
@@ -3297,6 +3303,27 @@ describe("Architectural invariants -- M G1a Step 2 D99.M @viberevert/mcp boundar
         name: 'deep import-equals require of "@viberevert/core/..."',
         pattern: /\bimport\s+\w+\s*=\s*require\s*\(\s*["']@viberevert\/core\/[^"']+["']/,
       },
+      // @viberevert/session-format (5 forms, added Slice 3.3)
+      {
+        name: 'deep static import from "@viberevert/session-format/..."',
+        pattern: /from\s+["']@viberevert\/session-format\/[^"']+["']/,
+      },
+      {
+        name: 'deep side-effect import of "@viberevert/session-format/..."',
+        pattern: /(?:^|\n)\s*import\s+["']@viberevert\/session-format\/[^"']+["']/,
+      },
+      {
+        name: 'deep dynamic import of "@viberevert/session-format/..."',
+        pattern: /\bimport\s*\(\s*["']@viberevert\/session-format\/[^"']+["']/,
+      },
+      {
+        name: 'deep require of "@viberevert/session-format/..."',
+        pattern: /\brequire\s*\(\s*["']@viberevert\/session-format\/[^"']+["']/,
+      },
+      {
+        name: 'deep import-equals require of "@viberevert/session-format/..."',
+        pattern: /\bimport\s+\w+\s*=\s*require\s*\(\s*["']@viberevert\/session-format\/[^"']+["']/,
+      },
     ];
 
     for (const { abs, rel } of mcpSrcTsFiles()) {
@@ -3312,26 +3339,843 @@ describe("Architectural invariants -- M G1a Step 2 D99.M @viberevert/mcp boundar
   });
 
   // ===========================================================================
-  // Step 2 transient invariant -- no @modelcontextprotocol/sdk yet
+  // Step 3 pre-import invariant -- SDK dep is allowed, src import not yet landed
   // ===========================================================================
 
-  it("Step 2 transient: packages/mcp/src/** does NOT yet import @modelcontextprotocol/sdk (Step 3 lands the dep + first import; DELETE this `it` block in the same commit that adds the import)", () => {
-    // Belt-and-suspenders with D99.M.11's deps check: even if a
-    // future maintainer adds the SDK to package.json by mistake AND
-    // forgets to update D99.M.11 in the same commit, this src-side
-    // check still catches the first import attempt. When Step 3
-    // adds @modelcontextprotocol/sdk legitimately (server.ts call
-    // site for `new Server(...)`), DELETE this `it()` block in the
-    // SAME commit that adds the import. D99.M.8 (Step 4) will then
-    // lock the call-site count.
+  it("Step 3 pre-import: packages/mcp/src/** does NOT yet import @modelcontextprotocol/sdk (delete this `it` block in the same slice that adds the first SDK source import)", () => {
+    // D99.M.11 now allows the SDK dependency because Step 3.0 verified
+    // and pinned the package. Source imports remain gated until the
+    // first SDK-using implementation slice lands. Delete this block in
+    // the same slice that adds the first @modelcontextprotocol/sdk import,
+    // and update the relevant positive D99.M guard in that same slice.
     const pattern = buildSdkForbiddenPattern("@modelcontextprotocol/sdk");
     for (const { abs, rel } of mcpSrcTsFiles()) {
       const source = stripTsComments(readFileSync(abs, "utf8"));
       const offenders = findOffenders(source, pattern);
       expect(
         offenders,
-        `${rel} must NOT yet import @modelcontextprotocol/sdk in Step 2 (Step 3 introduces it). Matches: ${JSON.stringify(offenders)}`,
+        `${rel} must NOT yet import @modelcontextprotocol/sdk before the first SDK source-import slice. Matches: ${JSON.stringify(offenders)}`,
       ).toEqual([]);
     }
+  });
+});
+
+describe("Architectural invariants -- M G1a Step 3 D99.M @viberevert/mcp tool catalog", () => {
+  const MCP_TOOLS_REL = "packages/mcp/src/tools.ts";
+
+  /**
+   * Source-of-truth duplicates of the D99.A + D99.B + D99.V locked
+   * declarations. DUPLICATED here per the established M G1a pattern.
+   * Any catalog/map change MUST update BOTH this file AND the source
+   * in packages/mcp/src/tools.ts in the SAME commit.
+   */
+  const EXPECTED_TOOL_NAMES_IN_ORDER: ReadonlyArray<string> = [
+    "check_repo",
+    "explain_diff",
+    "classify_risk",
+    "list_risky_files",
+    "get_policy",
+    "start_session",
+    "create_checkpoint",
+    "generate_fix_prompt",
+  ];
+
+  const EXPECTED_RESERVED_TOOL_NAMES: ReadonlyArray<string> = [
+    "rollback",
+    "request_human_approval",
+  ];
+
+  const EXPECTED_TOOL_SIDE_EFFECT_CLASS_BY_NAME: Readonly<Record<string, string>> = {
+    check_repo: "B",
+    explain_diff: "A",
+    classify_risk: "A",
+    list_risky_files: "A",
+    get_policy: "A",
+    start_session: "B",
+    create_checkpoint: "B",
+    generate_fix_prompt: "B",
+  };
+
+  /**
+   * Iteratively peel `as const` (AsExpression) and `satisfies T`
+   * (SatisfiesExpression) wrappers off an initializer expression so
+   * the underlying literal (array, object, etc.) can be inspected.
+   *
+   * Order is irrelevant: `(... as const) satisfies T`,
+   * `(... satisfies T) as const`, and both nested are all unwrapped
+   * to the bare literal. Other expression wrappers are left intact
+   * (e.g., we don't peel ParenthesizedExpression because that would
+   * change visibility semantics for some checks).
+   */
+  function unwrapLiteralExpression(expr: ts.Expression): ts.Expression {
+    let current = expr;
+    while (ts.isAsExpression(current) || ts.isSatisfiesExpression(current)) {
+      current = current.expression;
+    }
+    return current;
+  }
+
+  /**
+   * Extract the string values of a top-level
+   *   `export const NAME = [...] as const;`  (or with `satisfies T`)
+   * array literal from a TypeScript source string.
+   *
+   * Statement-aware (AST-based), immune to false positives from
+   * string literals / regexes / comments that happen to contain the
+   * same identifier.
+   *
+   * Hardening rules (any failure returns undefined):
+   *   1. Declaration MUST be `const`.
+   *   2. Initializer MUST unwrap to an ArrayLiteralExpression.
+   *   3. EVERY element MUST be a StringLiteral. A single non-string
+   *      element causes the helper to return undefined rather than
+   *      silently dropping the bad element.
+   */
+  function extractStringArrayLiteralExport(
+    sourceText: string,
+    exportName: string,
+  ): string[] | undefined {
+    const sf = ts.createSourceFile(
+      "tools.ts",
+      sourceText,
+      ts.ScriptTarget.Latest,
+      /* setParentNodes */ false,
+      ts.ScriptKind.TS,
+    );
+    let result: string[] | undefined;
+    ts.forEachChild(sf, (node) => {
+      if (!ts.isVariableStatement(node)) return;
+      const hasExport = node.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
+      if (hasExport !== true) return;
+      const isConst = (node.declarationList.flags & ts.NodeFlags.Const) !== 0;
+      if (!isConst) return;
+      for (const decl of node.declarationList.declarations) {
+        if (!ts.isIdentifier(decl.name) || decl.name.text !== exportName) continue;
+        if (decl.initializer === undefined) continue;
+        const unwrapped = unwrapLiteralExpression(decl.initializer);
+        if (!ts.isArrayLiteralExpression(unwrapped)) continue;
+        const values: string[] = [];
+        let allStrings = true;
+        for (const element of unwrapped.elements) {
+          if (!ts.isStringLiteral(element)) {
+            allStrings = false;
+            break;
+          }
+          values.push(element.text);
+        }
+        result = allStrings ? values : undefined;
+      }
+    });
+    return result;
+  }
+
+  /**
+   * Extract the {key:string -> value:string} contents of a top-level
+   *   `export const NAME = { ... } as const;`  (or with `satisfies T`)
+   * object literal from a TypeScript source string.
+   *
+   * Statement-aware (AST-based).
+   *
+   * Hardening rules (any failure returns undefined):
+   *   1. Declaration MUST be `const`.
+   *   2. Initializer MUST unwrap to an ObjectLiteralExpression.
+   *   3. EVERY property MUST be a plain PropertyAssignment. Rejects
+   *      spread, shorthand, method, getter/setter, and any other
+   *      non-PropertyAssignment shape.
+   *   4. EVERY property name MUST be a plain Identifier or
+   *      StringLiteral. Rejects computed keys and numeric literal
+   *      keys.
+   *   5. EVERY property value MUST be a StringLiteral.
+   *   6. NO duplicate keys. A duplicate key (which TypeScript
+   *      typically catches but the invariant should be
+   *      independently strong against) causes the helper to return
+   *      undefined.
+   *
+   * Returns the extracted record on full success, undefined otherwise.
+   */
+  function extractStringObjectLiteralExport(
+    sourceText: string,
+    exportName: string,
+  ): Record<string, string> | undefined {
+    const sf = ts.createSourceFile(
+      "tools.ts",
+      sourceText,
+      ts.ScriptTarget.Latest,
+      /* setParentNodes */ false,
+      ts.ScriptKind.TS,
+    );
+    let result: Record<string, string> | undefined;
+    ts.forEachChild(sf, (node) => {
+      if (!ts.isVariableStatement(node)) return;
+      const hasExport = node.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
+      if (hasExport !== true) return;
+      const isConst = (node.declarationList.flags & ts.NodeFlags.Const) !== 0;
+      if (!isConst) return;
+      for (const decl of node.declarationList.declarations) {
+        if (!ts.isIdentifier(decl.name) || decl.name.text !== exportName) continue;
+        if (decl.initializer === undefined) continue;
+        const unwrapped = unwrapLiteralExpression(decl.initializer);
+        if (!ts.isObjectLiteralExpression(unwrapped)) continue;
+        const entries: Array<[string, string]> = [];
+        const seen = new Set<string>();
+        let allValid = true;
+        for (const prop of unwrapped.properties) {
+          if (!ts.isPropertyAssignment(prop)) {
+            allValid = false;
+            break;
+          }
+          let key: string;
+          if (ts.isIdentifier(prop.name)) {
+            key = prop.name.text;
+          } else if (ts.isStringLiteral(prop.name)) {
+            key = prop.name.text;
+          } else {
+            allValid = false;
+            break;
+          }
+          if (seen.has(key)) {
+            allValid = false;
+            break;
+          }
+          seen.add(key);
+          if (!ts.isStringLiteral(prop.initializer)) {
+            allValid = false;
+            break;
+          }
+          entries.push([key, prop.initializer.text]);
+        }
+        result = allValid ? Object.fromEntries(entries) : undefined;
+      }
+    });
+    return result;
+  }
+
+  // ===========================================================================
+  // D99.M.3 -- TOOL_NAMES_IN_ORDER and RESERVED_TOOL_NAMES are disjoint
+  // ===========================================================================
+
+  it("D99.M.3: TOOL_NAMES_IN_ORDER and RESERVED_TOOL_NAMES are disjoint (empty intersection)", () => {
+    // A reserved name leaking into the exposed catalog would break
+    // D99.B (reserved approval-gated, not exposed). Failure here =
+    // a reserved name was accidentally added to TOOL_NAMES_IN_ORDER,
+    // OR an exposed name was added to RESERVED_TOOL_NAMES.
+    const source = readSource(MCP_TOOLS_REL);
+    const exposed = extractStringArrayLiteralExport(source, "TOOL_NAMES_IN_ORDER");
+    const reserved = extractStringArrayLiteralExport(source, "RESERVED_TOOL_NAMES");
+    expect(
+      exposed,
+      `${MCP_TOOLS_REL} must export TOOL_NAMES_IN_ORDER as a const string-array literal.`,
+    ).not.toBeUndefined();
+    expect(
+      reserved,
+      `${MCP_TOOLS_REL} must export RESERVED_TOOL_NAMES as a const string-array literal.`,
+    ).not.toBeUndefined();
+    if (exposed === undefined || reserved === undefined) return;
+    const exposedSet = new Set<string>(exposed);
+    const overlap = reserved.filter((r) => exposedSet.has(r));
+    expect(overlap, `D99.M.3 disjointness violated. Overlap: ${JSON.stringify(overlap)}`).toEqual(
+      [],
+    );
+  });
+
+  // ===========================================================================
+  // D99.M.4 -- TOOL_NAMES_IN_ORDER exactly equals D99.A 8-tuple (order-sensitive)
+  // ===========================================================================
+
+  it("D99.M.4: TOOL_NAMES_IN_ORDER exactly equals the locked D99.A 8-element tuple (order-sensitive) AND RESERVED_TOOL_NAMES exactly equals the locked D99.B 2-tuple", () => {
+    // EXPECTED_* duplicate the locked tuples from the plan. If you
+    // intentionally change the catalog, change BOTH this file AND
+    // the source in packages/mcp/src/tools.ts in the SAME commit.
+    // The order-sensitive comparison enforces the locked tools/list
+    // emission order (Phase 12f smoke test depends on this).
+    const source = readSource(MCP_TOOLS_REL);
+    const exposed = extractStringArrayLiteralExport(source, "TOOL_NAMES_IN_ORDER");
+    const reserved = extractStringArrayLiteralExport(source, "RESERVED_TOOL_NAMES");
+    expect(
+      exposed,
+      `${MCP_TOOLS_REL} TOOL_NAMES_IN_ORDER must exactly equal the locked D99.A 8-element tuple, in order.`,
+    ).toEqual(EXPECTED_TOOL_NAMES_IN_ORDER);
+    expect(
+      reserved,
+      `${MCP_TOOLS_REL} RESERVED_TOOL_NAMES must exactly equal the locked D99.B 2-element tuple.`,
+    ).toEqual(EXPECTED_RESERVED_TOOL_NAMES);
+  });
+
+  // ===========================================================================
+  // D99.V / Step 3 -- TOOL_SIDE_EFFECT_CLASS_BY_NAME exact map check
+  // ===========================================================================
+
+  it("D99.V / Step 3: TOOL_SIDE_EFFECT_CLASS_BY_NAME exactly equals the locked side-effect map (catches semantic drift TS cannot)", () => {
+    // TypeScript's `satisfies Record<ToolName, ToolSideEffectClass>`
+    // catches missing keys and invalid value types, but does NOT
+    // catch semantic drift -- e.g., flipping `start_session` from
+    // "B" to "A" still satisfies the type but violates D99.V's
+    // safety contract (race-free side-effect classification). This
+    // AST-asserted exact-equality check closes that gap.
+    //
+    // If a real Step 0.6 verification proves a tool can move
+    // classes, update BOTH the source map AND this expected map in
+    // the same commit, and tighten the dispatcher behavior tests in
+    // the same slice.
+    const source = readSource(MCP_TOOLS_REL);
+    const map = extractStringObjectLiteralExport(source, "TOOL_SIDE_EFFECT_CLASS_BY_NAME");
+    expect(
+      map,
+      `${MCP_TOOLS_REL} must export TOOL_SIDE_EFFECT_CLASS_BY_NAME as a plain {key:string}-valued const object literal with unique keys.`,
+    ).not.toBeUndefined();
+    if (map === undefined) return;
+    expect(
+      map,
+      `${MCP_TOOLS_REL} TOOL_SIDE_EFFECT_CLASS_BY_NAME must exactly equal the locked D99.V map.`,
+    ).toEqual(EXPECTED_TOOL_SIDE_EFFECT_CLASS_BY_NAME);
+  });
+});
+
+describe("Architectural invariants -- M G1a Step 3.3 D99.M @viberevert/mcp per-tool + registry", () => {
+  const MCP_TOOLS_DIR = "packages/mcp/src/tools";
+  const MCP_TOOL_REGISTRY_REL = "packages/mcp/src/tool-registry.ts";
+  const MCP_TOOLS_CATALOG_REL = "packages/mcp/src/tools.ts";
+
+  const FORBIDDEN_CWD_LIKE_NAMES: ReadonlyArray<string> = [
+    "cwd",
+    "target_repo",
+    "repo",
+    "directory",
+    "repo_path",
+    "working_directory",
+  ];
+
+  /**
+   * Normalize a field name for D99.M.17 forbidden-name comparison:
+   * lowercase + strip underscores, hyphens, and whitespace. This
+   * catches variants like repoPath / repo_path / repo-path / "repo
+   * path" all as the same logical name.
+   */
+  function normalizeFieldName(name: string): string {
+    return name.toLowerCase().replace(/[_\-\s]/g, "");
+  }
+
+  const FORBIDDEN_NORMALIZED: ReadonlySet<string> = new Set(
+    FORBIDDEN_CWD_LIKE_NAMES.map(normalizeFieldName),
+  );
+
+  /**
+   * List the .ts files directly under packages/mcp/src/tools/ (no
+   * recursion). Each is expected to be a single-tool implementation
+   * file per D99.G.
+   */
+  function listToolFiles(): ReadonlyArray<{ abs: string; rel: string }> {
+    const dirAbs = join(REPO_ROOT, MCP_TOOLS_DIR);
+    if (!statSync(dirAbs).isDirectory()) return [];
+    const out: { abs: string; rel: string }[] = [];
+    for (const entry of readdirSync(dirAbs, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith(".ts")) continue;
+      const abs = join(dirAbs, entry.name);
+      const rel = relative(REPO_ROOT, abs).replace(/\\/g, "/");
+      out.push({ abs, rel });
+    }
+    out.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
+    return out;
+  }
+
+  /**
+   * Collect the set of top-level VALUE-exported identifiers from a
+   * TS source file via AST walking. Covers `export const X = ...`,
+   * `export function X(...)`, `export class X {...}`, and the
+   * brace-form `export { X, Y as Z }`. Skips `export type` /
+   * `export interface` at both whole-node and per-spec levels --
+   * D99.M.9 governs VALUE exports (definition + handler), not
+   * type aliases.
+   */
+  function collectValueExports(sourceText: string): Set<string> {
+    const sf = ts.createSourceFile(
+      "tool.ts",
+      sourceText,
+      ts.ScriptTarget.Latest,
+      /* setParentNodes */ false,
+      ts.ScriptKind.TS,
+    );
+    const exported = new Set<string>();
+    ts.forEachChild(sf, (node) => {
+      if (ts.isVariableStatement(node)) {
+        const hasExport = node.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
+        if (hasExport !== true) return;
+        for (const decl of node.declarationList.declarations) {
+          if (ts.isIdentifier(decl.name)) exported.add(decl.name.text);
+        }
+      } else if (
+        ts.isFunctionDeclaration(node) &&
+        node.name !== undefined &&
+        node.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)
+      ) {
+        exported.add(node.name.text);
+      } else if (
+        ts.isClassDeclaration(node) &&
+        node.name !== undefined &&
+        node.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)
+      ) {
+        exported.add(node.name.text);
+      } else if (ts.isExportDeclaration(node) && node.exportClause !== undefined) {
+        // Skip `export type { X, Y }` -- whole-node type export.
+        if (node.isTypeOnly === true) return;
+        if (ts.isNamedExports(node.exportClause)) {
+          for (const spec of node.exportClause.elements) {
+            // Skip `export { type X, Y }` -- per-spec type marker.
+            if (spec.isTypeOnly === true) continue;
+            exported.add(spec.name.text);
+          }
+        }
+      }
+    });
+    return exported;
+  }
+
+  /**
+   * Walk `z.object({ ... })` call expressions in a TS source and
+   * return a scan result. Statement-aware (AST), immune to false
+   * positives from string literals / comments / regex literals
+   * that happen to contain z.object.
+   *
+   * Returns:
+   *   objectCount    -- how many z.object call expressions were found
+   *   keys           -- union of property-name keys across all calls
+   *                     (only from plain identifier / string-literal
+   *                     names)
+   *   invalidShapes  -- list of disallowed sub-shapes found:
+   *                       non-literal argument (e.g. z.object(shape))
+   *                       spread element (e.g. z.object({...shared}))
+   *                       computed key (e.g. z.object({[k]: ...}))
+   *                       method/getter/setter (rare in Zod usage)
+   *
+   * D99.M.17 fails the file if invalidShapes is non-empty -- a tool
+   * file that uses any of these shapes is structurally outside the
+   * scanner's guarantee and must either inline an object literal
+   * or document an exception.
+   */
+  function scanZodObjectSchemas(sourceText: string): {
+    objectCount: number;
+    keys: string[];
+    invalidShapes: string[];
+  } {
+    const sf = ts.createSourceFile(
+      "tool.ts",
+      sourceText,
+      ts.ScriptTarget.Latest,
+      /* setParentNodes */ false,
+      ts.ScriptKind.TS,
+    );
+    const result = { objectCount: 0, keys: [] as string[], invalidShapes: [] as string[] };
+    const visit = (node: ts.Node): void => {
+      if (
+        ts.isCallExpression(node) &&
+        ts.isPropertyAccessExpression(node.expression) &&
+        ts.isIdentifier(node.expression.expression) &&
+        node.expression.expression.text === "z" &&
+        node.expression.name.text === "object"
+      ) {
+        result.objectCount += 1;
+        if (node.arguments.length < 1) {
+          result.invalidShapes.push("z.object() with no arguments");
+        } else {
+          const arg = node.arguments[0];
+          if (arg === undefined) {
+            result.invalidShapes.push("z.object() with undefined argument");
+          } else if (!ts.isObjectLiteralExpression(arg)) {
+            result.invalidShapes.push(
+              "z.object(<non-literal>) -- argument is not an inline object literal",
+            );
+          } else {
+            for (const prop of arg.properties) {
+              if (ts.isSpreadAssignment(prop)) {
+                result.invalidShapes.push("z.object({...spread}) -- spread element disallowed");
+                continue;
+              }
+              if (!ts.isPropertyAssignment(prop)) {
+                result.invalidShapes.push(
+                  `z.object property is not a plain PropertyAssignment (kind=${ts.SyntaxKind[prop.kind]})`,
+                );
+                continue;
+              }
+              if (ts.isComputedPropertyName(prop.name)) {
+                result.invalidShapes.push("z.object({[computed]: ...}) -- computed key disallowed");
+                continue;
+              }
+              if (ts.isIdentifier(prop.name)) {
+                result.keys.push(prop.name.text);
+              } else if (ts.isStringLiteral(prop.name)) {
+                result.keys.push(prop.name.text);
+              } else {
+                result.invalidShapes.push(
+                  `z.object key is unusual (kind=${ts.SyntaxKind[prop.name.kind]})`,
+                );
+              }
+            }
+          }
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sf);
+    return result;
+  }
+
+  // ===========================================================================
+  // D99.M.9 -- per-tool files export exactly definition + handler
+  // ===========================================================================
+
+  it("D99.M.9: every packages/mcp/src/tools/*.ts exports EXACTLY {definition, handler} (no more, no less; types are not counted)", () => {
+    // Each per-tool file is the public seam between the tool's
+    // implementation and the tool-registry / dispatcher. Keeping
+    // the value export surface to exactly these two names makes
+    // dispatcher wiring trivial AND prevents per-tool files from
+    // accidentally exposing internal helpers (input schemas,
+    // private mappers) that the registry should not consume.
+    //
+    // Type exports (export type X = ...) are not counted -- a tool
+    // file MAY export types like its data shape (e.g. CheckRepoData)
+    // for use by the per-tool test file.
+    const REQUIRED_EXPORTS = new Set(["definition", "handler"]);
+    const files = listToolFiles();
+    expect(
+      files.length,
+      `Self-check: expected at least one .ts file under ${MCP_TOOLS_DIR}/ once Slice 3.3 lands.`,
+    ).toBeGreaterThan(0);
+
+    for (const { abs, rel } of files) {
+      const source = readFileSync(abs, "utf8");
+      const valueExports = collectValueExports(source);
+      expect(
+        [...valueExports].sort(),
+        `${rel} value exports must EXACTLY equal [definition, handler] (D99.M.9). Got: ${JSON.stringify([...valueExports].sort())}`,
+      ).toEqual([...REQUIRED_EXPORTS].sort());
+    }
+  });
+
+  // ===========================================================================
+  // D99.M.17 -- no cwd-like fields in any tool's z.object input schema
+  // ===========================================================================
+
+  it("D99.M.17: every tool file has at least one inline z.object schema AND no z.object key normalizes to a forbidden cwd-like name; reject non-literal arguments, spreads, and computed keys", () => {
+    // The dispatcher (Step 4) passes repoRoot via ToolHandlerContext
+    // per D99.P. Tools MUST NOT accept a cwd-like field from the
+    // client -- that would be a confused-deputy vector (a client
+    // could re-target the tool at an arbitrary path).
+    //
+    // The scan walks every z.object({...}) call in the tool source
+    // and reports both the collected keys AND any disallowed
+    // sub-shape (non-literal argument, spread, computed key).
+    // Disallowed shapes fail the file because they are
+    // structurally outside the scanner's guarantee -- a tool file
+    // using them either inlines an object literal or documents an
+    // exception.
+    const files = listToolFiles();
+    expect(
+      files.length,
+      `Self-check: expected at least one .ts file under ${MCP_TOOLS_DIR}/.`,
+    ).toBeGreaterThan(0);
+    for (const { abs, rel } of files) {
+      const source = readFileSync(abs, "utf8");
+      const scan = scanZodObjectSchemas(source);
+      expect(
+        scan.objectCount,
+        `${rel} must contain at least one z.object({...}) call (D99.M.17 scan target).`,
+      ).toBeGreaterThan(0);
+      expect(
+        scan.invalidShapes,
+        `${rel} contains z.object call with disallowed shape (spread, computed key, non-literal argument): ${JSON.stringify(scan.invalidShapes)}`,
+      ).toEqual([]);
+      for (const key of scan.keys) {
+        const normalized = normalizeFieldName(key);
+        expect(
+          FORBIDDEN_NORMALIZED.has(normalized),
+          `${rel} z.object schema contains forbidden cwd-like key "${key}" (normalized: "${normalized}"). D99.M.17 -- use ToolHandlerContext.repoRoot instead.`,
+        ).toBe(false);
+      }
+    }
+  });
+
+  // ===========================================================================
+  // Registry subset / order invariant (Slice 3.3 -> 3.7 progressive)
+  // ===========================================================================
+
+  it("tool-registry: TOOL_REGISTRATIONS_IN_ORDER names are unique AND exactly equal TOOL_NAMES_IN_ORDER (complete catalog registered in catalog order); rejects spreads, non-identifier elements, and unknown identifiers", () => {
+    // Slice 3.7 completes the current catalog: all catalog tools are now registered,
+    // so this invariant tightens from "registry is a prefix-or-
+    // subsequence of TOOL_NAMES_IN_ORDER" to "registry EXACTLY equals
+    // TOOL_NAMES_IN_ORDER". A missing tool, an extra tool, or a tool
+    // in the wrong slot is a hard failure here -- the dispatcher
+    // (Step 4) builds its lookup Map from this array and would
+    // silently miss a tool that isn't registered.
+    //
+    // The extraction resolves through a local var->tool map so a
+    // reordering bug like
+    //   const a = defineToolRegistration({ name: "check_repo", ... });
+    //   const b = defineToolRegistration({ name: "get_policy", ... });
+    //   export const TOOL_REGISTRATIONS_IN_ORDER = [b, a] as const;
+    // is caught (registered names land in the order of the
+    // exported array, not the order of the defineToolRegistration
+    // call sites).
+    const registrySource = readSource(MCP_TOOL_REGISTRY_REL);
+    const catalogSource = readSource(MCP_TOOLS_CATALOG_REL);
+
+    // (a) Extract catalog (TOOL_NAMES_IN_ORDER) from tools.ts.
+    const sfCatalog = ts.createSourceFile(
+      "tools.ts",
+      catalogSource,
+      ts.ScriptTarget.Latest,
+      /* setParentNodes */ false,
+      ts.ScriptKind.TS,
+    );
+    let catalog: string[] = [];
+    ts.forEachChild(sfCatalog, (node) => {
+      if (!ts.isVariableStatement(node)) return;
+      if (!(node.declarationList.flags & ts.NodeFlags.Const)) return;
+      if (!node.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)) return;
+      for (const decl of node.declarationList.declarations) {
+        if (!ts.isIdentifier(decl.name) || decl.name.text !== "TOOL_NAMES_IN_ORDER") continue;
+        if (decl.initializer === undefined) continue;
+        let init: ts.Expression = decl.initializer;
+        if (ts.isAsExpression(init)) init = init.expression;
+        if (!ts.isArrayLiteralExpression(init)) continue;
+        catalog = init.elements.filter(ts.isStringLiteral).map((e) => e.text);
+      }
+    });
+    expect(catalog.length, "self-check: failed to extract TOOL_NAMES_IN_ORDER").toBeGreaterThan(0);
+
+    // (b) Build local var -> tool name map from tool-registry.ts.
+    // Walks every `const X = defineToolRegistration({name: "tool", ...})`
+    // statement (any depth, recursively) and records the local
+    // binding name -> declared tool name.
+    const sfReg = ts.createSourceFile(
+      "tool-registry.ts",
+      registrySource,
+      ts.ScriptTarget.Latest,
+      /* setParentNodes */ false,
+      ts.ScriptKind.TS,
+    );
+    const varToTool = new Map<string, string>();
+    const collectVar = (node: ts.Node): void => {
+      if (ts.isVariableStatement(node)) {
+        for (const decl of node.declarationList.declarations) {
+          if (!ts.isIdentifier(decl.name) || decl.initializer === undefined) continue;
+          const init = decl.initializer;
+          if (
+            ts.isCallExpression(init) &&
+            ts.isIdentifier(init.expression) &&
+            init.expression.text === "defineToolRegistration" &&
+            init.arguments.length >= 1
+          ) {
+            const arg = init.arguments[0];
+            if (arg !== undefined && ts.isObjectLiteralExpression(arg)) {
+              for (const prop of arg.properties) {
+                if (
+                  ts.isPropertyAssignment(prop) &&
+                  ts.isIdentifier(prop.name) &&
+                  prop.name.text === "name" &&
+                  ts.isStringLiteral(prop.initializer)
+                ) {
+                  varToTool.set(decl.name.text, prop.initializer.text);
+                }
+              }
+            }
+          }
+        }
+      }
+      ts.forEachChild(node, collectVar);
+    };
+    collectVar(sfReg);
+
+    // (c) Extract the exported array, resolve identifiers through
+    // varToTool, and accumulate extraction errors.
+    const registered: string[] = [];
+    const errors: string[] = [];
+    ts.forEachChild(sfReg, (node) => {
+      if (!ts.isVariableStatement(node)) return;
+      if (!node.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)) return;
+      if (!(node.declarationList.flags & ts.NodeFlags.Const)) return;
+      for (const decl of node.declarationList.declarations) {
+        if (!ts.isIdentifier(decl.name) || decl.name.text !== "TOOL_REGISTRATIONS_IN_ORDER") {
+          continue;
+        }
+        if (decl.initializer === undefined) {
+          errors.push("TOOL_REGISTRATIONS_IN_ORDER has no initializer");
+          continue;
+        }
+        let init: ts.Expression = decl.initializer;
+        if (ts.isAsExpression(init)) init = init.expression;
+        if (!ts.isArrayLiteralExpression(init)) {
+          errors.push("TOOL_REGISTRATIONS_IN_ORDER initializer is not an array literal");
+          continue;
+        }
+        for (const element of init.elements) {
+          if (ts.isSpreadElement(element)) {
+            errors.push("TOOL_REGISTRATIONS_IN_ORDER contains a spread element");
+            continue;
+          }
+          if (!ts.isIdentifier(element)) {
+            errors.push(
+              `TOOL_REGISTRATIONS_IN_ORDER contains non-identifier element (kind=${ts.SyntaxKind[element.kind]})`,
+            );
+            continue;
+          }
+          const toolName = varToTool.get(element.text);
+          if (toolName === undefined) {
+            errors.push(
+              `TOOL_REGISTRATIONS_IN_ORDER references unknown identifier "${element.text}" (no local defineToolRegistration binding)`,
+            );
+            continue;
+          }
+          registered.push(toolName);
+        }
+      }
+    });
+    expect(
+      errors,
+      `${MCP_TOOL_REGISTRY_REL} registry extraction errors: ${JSON.stringify(errors)}`,
+    ).toEqual([]);
+    expect(
+      registered.length,
+      `${MCP_TOOL_REGISTRY_REL} must contain at least one tool registration in TOOL_REGISTRATIONS_IN_ORDER.`,
+    ).toBeGreaterThan(0);
+
+    // (d) Uniqueness: no tool name appears twice in the registry.
+    const seen = new Set<string>();
+    for (const name of registered) {
+      expect(
+        seen.has(name),
+        `${MCP_TOOL_REGISTRY_REL} registers tool "${name}" more than once.`,
+      ).toBe(false);
+      seen.add(name);
+    }
+
+    // (e) Subset: every registered name is in the catalog.
+    for (const name of registered) {
+      expect(
+        catalog.includes(name),
+        `${MCP_TOOL_REGISTRY_REL} registers unknown tool "${name}" (not in TOOL_NAMES_IN_ORDER).`,
+      ).toBe(true);
+    }
+
+    // (f) Catalog order: registered tools are a subsequence of
+    // TOOL_NAMES_IN_ORDER. Cursor-based search ensures monotonic
+    // catalog position. Per-tool error messages make a reorder bug
+    // self-localizing; the exhaustive equality in (g) below catches
+    // missing tools.
+    let cursor = 0;
+    for (const name of registered) {
+      const idx = catalog.indexOf(name, cursor);
+      expect(
+        idx,
+        `${MCP_TOOL_REGISTRY_REL} registrations are out of catalog order. "${name}" appears before its catalog position (search started at index ${cursor}).`,
+      ).toBeGreaterThanOrEqual(0);
+      cursor = idx + 1;
+    }
+
+    // (g) Exhaustive equality (Slice 3.7): now that the catalog is
+    // complete, the registry MUST cover EVERY tool. A missing tool
+    // here means the dispatcher (Step 4) will silently fail to look
+    // it up at tools/call time. Asserts length first for a clear
+    // diagnostic, then full ordered equality for a precise diff.
+    expect(
+      registered.length,
+      `${MCP_TOOL_REGISTRY_REL} must register all ${catalog.length} catalog tools in TOOL_REGISTRATIONS_IN_ORDER (Slice 3.7 catalog complete); found ${registered.length}.`,
+    ).toBe(catalog.length);
+    expect(
+      registered,
+      `${MCP_TOOL_REGISTRY_REL} TOOL_REGISTRATIONS_IN_ORDER must exactly equal TOOL_NAMES_IN_ORDER (order-sensitive).`,
+    ).toEqual(catalog);
+  });
+});
+
+describe("Architectural invariants -- M G1a Step 3.5 D57 policy resolver defaults ownership", () => {
+  it("D57 ownership: DEFAULT_RISK_*/DEFAULT_CHECKS_*/DEFAULT_FRAMEWORKS_* live ONLY and EXACTLY in packages/core/src/policy-resolve.ts", () => {
+    // Per D57 + the M G1a Step 3.5a promotion, mergeChecksConfig and
+    // the four DEFAULT_* constants are the SOLE owner of "defaults
+    // applied at the engine boundary, not in loadConfig". Other
+    // package src files MUST NOT declare additional DEFAULT_RISK_*,
+    // DEFAULT_CHECKS_*, or DEFAULT_FRAMEWORKS_* symbols -- duplicated
+    // defaults would silently diverge from the resolver's contract.
+    //
+    // Enforcement is BIDIRECTIONAL (mirrors the D99.M.6 equality
+    // pattern):
+    //   1. NO other package-src file may declare a matching DEFAULT_*
+    //      symbol (otherwise: offender failure).
+    //   2. policy-resolve.ts must declare EXACTLY the expected
+    //      DEFAULT_* set (otherwise: unauthorized-new-default failure
+    //      or removed-default failure).
+    //
+    // The second direction catches a future stray default declared
+    // INSIDE the allowed file (e.g., `export const DEFAULT_RISK_OVERRIDE
+    // = "high";`) that would pass the offender check by virtue of
+    // living in the right file. Adding a legitimate new DEFAULT_*
+    // requires updating EXPECTED_ALLOWED_SYMBOLS in this test in the
+    // SAME commit -- pre-authorization is a contract leak.
+    //
+    // AST-based to avoid false positives on:
+    //   - comments mentioning the symbol names (e.g., the breadcrumb
+    //     in check-orchestration.ts after the 3.5a promotion)
+    //   - string literals
+    //   - import specifiers (consumers ARE allowed to import the
+    //     resolved values; the rule is about declaration ownership)
+    //   - export specifiers / re-exports (packages/core/src/index.ts
+    //     re-exports the DEFAULT_* values from policy-resolve.js;
+    //     that is intentional and must not trip the invariant)
+    //
+    // Detection: recursively scan VariableDeclaration nodes. Both
+    // `export const X = ...` and nested `const X = ...` surface there.
+    // ImportDeclaration and ExportDeclaration nodes are separate node
+    // kinds, so re-export and import specifiers do NOT match.
+
+    const PATTERN = /^DEFAULT_(RISK|CHECKS|FRAMEWORKS)_/;
+    const ALLOWED_REL = "packages/core/src/policy-resolve.ts";
+    const PACKAGES_DIR = join(REPO_ROOT, "packages");
+    const EXPECTED_ALLOWED_SYMBOLS = new Set([
+      "DEFAULT_CHECKS_CONFIG",
+      "DEFAULT_FRAMEWORKS_POLICY",
+      "DEFAULT_RISK_BLOCK_ON",
+      "DEFAULT_RISK_WARN_ON",
+    ]);
+
+    const offenders: Array<{ file: string; symbol: string }> = [];
+    const allowedSymbols = new Set<string>();
+
+    for (const pkg of readdirSync(PACKAGES_DIR)) {
+      const pkgSrc = join(PACKAGES_DIR, pkg, "src");
+      let srcFiles: string[];
+      try {
+        srcFiles = findTsFiles(pkgSrc);
+      } catch {
+        // Package has no src/ dir (yet); skip.
+        continue;
+      }
+      for (const abs of srcFiles) {
+        const source = readFileSync(abs, "utf8");
+        const sf = ts.createSourceFile(abs, source, ts.ScriptTarget.ES2023, false);
+        const visit = (node: ts.Node): void => {
+          if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
+            if (PATTERN.test(node.name.text)) {
+              const rel = relative(REPO_ROOT, abs).replace(/\\/g, "/");
+              if (rel === ALLOWED_REL) {
+                allowedSymbols.add(node.name.text);
+              } else {
+                offenders.push({ file: rel, symbol: node.name.text });
+              }
+            }
+          }
+          ts.forEachChild(node, visit);
+        };
+        visit(sf);
+      }
+    }
+
+    expect(
+      offenders,
+      `D57 ownership violated (direction 1 -- duplicate owners): DEFAULT_RISK_/DEFAULT_CHECKS_/DEFAULT_FRAMEWORKS_ symbols may only be declared in ${ALLOWED_REL}. Offenders found: ${JSON.stringify(offenders)}`,
+    ).toEqual([]);
+
+    expect(
+      [...allowedSymbols].sort(),
+      `D57 ownership violated (direction 2 -- contract drift): ${ALLOWED_REL} must declare EXACTLY the expected DEFAULT_* set. Adding a legitimate new DEFAULT_* requires updating EXPECTED_ALLOWED_SYMBOLS in this test in the SAME commit.`,
+    ).toEqual([...EXPECTED_ALLOWED_SYMBOLS].sort());
   });
 });

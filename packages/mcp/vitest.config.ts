@@ -11,6 +11,9 @@ export default defineProject({
         new URL("../cli-commands/src/index.ts", import.meta.url),
       ),
       "@viberevert/core": fileURLToPath(new URL("../core/src/index.ts", import.meta.url)),
+      "@viberevert/session-format": fileURLToPath(
+        new URL("../session-format/src/index.ts", import.meta.url),
+      ),
     },
   },
   test: {

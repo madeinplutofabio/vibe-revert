@@ -14,10 +14,21 @@
 //     - toErrorEnvelope: 3-tier lookup (direct brand -> map -> fallback)
 //     - formatZodErrorSummary: Zod-error -> compact summary for the
 //       Cat 3 invalid-input response (Step 4 dispatcher wire shape)
+//     - toInvalidToolInputEnvelope: ZodError -> INVALID_TOOL_INPUT
+//       envelope with details.issues as an MCP-owned, sanitized,
+//       bounded InvalidToolInputIssue array (M G1a Step 3.6
+//       contract normalization across all MCP tools). Raw ZodIssue
+//       objects are NEVER exposed -- each issue is whitelisted to
+//       {code, path, message} with the message run through
+//       scrubZodIssueMessage so R31 protections extend to the
+//       details.issues array as well as error.message.
 //
-//   R31 -- formatZodErrorSummary scrubs raw input values and caps
-//   length so secret bytes (and giant error blobs) cannot leak into
-//   the envelope's error.message field.
+//   R31 -- formatZodErrorSummary AND invalidToolInputIssues both
+//   scrub raw input values via scrubZodIssueMessage. Scrub patterns
+//   cover Zod's `received <value>` AND `Unrecognized keys: "..."`
+//   message shapes so credential-shaped key names and value text
+//   cannot leak into the envelope's error.message field OR
+//   details.issues[].message field.
 
 import {
   AmbiguousReportSelectionError,
@@ -42,6 +53,7 @@ import {
   RepoRootNotFoundError,
   SessionAlreadyActiveError,
 } from "@viberevert/core";
+import type { ZodError } from "zod";
 import { z } from "zod";
 
 import { McpDirectError } from "./errors.js";
@@ -280,24 +292,40 @@ export function toErrorEnvelope(err: unknown): ToolEnvelope<never> {
 // ============================================================================
 
 /**
- * Scrub potentially-sensitive value mentions from a Zod issue
- * message, and normalize control chars / whitespace so the result
- * stays single-line.
+ * Scrub potentially-sensitive value AND key-name mentions from a
+ * Zod issue message, and normalize control chars / whitespace so the
+ * result stays single-line.
  *
- * Three scrub patterns handle Zod's `received <value>` shapes:
+ * Four scrub patterns handle Zod's input-derived message shapes:
+ *   - Unrecognized-key messages -- the input KEY NAMES Zod
+ *     surfaces when a strict object rejects extras. An attacker
+ *     who slips a credential-shaped key into a request would
+ *     otherwise see the key name echoed back through the envelope.
+ *     The regex tolerates Zod's known wording variants:
+ *       - `Unrecognized key: "x"`  (singular)
+ *       - `Unrecognized keys: "x", "y"`  (plural)
+ *       - `Unrecognized key(s) in object: 'x'`  (older Zod wording)
+ *     and matches both double-quoted and single-quoted key lists.
+ *     All variants are replaced with a uniform
+ *     `unrecognized key(s): <key>` placeholder. Escaped quote
+ *     characters inside quoted key names are treated as part of
+ *     the key, not as the end of the match.
  *   - `received "..."` (double-quoted, e.g. for string values)
  *   - `received '...'` (single-quoted)
  *   - `received <token>` (unquoted, for numbers/booleans/identifiers)
  *
  * The unquoted regex uses `[^\s;,)]+` to stop at whitespace,
  * semicolon, comma, or closing paren -- typical sentence boundaries
- * in Zod messages. Order matters: quoted patterns run FIRST so
- * `received "foo bar"` (spaces inside quotes) is replaced as a
+ * in Zod messages. Order matters: the unrecognized-keys pattern runs
+ * FIRST (specific shape -- avoids partial matches inside it);
+ * quoted-received patterns run BEFORE the unquoted-received pattern
+ * so `received "foo bar"` (spaces inside quotes) is replaced as a
  * unit before the unquoted regex would otherwise stop mid-value.
  *
  * Control-char strip runs BEFORE the scrub patterns so a multi-line
  * custom Zod message cannot bypass the scrubber by splitting
- * `received` from its value via newlines.
+ * `received` (or the unrecognized-key list) from its value via
+ * newlines.
  */
 function scrubZodIssueMessage(message: string): string {
   return (
@@ -306,6 +334,10 @@ function scrubZodIssueMessage(message: string): string {
       .replace(/[\x00-\x1F\x7F]/g, " ")
       .replace(/\s+/g, " ")
       .trim()
+      .replace(
+        /\bunrecognized\s+key(?:s|\(s\))?(?:\s+in\s+object)?\s*:\s*(?:(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')(?:\s*,\s*)?)+/gi,
+        "unrecognized key(s): <key>",
+      )
       .replace(/\breceived\s+"[^"]*"/gi, "received <value>")
       .replace(/\breceived\s+'[^']*'/gi, "received <value>")
       .replace(/\breceived\s+[^\s;,)]+/gi, "received <value>")
@@ -328,13 +360,15 @@ function scrubZodIssueMessage(message: string): string {
  * non-empty body.
  *
  * Critical R31 mitigation: scrubZodIssueMessage removes raw input
- * values from issue.message before joining. Zod's default `received`
- * templates insert the actual rejected value into the message -- if
- * that value happens to be a secret token (or merely large), the
- * envelope would leak it. The scrub regex catches double-quoted,
- * single-quoted, AND unquoted received-value shapes. Control chars
- * are normalized to single spaces so a custom Zod message can't
- * inject newlines into the envelope.
+ * values AND raw key names from issue.message before joining. Zod's
+ * default `received` templates insert the actual rejected value
+ * into the message, and `unrecognized keys` templates insert the
+ * actual key names -- if that text happens to be a credential-
+ * shaped token (or merely large), the envelope would leak it. The
+ * scrub regex catches double-quoted, single-quoted, AND unquoted
+ * received-value shapes plus the unrecognized-keys list shape.
+ * Control chars are normalized to single spaces so a custom Zod
+ * message can't inject newlines into the envelope.
  *
  * The toolName prefix is NOT applied here -- the Step 4 dispatcher
  * composes the final wire shape "Invalid arguments for tool <name>:
@@ -358,4 +392,172 @@ export function formatZodErrorSummary(error: z.ZodError): string {
     summary = summary.slice(0, maxLen - suffix.length) + suffix;
   }
   return summary;
+}
+
+// ============================================================================
+// toInvalidToolInputEnvelope: ZodError -> INVALID_TOOL_INPUT envelope
+// ============================================================================
+
+/**
+ * Hard cap on the number of issue records exposed in
+ * `details.issues`. A malformed payload with hundreds of invalid
+ * fields would otherwise produce a multi-MB structured response.
+ * `details.issue_count` carries the ORIGINAL count so consumers
+ * still know the full error scope; `details.truncated` is a stable
+ * boolean discriminator.
+ */
+export const MAX_INVALID_TOOL_INPUT_ISSUES = 25;
+
+/**
+ * Hard cap on each individual issue's `message` length (after
+ * scrubbing). Prevents a single pathological message from blowing
+ * the structured-response bound even when the issue count is small.
+ * This is a string-length cap, not a byte-length cap.
+ * Truncated text gets a `... (truncated)` suffix.
+ */
+export const MAX_INVALID_TOOL_INPUT_ISSUE_MESSAGE_LEN = 256;
+
+/**
+ * Hard cap on each individual path segment exposed in
+ * `details.issues[].path`. Defense in depth -- current MCP tool
+ * schemas use fixed object keys so path segments are bounded by
+ * schema authorship, but a future schema with dynamic keys (e.g.,
+ * z.record(z.string(), ...)) could let attacker-supplied keys
+ * surface as path segments. The cap prevents unbounded structured
+ * output from path segments. It bounds path text; it does not
+ * attempt semantic credential classification of arbitrary keys.
+ * Current MCP schemas avoid dynamic attacker-controlled path keys.
+ * This is a string-length cap, not a byte-length cap. Truncated
+ * segments get a `... (truncated)` suffix.
+ */
+export const MAX_INVALID_TOOL_INPUT_ISSUE_PATH_SEGMENT_LEN = 128;
+
+/**
+ * Stable MCP-owned shape for individual validation issues exposed
+ * via INVALID_TOOL_INPUT envelopes. Whitelisted to three fields:
+ *
+ *   - code:    Zod's issue.code (small enum string, no user input)
+ *   - path:    issue.path stringified to readonly string[] (Zod's
+ *              path is (string|number)[]). Each segment is capped
+ *              at MAX_INVALID_TOOL_INPUT_ISSUE_PATH_SEGMENT_LEN
+ *              characters (defense-in-depth bound on dynamic-key
+ *              schemas).
+ *   - message: scrubbed via scrubZodIssueMessage (R31 -- removes the
+ *              raw `received <value>` text AND `Unrecognized keys:
+ *              "..."` key names so user-supplied input text never
+ *              leaks into the envelope) and capped at
+ *              MAX_INVALID_TOOL_INPUT_ISSUE_MESSAGE_LEN characters.
+ *
+ * Raw ZodIssue objects from `zod` are NEVER exposed -- they carry
+ * Zod-internal fields that could expand in future versions and
+ * leak unexpected data. Adding a new field to this MCP shape is a
+ * deliberate contract decision.
+ */
+export type InvalidToolInputIssue = {
+  readonly code: string;
+  readonly path: readonly string[];
+  readonly message: string;
+};
+
+/**
+ * Full shape of `error.details` on the INVALID_TOOL_INPUT envelope.
+ * Exported so MCP consumers (and tests) have a stable type handle
+ * over the canonical shape.
+ *
+ *   - issue_count: ORIGINAL count of issues in the source ZodError
+ *     (NOT capped). Tells consumers the full error scope even when
+ *     the issues array is truncated.
+ *   - truncated:   true when issue_count > MAX_INVALID_TOOL_INPUT_ISSUES.
+ *                  Stable boolean discriminator so consumers do not
+ *                  need to compare issue_count to MAX_*.
+ *   - issues:      Array of sanitized InvalidToolInputIssue records,
+ *                  capped at MAX_INVALID_TOOL_INPUT_ISSUES entries.
+ */
+export type InvalidToolInputDetails = {
+  readonly issue_count: number;
+  readonly truncated: boolean;
+  readonly issues: readonly InvalidToolInputIssue[];
+};
+
+/**
+ * Cap a sanitized issue message at the per-issue length bound,
+ * adding a `... (truncated)` suffix when cut. Idempotent on
+ * already-short strings.
+ */
+function capInvalidToolInputMessage(s: string): string {
+  if (s.length <= MAX_INVALID_TOOL_INPUT_ISSUE_MESSAGE_LEN) return s;
+  const suffix = "... (truncated)";
+  return s.slice(0, MAX_INVALID_TOOL_INPUT_ISSUE_MESSAGE_LEN - suffix.length) + suffix;
+}
+
+/**
+ * Cap a stringified path segment at the per-segment length bound,
+ * adding a `... (truncated)` suffix when cut. Idempotent on
+ * already-short segments.
+ */
+function capInvalidToolInputPathSegment(segment: string): string {
+  if (segment.length <= MAX_INVALID_TOOL_INPUT_ISSUE_PATH_SEGMENT_LEN) return segment;
+  const suffix = "... (truncated)";
+  return segment.slice(0, MAX_INVALID_TOOL_INPUT_ISSUE_PATH_SEGMENT_LEN - suffix.length) + suffix;
+}
+
+/**
+ * Project a ZodError into an array of MCP-owned, sanitized,
+ * bounded InvalidToolInputIssue records. Module-private --
+ * consumers reach the projected shape via
+ * toInvalidToolInputEnvelope's envelope output.
+ *
+ * Slice happens BEFORE the map+scrub so we don't waste sanitization
+ * work on issues that will be dropped.
+ */
+function invalidToolInputIssues(zodError: ZodError): InvalidToolInputIssue[] {
+  return zodError.issues.slice(0, MAX_INVALID_TOOL_INPUT_ISSUES).map((issue) => ({
+    code: issue.code,
+    path: issue.path.map((segment) => capInvalidToolInputPathSegment(String(segment))),
+    message: capInvalidToolInputMessage(scrubZodIssueMessage(issue.message)),
+  }));
+}
+
+/**
+ * Build the canonical INVALID_TOOL_INPUT envelope for an MCP tool
+ * whose input failed Zod safeParse. Per the M G1a Step 3.6 contract
+ * normalization, `details` is ALWAYS the InvalidToolInputDetails
+ * shape: an MCP-owned whitelist over the raw ZodIssue shape, with
+ * messages scrubbed via R31, plus issue_count + truncated metadata
+ * so the issues array can be bounded without losing the original
+ * error scope.
+ *
+ * Centralizing the shape keeps the public wire contract uniform:
+ * every INVALID_TOOL_INPUT response everywhere in the MCP surface
+ * has the same `{issue_count, truncated, issues}` details shape.
+ *
+ * The projection in invalidToolInputIssues snapshots each issue as
+ * a fresh MCP-owned object -- caller-side mutation of the source
+ * ZodError or its issues array does not affect the envelope (slice
+ * 3.5/3.6 boundary-ownership pattern). Raw ZodIssue references are
+ * never escaped.
+ *
+ * The toolName parameter is interpolated into the envelope's
+ * `error.message`. Callers MUST pass their own tool name as a
+ * literal so the message is informative without requiring the
+ * dispatcher to look up the tool registration. Example:
+ *   return toInvalidToolInputEnvelope("start_session", parsed.error);
+ */
+export function toInvalidToolInputEnvelope(
+  toolName: string,
+  zodError: ZodError,
+): ToolEnvelope<never> {
+  const originalCount = zodError.issues.length;
+  return {
+    ok: false,
+    error: {
+      code: "INVALID_TOOL_INPUT",
+      message: `${toolName} input failed validation`,
+      details: {
+        issue_count: originalCount,
+        truncated: originalCount > MAX_INVALID_TOOL_INPUT_ISSUES,
+        issues: invalidToolInputIssues(zodError),
+      },
+    },
+  };
 }
