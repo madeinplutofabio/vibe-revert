@@ -2800,6 +2800,7 @@ describe("Architectural invariants -- M G1a Step 2 D99.M @viberevert/mcp boundar
       "SessionAlreadyActiveError",
       "loadConfig",
       "mergeChecksConfig",
+      "resolveRepoRoot",
       "viberevertDir",
     ]);
 
@@ -2995,6 +2996,137 @@ describe("Architectural invariants -- M G1a Step 2 D99.M @viberevert/mcp boundar
         `${MCP_AUDIT_REL} must NOT use ${name} (D99.M.7 -- alternate fs surface). Matches: ${JSON.stringify(offenders)}`,
       ).toEqual([]);
     }
+  });
+
+  // ===========================================================================
+  // D99.M.8 -- Single SDK Server + StdioServerTransport construction sites;
+  //           high-level McpServer rejected at constructor, identifier, AND
+  //           import-path layers; SDK imports scoped to server.ts only
+  // ===========================================================================
+
+  it("D99.M.8: packages/mcp/src/** -- single SDK Server + StdioServerTransport construction sites in server.ts only; zero McpServer (constructor, identifier, high-level import path); SDK imports scoped to server.ts", () => {
+    // D99.D rationale: McpServer's built-in tools/call handler
+    // rejects unknown names BEFORE our dispatcher runs, which
+    // breaks audit-on-denial. We must own the dispatcher end-to-
+    // end. This invariant locks the SDK surface at five layers:
+    //
+    //   1. Constructor sites: exactly 1 `new Server(` AND 1
+    //      `new StdioServerTransport(`, BOTH in server.ts. Count
+    //      alone is insufficient -- pinning the file prevents
+    //      drift to a sibling source file.
+    //   2. Zero `new McpServer(` (high-level class never
+    //      instantiated).
+    //   3. Zero bare `McpServer` identifier across mcp/src --
+    //      catches future imports, type-only references,
+    //      aliases, or static-access patterns BEFORE they
+    //      become `new McpServer(`.
+    //   4. Zero `@modelcontextprotocol/sdk/server/mcp.js` import
+    //      path -- the high-level module is never reached even
+    //      indirectly.
+    //   5. SDK imports (`@modelcontextprotocol/sdk` root AND
+    //      `@modelcontextprotocol/sdk/...` subpaths) are scoped
+    //      to packages/mcp/src/server.ts ONLY. Tool files remain
+    //      SDK-free (D99.G + slice 3.x contract). This replaces
+    //      the deleted Step-2 transient pre-import guard with a
+    //      permanent positive narrow allowlist.
+    //
+    // Constructor patterns tolerate optional generic-parameter
+    // syntax (`<...>`) so the invariant does not become brittle
+    // if future SDK type definitions require type parameters at
+    // the constructor call site.
+    const SERVER_PATTERN = /\bnew\s+Server(?:\s*<[^>]+>)?\s*\(/g;
+    const STDIO_PATTERN = /\bnew\s+StdioServerTransport(?:\s*<[^>]+>)?\s*\(/g;
+    const MCP_SERVER_PATTERN = /\bnew\s+McpServer(?:\s*<[^>]+>)?\s*\(/g;
+    const MCP_SERVER_IDENTIFIER_PATTERN = /\bMcpServer\b/g;
+    const HIGH_LEVEL_MCP_SERVER_IMPORT_PATTERN = /@modelcontextprotocol\/sdk\/server\/mcp\.js/g;
+    // Matches both bare root package (`"@modelcontextprotocol/sdk"`)
+    // AND subpath imports (`"@modelcontextprotocol/sdk/..."`). The
+    // `(?:\/|["'])` lookahead alternation ensures we don't match
+    // similarly-prefixed unrelated packages like
+    // `@modelcontextprotocol/sdkjs` (next char would be `j`,
+    // neither `/` nor quote).
+    const SDK_IMPORT_PATTERN = /@modelcontextprotocol\/sdk(?:\/|["'])/g;
+
+    let mcpServerCount = 0;
+    let mcpServerIdentifierCount = 0;
+    let highLevelImportCount = 0;
+    const serverHits: string[] = [];
+    const stdioHits: string[] = [];
+    const mcpServerHits: string[] = [];
+    const mcpServerIdentifierHits: string[] = [];
+    const highLevelImportHits: string[] = [];
+    const sdkImportFiles = new Set<string>();
+
+    for (const { abs, rel } of mcpSrcTsFiles()) {
+      const source = stripTsComments(readFileSync(abs, "utf8"));
+
+      const sm = source.match(SERVER_PATTERN);
+      if (sm !== null) {
+        serverHits.push(`${rel} (${sm.length})`);
+      }
+
+      const tm = source.match(STDIO_PATTERN);
+      if (tm !== null) {
+        stdioHits.push(`${rel} (${tm.length})`);
+      }
+
+      const mm = source.match(MCP_SERVER_PATTERN);
+      if (mm !== null) {
+        mcpServerCount += mm.length;
+        mcpServerHits.push(`${rel} (${mm.length})`);
+      }
+
+      const idMatches = source.match(MCP_SERVER_IDENTIFIER_PATTERN);
+      if (idMatches !== null) {
+        mcpServerIdentifierCount += idMatches.length;
+        mcpServerIdentifierHits.push(`${rel} (${idMatches.length})`);
+      }
+
+      const hlMatches = source.match(HIGH_LEVEL_MCP_SERVER_IMPORT_PATTERN);
+      if (hlMatches !== null) {
+        highLevelImportCount += hlMatches.length;
+        highLevelImportHits.push(`${rel} (${hlMatches.length})`);
+      }
+
+      const sdkMatches = source.match(SDK_IMPORT_PATTERN);
+      if (sdkMatches !== null && sdkMatches.length > 0) {
+        sdkImportFiles.add(rel);
+      }
+    }
+
+    // 1. Constructor sites: exactly 1 of each, BOTH in server.ts.
+    expect(
+      serverHits,
+      `D99.M.8 (1): expected exactly 1 \`new Server(\` site at packages/mcp/src/server.ts. Found: ${JSON.stringify(serverHits)}`,
+    ).toEqual(["packages/mcp/src/server.ts (1)"]);
+    expect(
+      stdioHits,
+      `D99.M.8 (1): expected exactly 1 \`new StdioServerTransport(\` site at packages/mcp/src/server.ts. Found: ${JSON.stringify(stdioHits)}`,
+    ).toEqual(["packages/mcp/src/server.ts (1)"]);
+
+    // 2. Zero `new McpServer(`.
+    expect(
+      mcpServerCount,
+      `D99.M.8 (2): expected ZERO \`new McpServer(\` sites across packages/mcp/src/** (high-level class explicitly rejected per D99.D). Found ${mcpServerCount}: ${JSON.stringify(mcpServerHits)}`,
+    ).toBe(0);
+
+    // 3. Zero bare `McpServer` identifier.
+    expect(
+      mcpServerIdentifierCount,
+      `D99.M.8 (3): expected ZERO bare McpServer identifiers across packages/mcp/src/** (high-level SDK class explicitly rejected per D99.D). Found ${mcpServerIdentifierCount}: ${JSON.stringify(mcpServerIdentifierHits)}`,
+    ).toBe(0);
+
+    // 4. Zero high-level SDK import path.
+    expect(
+      highLevelImportCount,
+      `D99.M.8 (4): expected ZERO @modelcontextprotocol/sdk/server/mcp.js import paths across packages/mcp/src/** (high-level module explicitly rejected per D99.D). Found ${highLevelImportCount}: ${JSON.stringify(highLevelImportHits)}`,
+    ).toBe(0);
+
+    // 5. SDK source imports (root + subpaths) scoped to server.ts only.
+    expect(
+      [...sdkImportFiles].sort(),
+      `D99.M.8 (5): SDK source imports (@modelcontextprotocol/sdk root and subpaths) must be scoped to packages/mcp/src/server.ts ONLY. Tool files remain SDK-free (D99.G). Found in: ${JSON.stringify([...sdkImportFiles].sort())}`,
+    ).toEqual(["packages/mcp/src/server.ts"]);
   });
 
   // ===========================================================================
@@ -3335,27 +3467,6 @@ describe("Architectural invariants -- M G1a Step 2 D99.M @viberevert/mcp boundar
           `${rel} must NOT use ${name} (D99.M.19c barrel-only consumer). Matches: ${JSON.stringify(offenders)}`,
         ).toEqual([]);
       }
-    }
-  });
-
-  // ===========================================================================
-  // Step 3 pre-import invariant -- SDK dep is allowed, src import not yet landed
-  // ===========================================================================
-
-  it("Step 3 pre-import: packages/mcp/src/** does NOT yet import @modelcontextprotocol/sdk (delete this `it` block in the same slice that adds the first SDK source import)", () => {
-    // D99.M.11 now allows the SDK dependency because Step 3.0 verified
-    // and pinned the package. Source imports remain gated until the
-    // first SDK-using implementation slice lands. Delete this block in
-    // the same slice that adds the first @modelcontextprotocol/sdk import,
-    // and update the relevant positive D99.M guard in that same slice.
-    const pattern = buildSdkForbiddenPattern("@modelcontextprotocol/sdk");
-    for (const { abs, rel } of mcpSrcTsFiles()) {
-      const source = stripTsComments(readFileSync(abs, "utf8"));
-      const offenders = findOffenders(source, pattern);
-      expect(
-        offenders,
-        `${rel} must NOT yet import @modelcontextprotocol/sdk before the first SDK source-import slice. Matches: ${JSON.stringify(offenders)}`,
-      ).toEqual([]);
     }
   });
 });

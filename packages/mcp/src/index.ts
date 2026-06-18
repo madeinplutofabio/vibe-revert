@@ -8,10 +8,9 @@
 // (TOOL_NAMES_IN_ORDER, RESERVED_TOOL_NAMES, ToolRegistration shape,
 // per-tool handler signature with ToolHandlerContext, D99.V
 // side-effect class map, defineToolRegistration helper) plus the
-// growing tool registry (TOOL_REGISTRATIONS_IN_ORDER) -- check_repo
-// landed in Slice 3.3, the remaining 7 tools land in Slices
-// 3.4-3.7. The MCP server boot entry point (startServer /
-// createServerForTests) arrives in Step 4.
+// complete tool registry (TOOL_REGISTRATIONS_IN_ORDER, all 8 tools
+// registered per slice 3.7) plus the Step 4 MCP server boot entry
+// point (startServer + createServerForTests).
 //
 // Discipline: external consumers (CLI's MCPCommand in Step 5, M G1b
 // installers, future MCP-aware integrations) MUST import from this
@@ -21,7 +20,9 @@
 //
 // Only public surface is re-exported. Private helpers
 // (sanitizeMessage, scrubZodIssueMessage, ErrorCtor type, the per-shape
-// audit serializers, AuditWriterImpl class) stay module-private.
+// audit serializers, AuditWriterImpl class, the dispatchToolsCall /
+// dispatchToolsList functions, DispatcherDeps / DispatchInput /
+// DispatchResult types) stay module-private.
 
 // ============================================================================
 // Envelope (D99.I two-source error model -- mapping side)
@@ -97,3 +98,9 @@ export {
 // ============================================================================
 
 export { TOOL_REGISTRATIONS_IN_ORDER } from "./tool-registry.js";
+
+// ============================================================================
+// MCP server boot entry + test helper (D99.D/J/K/L/P/V/W/Y, SDK-using)
+// ============================================================================
+
+export { createServerForTests, startServer } from "./server.js";
