@@ -4290,3 +4290,413 @@ describe("Architectural invariants -- M G1a Step 3.5 D57 policy resolver default
     ).toEqual([...EXPECTED_ALLOWED_SYMBOLS].sort());
   });
 });
+
+// =============================================================================
+// M G1a Step 5 D99.M -- packages/cli MCPCommand exposure + cold-start lock
+// (D99.M.12)
+//
+// TypeScript AST-based assertion: parses packages/cli/src/index.ts AND
+// packages/cli/src/commands/mcp.ts with the TypeScript compiler API
+// (already imported at the top of this file) and walks ImportDeclaration
+// + CallExpression nodes to assert structural contracts. NOT regex/
+// string-position-based: comments cannot satisfy or break it, type-only
+// and aliased imports are correctly distinguished from value-binding
+// imports, default-import and namespace-import bypasses are structurally
+// rejected (not relying on downstream TS compile errors), the cold-start
+// lock follows the static-import graph (covers BOTH files, since index.ts
+// statically imports commands/mcp.js), and a computed-access bypass
+// `cli["register"](...)` cannot evade detection.
+//
+// Seven structural sub-checks (single it() block, shared parse state,
+// mirrors D99.M.8's multi-sub-check pattern):
+//
+//   1. EXACTLY ONE MCPCommand binding from "./commands/mcp.js" in
+//      index.ts. Binding-match predicate: importedName === "MCPCommand"
+//      OR localName === "MCPCommand" (symmetric -- catches both
+//      `MCPCommand as X` and `X as MCPCommand` shadows, AND default/
+//      namespace imports). The matched binding must be:
+//        - bindingKind === "named"  (NOT default, NOT namespace)
+//        - hasAlias === false       (specifier.propertyName undefined)
+//        - isTypeOnly === false     (neither clause-level nor specifier-
+//                                    level type-only modifier)
+//
+//   2. ZERO MCPCommand bindings from "@viberevert/cli-commands" in
+//      index.ts using the same symmetric predicate. Catches default
+//      imports, namespace imports, and both alias directions
+//      structurally -- not via TS compile-error fallthrough.
+//      (D99.M.15 cross-check.)
+//
+//   3. COLD-START LOCK -- ZERO static "@viberevert/mcp" ImportDeclaration
+//      nodes across BOTH index.ts AND commands/mcp.ts. The scan covers
+//      both files because index.ts statically imports
+//      "./commands/mcp.js" -- any static `from "@viberevert/mcp"` in
+//      mcp.ts therefore enters the cold path on every CLI startup just
+//      as much as a direct static import in index.ts would. The
+//      contract is enforced via `ts.isImportDeclaration` (top-level
+//      static-import-statement only), which:
+//        - REJECTS: `import { startServer } from "@viberevert/mcp"`,
+//                   `import * as M from "@viberevert/mcp"`,
+//                   `import MCP from "@viberevert/mcp"`,
+//                   `import "@viberevert/mcp"` (bare side-effect)
+//        - ALLOWS:  `typeof import("@viberevert/mcp")`  (ImportTypeNode,
+//                   type position, no runtime emission)
+//        - ALLOWS:  `import("@viberevert/mcp")`         (dynamic-import
+//                   CallExpression, the D99.N loader seam)
+//
+//      Rationale: the mcp package is dynamically imported ONLY via the
+//      loader seam in commands/mcp.ts (D99.N). A static import in
+//      EITHER file would pull the SDK + audit writer + Zod schemas +
+//      tool registry into every `viberevert` cold start (`--version`,
+//      `doctor`, `init`, etc.), bloating non-mcp startup time and
+//      memory.
+//
+//   4. EXACTLY ONE direct PropertyAccessExpression register call
+//      `cli.register(MCPCommand)` in index.ts -- AND that call must
+//      have argumentCount === 1. The unary-call shape lock catches
+//      `cli.register(MCPCommand, extraArg)` shapes that a count-only
+//      check would miss.
+//
+//   5. EXACTLY ONE direct PropertyAccessExpression register call
+//      `cli.register(HookUninstallCommand)` in index.ts -- AND that
+//      call must have argumentCount === 1. Same unary-shape lock as
+//      sub-check 4. D98.M.10 also asserts the count; a failure here
+//      likely co-occurs with D98.M.10 failures.
+//
+//   6. Source-order: `cli.register(MCPCommand)` appears STRICTLY AFTER
+//      `cli.register(HookUninstallCommand)` in index.ts using AST node
+//      getStart(sf) positions. STRICT-AFTER, not "immediately after"
+//      and NOT "last" -- future work may legitimately insert other
+//      commands between HookUninstallCommand and MCPCommand. The
+//      contract: do not regress MCPCommand to a position before
+//      HookUninstallCommand.
+//
+//   7. ZERO computed-access calls `cli["register"](...)` /
+//      `cli['register'](...)` in index.ts. Sub-checks 4 and 5 walk
+//      PropertyAccessExpression callees only; a future maintainer who
+//      switched to ElementAccess form would silently bypass those
+//      counters. This sub-check closes that gap. TS AST collapses both
+//      quote styles to the same ElementAccessExpression node.
+//
+// Why AST not regex: import provenance, value-vs-type distinction,
+// alias detection, default/namespace binding shapes, dynamic-import vs
+// static-import distinction (cold-start lock!), and call-expression
+// callee shape are STRUCTURAL contracts the TS AST exposes natively.
+// Regex can approximate but cannot distinguish `import type { X }`
+// from `import { X }`, cannot detect `import * as MCPCommand from
+// "..."` as a binding for the name MCPCommand, cannot distinguish
+// static `import { X } from "@viberevert/mcp"` from dynamic
+// `import("@viberevert/mcp")`, and cannot reject computed-access
+// register calls without an additional string scan. The compiler API
+// does all of this for free.
+// =============================================================================
+
+describe("Architectural invariants -- M G1a Step 5 D99.M CLI MCPCommand exposure (TypeScript AST)", () => {
+  const CLI_INDEX_REL = "packages/cli/src/index.ts";
+  const MCP_COMMAND_REL = "packages/cli/src/commands/mcp.ts";
+
+  it('D99.M.12: AST -- (1) one named-no-alias-value MCPCommand binding from "./commands/mcp.js" in index.ts; (2) zero MCPCommand bindings from @viberevert/cli-commands in index.ts; (3) cold-start lock: zero static @viberevert/mcp ImportDeclaration nodes across index.ts AND commands/mcp.ts (typeof import + dynamic import allowed); (4) one cli.register(MCPCommand) PropertyAccess call with argumentCount === 1; (5) one cli.register(HookUninstallCommand) anchor with argumentCount === 1; (6) MCPCommand register strictly after HookUninstall register; (7) zero computed cli["register"](...) calls', () => {
+    type BindingKind = "default" | "namespace" | "named";
+    type ImportBindingInfo = {
+      readonly importedName: string;
+      readonly localName: string;
+      readonly bindingKind: BindingKind;
+      readonly hasAlias: boolean;
+      readonly isTypeOnly: boolean;
+      readonly pos: string;
+    };
+    type ImportDeclInfo = {
+      readonly file: string;
+      readonly moduleSpec: string;
+      readonly bindings: readonly ImportBindingInfo[];
+      readonly pos: string;
+    };
+    type RegisterCallInfo = {
+      readonly argName: string | null;
+      readonly argumentCount: number;
+      readonly pos: number;
+      readonly posLabel: string;
+    };
+
+    // requireFirst -- narrows arr[0] from `T | undefined` to `T` after
+    // the prior length===1 assertion. Throws on unreachable [0]-undefined
+    // states (would only fire if the prior count expect erroneously
+    // passed with length === 0, which is structurally impossible).
+    // Replaces the arr[0]! non-null-assertion pattern that biome's
+    // noNonNullAssertion rule forbids.
+    //
+    // Uses `=== undefined` explicit check (not `!first` truthiness) so
+    // a future reuse with a falsy-but-valid element type (0, "", false,
+    // null) does not misfire the throw branch on a legitimately-present
+    // falsy element. The contract is "array is non-empty", NOT "first
+    // element is truthy".
+    const requireFirst = <T>(arr: readonly T[], subCheckLabel: string): T => {
+      const first = arr[0];
+      if (first === undefined) {
+        throw new Error(
+          `${subCheckLabel}: unreachable -- the prior length===1 expect would have failed first.`,
+        );
+      }
+      return first;
+    };
+
+    // ----- Parse + import walker (one helper, reused for both files) -----
+    //
+    // Returns ALL ImportDeclarations with EVERY binding each introduces
+    // (default, namespace, named -- all three forms). Bare side-effect
+    // imports (`import "./x.js";`) are recorded with bindings: [] so the
+    // cold-start lock (sub-check 3) catches them even without a binding.
+    // Dynamic-import CallExpressions and ImportTypeNodes are NOT
+    // ImportDeclaration nodes and are therefore ignored by design.
+    const walkImports = (
+      relPath: string,
+    ): { sf: ts.SourceFile; declarations: ImportDeclInfo[] } => {
+      const absPath = join(REPO_ROOT, relPath);
+      const source = readSource(relPath);
+      const sf = ts.createSourceFile(absPath, source, ts.ScriptTarget.ES2023, false);
+      const fmtPos = (node: ts.Node): string => {
+        const start = node.getStart(sf);
+        const { line, character } = sf.getLineAndCharacterOfPosition(start);
+        return `${relPath}:L${line + 1}:${character + 1}`;
+      };
+
+      const declarations: ImportDeclInfo[] = [];
+      for (const stmt of sf.statements) {
+        if (!ts.isImportDeclaration(stmt)) continue;
+        if (!ts.isStringLiteral(stmt.moduleSpecifier)) continue;
+        const moduleSpec = stmt.moduleSpecifier.text;
+
+        const bindings: ImportBindingInfo[] = [];
+        const importClause = stmt.importClause;
+        if (importClause) {
+          const isTypeOnlyClause = importClause.isTypeOnly === true;
+          // Default-import binding: `import <Name> from "..."`
+          if (importClause.name) {
+            bindings.push({
+              importedName: "default",
+              localName: importClause.name.text,
+              bindingKind: "default",
+              hasAlias: false,
+              isTypeOnly: isTypeOnlyClause,
+              pos: fmtPos(importClause.name),
+            });
+          }
+          const namedBindings = importClause.namedBindings;
+          if (namedBindings) {
+            if (ts.isNamespaceImport(namedBindings)) {
+              // Namespace-import binding: `import * as <Name> from "..."`
+              bindings.push({
+                importedName: "*",
+                localName: namedBindings.name.text,
+                bindingKind: "namespace",
+                hasAlias: false,
+                isTypeOnly: isTypeOnlyClause,
+                pos: fmtPos(namedBindings.name),
+              });
+            } else if (ts.isNamedImports(namedBindings)) {
+              // Named-imports bindings: `import { <X>, <Y as Z>, ... } from "..."`
+              for (const elem of namedBindings.elements) {
+                const importedName = elem.propertyName?.text ?? elem.name.text;
+                const localName = elem.name.text;
+                bindings.push({
+                  importedName,
+                  localName,
+                  bindingKind: "named",
+                  hasAlias: elem.propertyName !== undefined,
+                  isTypeOnly: isTypeOnlyClause || elem.isTypeOnly === true,
+                  pos: fmtPos(elem),
+                });
+              }
+            }
+          }
+        }
+
+        declarations.push({
+          file: relPath,
+          moduleSpec,
+          bindings,
+          pos: fmtPos(stmt),
+        });
+      }
+      return { sf, declarations };
+    };
+
+    const indexParsed = walkImports(CLI_INDEX_REL);
+    const mcpFileParsed = walkImports(MCP_COMMAND_REL);
+
+    // ----- CallExpression walker for index.ts (recursive -- catches
+    //       conditional / wrapped invocations a top-level-only walk
+    //       would miss). Scoped to index.ts only because sub-checks
+    //       4-7 are about registration in the CLI entry, not about
+    //       calls inside the command file. -----
+    const propertyAccessRegisterCalls: RegisterCallInfo[] = [];
+    const computedAccessRegisterCalls: Array<{ readonly posLabel: string }> = [];
+    const indexFmtPos = (node: ts.Node): string => {
+      const start = node.getStart(indexParsed.sf);
+      const { line, character } = indexParsed.sf.getLineAndCharacterOfPosition(start);
+      return `${CLI_INDEX_REL}:L${line + 1}:${character + 1}`;
+    };
+    const visit = (node: ts.Node): void => {
+      if (ts.isCallExpression(node)) {
+        const callee = node.expression;
+        if (
+          ts.isPropertyAccessExpression(callee) &&
+          ts.isIdentifier(callee.expression) &&
+          callee.expression.text === "cli" &&
+          callee.name.text === "register"
+        ) {
+          // PropertyAccess form: cli.register(<arg>, ...)
+          const firstArg = node.arguments[0];
+          const argName = firstArg && ts.isIdentifier(firstArg) ? firstArg.text : null;
+          propertyAccessRegisterCalls.push({
+            argName,
+            argumentCount: node.arguments.length,
+            pos: node.getStart(indexParsed.sf),
+            posLabel: indexFmtPos(node),
+          });
+        } else if (
+          ts.isElementAccessExpression(callee) &&
+          ts.isIdentifier(callee.expression) &&
+          callee.expression.text === "cli"
+        ) {
+          // ElementAccess form: cli["register"](<arg>) OR cli['register'](<arg>)
+          // -- TS AST collapses both quote styles to the same node.
+          const accessArg = callee.argumentExpression;
+          if (ts.isStringLiteral(accessArg) && accessArg.text === "register") {
+            computedAccessRegisterCalls.push({ posLabel: indexFmtPos(node) });
+          }
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(indexParsed.sf);
+
+    // Symmetric MCPCommand-binding predicate -- catches both alias
+    // directions AND default/namespace shadows:
+    //   `import { MCPCommand } from "..."`        -> importedName="MCPCommand", localName="MCPCommand" -> match
+    //   `import { MCPCommand as X } from "..."`   -> importedName="MCPCommand", localName="X"          -> match (importedName)
+    //   `import { X as MCPCommand } from "..."`   -> importedName="X",          localName="MCPCommand" -> match (localName)
+    //   `import MCPCommand from "..."`            -> importedName="default",    localName="MCPCommand" -> match (localName)
+    //   `import * as MCPCommand from "..."`       -> importedName="*",          localName="MCPCommand" -> match (localName)
+    const isMcpBinding = (b: ImportBindingInfo): boolean =>
+      b.importedName === "MCPCommand" || b.localName === "MCPCommand";
+
+    // ===== Sub-check 1 -- exactly one MCPCommand binding from local
+    //       module in index.ts, in the required shape =====
+    const localMcpBindings = indexParsed.declarations
+      .filter((d) => d.moduleSpec === "./commands/mcp.js")
+      .flatMap((d) => d.bindings.filter(isMcpBinding));
+    expect(
+      localMcpBindings.length,
+      `D99.M.12 sub-check 1 (count): index.ts must contain EXACTLY ONE MCPCommand binding from "./commands/mcp.js" (TS AST; predicate: importedName === "MCPCommand" OR localName === "MCPCommand" -- catches default, namespace, and both alias directions). Found ${localMcpBindings.length}: ${JSON.stringify(localMcpBindings)}.`,
+    ).toBe(1);
+    const local = requireFirst(localMcpBindings, "D99.M.12 sub-check 1");
+    expect(
+      local.bindingKind,
+      `D99.M.12 sub-check 1 (named binding): the MCPCommand binding from "./commands/mcp.js" must be a NAMED import (\`import { MCPCommand } from "..."\`), NOT a default import (\`import MCPCommand from "..."\`) and NOT a namespace import (\`import * as MCPCommand from "..."\`). Found bindingKind="${local.bindingKind}" at ${local.pos}.`,
+    ).toBe("named");
+    expect(
+      local.hasAlias,
+      `D99.M.12 sub-check 1 (no alias): the MCPCommand named-import binding from "./commands/mcp.js" must use the identifier MCPCommand directly. \`MCPCommand as <alias>\` and \`<other> as MCPCommand\` forms are both forbidden (specifier.propertyName must be undefined; localName must equal importedName). Found at ${local.pos} with importedName="${local.importedName}", localName="${local.localName}".`,
+    ).toBe(false);
+    expect(
+      local.isTypeOnly,
+      `D99.M.12 sub-check 1 (value import): the MCPCommand named-import binding from "./commands/mcp.js" must be a VALUE import. \`import type { MCPCommand }\` (importClause.isTypeOnly) and per-specifier type-only forms (specifier.isTypeOnly) are both forbidden -- MCPCommand needs a runtime binding for cli.register(MCPCommand). Found at ${local.pos}.`,
+    ).toBe(false);
+
+    // ===== Sub-check 2 -- zero MCPCommand bindings from
+    //       @viberevert/cli-commands in index.ts =====
+    const cliCommandsMcpBindings = indexParsed.declarations
+      .filter((d) => d.moduleSpec === "@viberevert/cli-commands")
+      .flatMap((d) => d.bindings.filter(isMcpBinding));
+    expect(
+      cliCommandsMcpBindings.length,
+      `D99.M.12 sub-check 2 (cli-commands MCPCommand-binding negative): index.ts must NOT import any binding for MCPCommand from "@viberevert/cli-commands" -- ANY shape (default, namespace, named, aliased in either direction). D99.M.15 cross-check; MCPCommand lives in the CLI binary per D99.N -- relocating it into cli-commands would create the forbidden cli-commands -> mcp dependency edge. cli-commands is otherwise a legitimate import source for OTHER Command classes (just not MCPCommand). Found ${cliCommandsMcpBindings.length}: ${JSON.stringify(cliCommandsMcpBindings)}.`,
+    ).toBe(0);
+
+    // ===== Sub-check 3 -- cold-start lock: zero static
+    //       "@viberevert/mcp" ImportDeclarations across BOTH index.ts
+    //       AND commands/mcp.ts =====
+    //
+    // Scans BOTH files because index.ts statically imports
+    // "./commands/mcp.js" -- any static `from "@viberevert/mcp"` in
+    // mcp.ts therefore enters the cold path on every CLI startup just
+    // as much as a static import in index.ts would. ts.isImportDeclaration
+    // is the static-import-statement filter; it correctly excludes:
+    //   - ImportTypeNode  (`typeof import("@viberevert/mcp")` -- type
+    //                      position, no runtime emission, used by
+    //                      mcp.ts's StartServerLoader type)
+    //   - dynamic-import CallExpression (`import("@viberevert/mcp")` --
+    //                      the D99.N loader seam, used by mcp.ts's
+    //                      defaultLoader)
+    const staticMcpPackageImports = [
+      ...indexParsed.declarations,
+      ...mcpFileParsed.declarations,
+    ].filter((d) => d.moduleSpec === "@viberevert/mcp");
+    expect(
+      staticMcpPackageImports.length,
+      `D99.M.12 sub-check 3 (cold-start lock): static "@viberevert/mcp" ImportDeclaration nodes must be ZERO across BOTH ${CLI_INDEX_REL} AND ${MCP_COMMAND_REL} (any form -- named, default, namespace, side-effect). The mcp package is dynamically imported ONLY via the loader seam in ${MCP_COMMAND_REL} (D99.N). \`typeof import("@viberevert/mcp")\` (type position) and \`import("@viberevert/mcp")\` (dynamic-import CallExpression) are ALLOWED -- both are excluded by the ts.isImportDeclaration filter. A static import in EITHER file would pull the SDK + audit writer + Zod schemas into every viberevert cold start, slowing non-mcp invocations. Found ${staticMcpPackageImports.length}: ${JSON.stringify(staticMcpPackageImports.map((d) => ({ pos: d.pos, bindings: d.bindings })))}.`,
+    ).toBe(0);
+
+    // ===== Sub-check 4 -- exactly one cli.register(MCPCommand)
+    //       PropertyAccess call AND argumentCount === 1 =====
+    const mcpRegisterCalls = propertyAccessRegisterCalls.filter((c) => c.argName === "MCPCommand");
+    expect(
+      mcpRegisterCalls.length,
+      `D99.M.12 sub-check 4 (MCPCommand register count): index.ts must contain EXACTLY ONE \`cli.register(MCPCommand)\` PropertyAccessExpression CallExpression with a bare Identifier first argument (TS AST). Wrapped forms (loops, spread, namespace-property access like \`m.MCPCommand\`) and renamed cli bindings (\`myCli.register(MCPCommand)\`) are intentionally NOT counted -- the contract is explicit, direct registration. Found ${mcpRegisterCalls.length}: ${JSON.stringify(mcpRegisterCalls.map((c) => ({ pos: c.posLabel, argumentCount: c.argumentCount })))}.`,
+    ).toBe(1);
+    const firstMcpRegister = requireFirst(mcpRegisterCalls, "D99.M.12 sub-check 4");
+    expect(
+      firstMcpRegister.argumentCount,
+      `D99.M.12 sub-check 4 (MCPCommand register shape): the \`cli.register(MCPCommand)\` call must be unary (argumentCount === 1). \`cli.register(MCPCommand, extra)\` and similar non-unary shapes are forbidden -- the registration contract is single-argument. Found argumentCount=${firstMcpRegister.argumentCount} at ${firstMcpRegister.posLabel}.`,
+    ).toBe(1);
+
+    // ===== Sub-check 5 -- exactly one cli.register(HookUninstallCommand)
+    //       anchor AND argumentCount === 1 =====
+    const hookUninstallRegisterCalls = propertyAccessRegisterCalls.filter(
+      (c) => c.argName === "HookUninstallCommand",
+    );
+    expect(
+      hookUninstallRegisterCalls.length,
+      `D99.M.12 sub-check 5 (HookUninstallCommand anchor): index.ts must contain EXACTLY ONE \`cli.register(HookUninstallCommand)\` PropertyAccessExpression call. D98.M.10 also asserts this -- a failure here likely co-occurs with D98.M.10 failures. Found ${hookUninstallRegisterCalls.length}: ${JSON.stringify(hookUninstallRegisterCalls.map((c) => ({ pos: c.posLabel, argumentCount: c.argumentCount })))}.`,
+    ).toBe(1);
+    const firstHookUninstallRegister = requireFirst(
+      hookUninstallRegisterCalls,
+      "D99.M.12 sub-check 5",
+    );
+    expect(
+      firstHookUninstallRegister.argumentCount,
+      `D99.M.12 sub-check 5 (HookUninstallCommand register shape): the \`cli.register(HookUninstallCommand)\` call must be unary (argumentCount === 1). Found argumentCount=${firstHookUninstallRegister.argumentCount} at ${firstHookUninstallRegister.posLabel}.`,
+    ).toBe(1);
+
+    // ===== Sub-check 6 -- MCPCommand registered STRICTLY AFTER
+    //       HookUninstallCommand (source order via AST positions) =====
+    //
+    // STRICT-AFTER, not "immediately after" and NOT "last" -- future
+    // work may insert other commands between HookUninstallCommand and
+    // MCPCommand without breaking this invariant. The contract is just
+    // "do not regress MCPCommand to a position before HookUninstallCommand".
+    //
+    // Reuses the firstHookUninstallRegister + firstMcpRegister consts
+    // captured by sub-checks 4 + 5 via requireFirst (type-safe narrowing
+    // from `T | undefined` to `T` after the prior count assertions).
+    const hookUninstallPos = firstHookUninstallRegister.pos;
+    const mcpPos = firstMcpRegister.pos;
+    expect(
+      hookUninstallPos,
+      `D99.M.12 sub-check 6 (ordering, strict-after): \`cli.register(MCPCommand)\` must appear STRICTLY AFTER \`cli.register(HookUninstallCommand)\` in source order (AST node getStart(sf) positions). HookUninstallCommand at ${firstHookUninstallRegister.posLabel} (pos ${hookUninstallPos}); MCPCommand at ${firstMcpRegister.posLabel} (pos ${mcpPos}). Strict-after, NOT immediately-after -- future commands may be inserted between the two without breaking the invariant.`,
+    ).toBeLessThan(mcpPos);
+
+    // ===== Sub-check 7 -- zero computed cli["register"](...) calls =====
+    //
+    // PropertyAccessExpression-only collectors (sub-checks 4 and 5)
+    // would silently miss a future maintainer who switched to
+    // ElementAccess form. This sub-check is the wall against that
+    // bypass. TS AST collapses both quote styles (`cli["register"]`
+    // and `cli['register']`) to the same ElementAccessExpression
+    // node, so one check covers both.
+    expect(
+      computedAccessRegisterCalls.length,
+      `D99.M.12 sub-check 7 (no computed-access bypass): index.ts must NOT call \`cli["register"](...)\` or \`cli['register'](...)\` (ElementAccessExpression with a string-literal "register" argument). Sub-checks 4 and 5 walk PropertyAccessExpression callees only; a future maintainer who switched to ElementAccess form would silently bypass those counters. This sub-check closes that gap. Found ${computedAccessRegisterCalls.length}: ${JSON.stringify(computedAccessRegisterCalls.map((c) => c.posLabel))}.`,
+    ).toBe(0);
+  });
+});

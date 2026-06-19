@@ -69,7 +69,7 @@
 //       * pendingRequestCount() exposed for afterEach leak check.
 
 import { type ChildProcess, spawn } from "node:child_process";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve as pathResolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -132,12 +132,28 @@ async function buildMcpPackage(): Promise<void> {
  */
 function spawnServer(cwd: string): ChildProcess {
   const distHref = pathToFileURL(DIST_INDEX).href;
+  // ESM top-level await body (--input-type=module). Mirrors the
+  // production CLI's `await cli.runExit(...)` failure mode -- if
+  // startServer's Promise hangs (e.g., stdin EOF doesn't trigger
+  // graceful shutdown), Node 22 detects the unsettled top-level
+  // await and exits code 13, which TestServer.shutdown() surfaces
+  // as a test failure. A previous .then(...)-chain entry shape
+  // masked stdin-EOF hangs as false-PASS exit 0 (Node natural-exit
+  // when the event loop emptied), letting a shutdown regression
+  // slip past the test suite -- regression discovered by Phase 12f
+  // smoke (real CLI) and locked here so the fast unit test catches
+  // it next time. try/catch + process.exit(1) on boot error
+  // preserves the prior diagnostic surface (stderr stack + exit 1).
   const entryCode =
-    `import(${JSON.stringify(distHref)})` +
-    `.then(({ startServer }) => startServer({ cwd: process.cwd() }))` +
-    `.catch((e) => { process.stderr.write(String(e?.stack ?? e)); process.exit(1); });`;
+    `try { ` +
+    `const { startServer } = await import(${JSON.stringify(distHref)}); ` +
+    `await startServer({ cwd: process.cwd() }); ` +
+    `} catch (e) { ` +
+    `process.stderr.write(String(e?.stack ?? e)); ` +
+    `process.exit(1); ` +
+    `}`;
 
-  return spawn(process.execPath, ["-e", entryCode], {
+  return spawn(process.execPath, ["--input-type=module", "-e", entryCode], {
     cwd,
     stdio: ["pipe", "pipe", "pipe"],
   });
@@ -693,6 +709,126 @@ describe("stdio-server: E. Response id matching (R27)", () => {
       expect(r.error).toBeUndefined();
       const result = r.result as { tools: ReadonlyArray<{ name: string }> };
       expect(result.tools).toHaveLength(8);
+    }
+  });
+});
+
+// ============================================================================
+// F. In-flight handler race lock (stdin EOF gate)
+// ============================================================================
+
+describe("stdio-server: F. in-flight handler race lock (stdin EOF gate)", () => {
+  it("allowed get_policy CONFIG_NOT_FOUND path: response + audit complete before server exits", async () => {
+    // Race-lock regression: stdin EOF arrives while get_policy is
+    // in-flight. The CONFIG_NOT_FOUND path (no .viberevert.yml) is
+    // an allowed-tool dispatch that exercises the SAME handler
+    // chain as a config-valid call (loadConfig attempt -> error
+    // mapping -> Cat 1 envelope construction -> SDK response write
+    // -> audit-tail flush). Avoids fixture brittleness around the
+    // minimal-valid YAML schema while still locking the race.
+    //
+    // Phase 12f smoke proved get_policy is the slowest handler
+    // shape and the one most likely to be in-flight at stdin EOF:
+    // id=3 returned LAST after all Cat 2 string-compare denials.
+    //
+    // Two regression locks:
+    //   (1) Response delivery: getPolicyPromise must resolve --
+    //       without the trackHandler gate, stdin EOF would
+    //       signalGraceful synchronously, transport would close
+    //       mid-handler, getPolicyPromise would reject with
+    //       "Subprocess exited with pending requests".
+    //   (2) Audit completion: the get_policy tool_call record must
+    //       land on disk -- locks that the audit's serialized tail
+    //       (Promise chain) is fully flushed before audit.close()
+    //       resolves and the process exits. Without the
+    //       setImmediate defer in scheduleMaybeSignalStdinGraceful,
+    //       the audit write could race against the transport close.
+    //
+    // Assertion contract VERIFIED from packages/mcp/src/server.ts
+    // (NOT guessed):
+    //   - Cat 1 ok:false (L423-427): { structuredContent: envelope,
+    //     isError: true } -- isError IS true on tool-level failure.
+    //   - Audit on Cat 1 ok:false (L584): record.ok === envelope.ok
+    //     === false.
+    //   - get_policy on ConfigNotFoundError (tools/get-policy.ts
+    //     L156): returns toErrorEnvelope(err) which produces
+    //     { ok: false, error: { code: "CONFIG_NOT_FOUND", ... } }.
+    const localTmpRoot = await mkdtemp(join(tmpdir(), "vibrev-mcp-race-"));
+    let localServer: TestServer | undefined;
+    try {
+      await mkdir(join(localTmpRoot, ".git"), { recursive: true });
+      // No .viberevert.yml -- get_policy returns Cat 1 ok:false
+      // with structuredContent.error.code === "CONFIG_NOT_FOUND".
+
+      localServer = new TestServer(spawnServer(localTmpRoot));
+      await initialize(localServer);
+
+      // Send get_policy WITHOUT awaiting -- the Promise stays
+      // pending in TestServer.pending Map keyed by JSON-RPC id.
+      const getPolicyPromise = localServer.request("tools/call", {
+        name: "get_policy",
+        arguments: {},
+      });
+
+      // Close stdin IMMEDIATELY via shutdown(). This is the race:
+      // EOF arrives at the server while get_policy is in-flight.
+      const shutdownPromise = localServer.shutdown();
+
+      // Promise.all awaits BOTH the response and shutdown -- if
+      // the process exits before the response, getPolicyPromise
+      // rejects and Promise.all surfaces the rejection directly
+      // (no delayed unhandled-rejection noise that a response-
+      // first / shutdown-second sequential await could produce).
+      const [resp] = await Promise.all([getPolicyPromise, shutdownPromise]);
+
+      // Cat 1 envelope assertions per the verified server.ts contract.
+      expect(resp.error).toBeUndefined();
+      const result = resp.result as {
+        isError?: boolean;
+        structuredContent?: {
+          ok?: boolean;
+          error?: { code?: string };
+        };
+      };
+      expect(result.structuredContent).toBeDefined();
+      // L423-427: dispatcher sets isError: true on envelope.ok===false.
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent?.ok).toBe(false);
+      expect(result.structuredContent?.error?.code).toBe("CONFIG_NOT_FOUND");
+
+      // Lock (2): the audit record for the in-flight get_policy
+      // MUST be present in the audit log. Reading after the
+      // Promise.all resolves is safe -- audit.close() (which
+      // awaits the tail Promise chain) runs inside startServer's
+      // finally BEFORE the process exits.
+      const auditText = await readFile(join(localTmpRoot, ".viberevert", "mcp-audit.log"), "utf8");
+      const auditRecords = auditText
+        .trim()
+        .split("\n")
+        .filter((line) => line.length > 0)
+        .map((line) => JSON.parse(line) as { event?: string; tool_name?: string; ok?: boolean });
+
+      // L584: audit.ok = envelope.ok = false on this path.
+      expect(
+        auditRecords.some(
+          (record) =>
+            record.event === "tool_call" &&
+            record.tool_name === "get_policy" &&
+            record.ok === false,
+        ),
+        `audit log MUST contain a tool_call record for get_policy with ok:false (CONFIG_NOT_FOUND path; the in-flight race lock -- response delivered AND audit-tail flushed before process exit). Got records: ${JSON.stringify(auditRecords)}`,
+      ).toBe(true);
+    } finally {
+      // Defensive cleanup. shutdown() is idempotent (early-return
+      // if exited); rm handles the absent-dir case.
+      if (localServer !== undefined) {
+        try {
+          await localServer.shutdown();
+        } catch {
+          // Already-exited or unhealthy: cleanup proceeds regardless.
+        }
+      }
+      await rm(localTmpRoot, { recursive: true, force: true });
     }
   });
 });

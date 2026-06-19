@@ -2,7 +2,7 @@
 # Copyright 2026 Fabio Marcello Salvadori
 
 # VibeRevert M B + M C + M D smoke test (Phase 12a + 12b + 12c).
-# Builds + packs the 6 currently publishable packages, installs them into a
+# Builds + packs the 7 packable workspace packages, installs them into a
 # scratch dir under $env:TEMP, and exercises the M B command surface AND the
 # M C/D Phase 12a + 12b + 12c packed-install scenarios (basic check + report
 # flows, targeted package-boundary proofs, and the M D rollback dry-run +
@@ -261,7 +261,7 @@ try {
         Pop-Location
     }
 
-    # 2. Pack the 6 publishable packages into $packDir.
+    # 2. Pack the 7 packable workspace packages into $packDir.
     Write-Section "Pack publishable packages into $packDir"
     New-Item -ItemType Directory -Force $packDir | Out-Null
     Push-Location $repoRoot
@@ -272,6 +272,7 @@ try {
                --filter '@viberevert/checks' `
                --filter '@viberevert/reporters' `
                --filter '@viberevert/cli-commands' `
+               --filter '@viberevert/mcp' `
                --filter 'viberevert' `
                pack --pack-destination $packDir
         if ($LASTEXITCODE -ne 0) { throw "pnpm pack failed (exit $LASTEXITCODE)" }
@@ -286,9 +287,11 @@ try {
     $tgzCh = (Get-ChildItem $packDir -Filter 'viberevert-checks-*.tgz' | Select-Object -First 1).FullName
     $tgzRe = (Get-ChildItem $packDir -Filter 'viberevert-reporters-*.tgz' | Select-Object -First 1).FullName
     $tgzCc = (Get-ChildItem $packDir -Filter 'viberevert-cli-commands-*.tgz' | Select-Object -First 1).FullName
+    $tgzMc = (Get-ChildItem $packDir -Filter 'viberevert-mcp-*.tgz' | Select-Object -First 1).FullName
     # `viberevert-<version>.tgz` -- match digit-leading suffix so we don't pick
-    # up viberevert-git/core/session-format/checks/reporters/cli-commands tarballs
-    # (which also start with `viberevert-`). cli-commands is post-Step-1 (M G1a).
+    # up viberevert-git/core/session-format/checks/reporters/cli-commands/mcp
+    # tarballs (which also start with `viberevert-`). cli-commands is post-Step-1
+    # (M G1a Step 1); mcp is post-Step-4 (M G1a Step 4).
     # Note: PowerShell/Windows `-Filter` is filesystem-provider filtering, NOT a bash-style
     # glob -- character classes like `[0-9]` do NOT work. Use a `Where-Object` regex (.NET regex)
     # via `-match` instead. Sort-Object for deterministic selection if multiple matches ever exist.
@@ -297,7 +300,7 @@ try {
         Sort-Object Name |
         Select-Object -First 1).FullName
 
-    foreach ($tgz in @($tgzSf, $tgzCo, $tgzGi, $tgzCh, $tgzRe, $tgzCc, $tgzCl)) {
+    foreach ($tgz in @($tgzSf, $tgzCo, $tgzGi, $tgzCh, $tgzRe, $tgzCc, $tgzMc, $tgzCl)) {
         if (-not $tgz) {
             $listed = (Get-ChildItem $packDir).Name -join ', '
             throw "Expected tarball not found under $packDir (files: $listed)"
@@ -334,6 +337,7 @@ try {
         $pCh = $tgzCh -replace '\\', '/'
         $pRe = $tgzRe -replace '\\', '/'
         $pCc = $tgzCc -replace '\\', '/'
+        $pMc = $tgzMc -replace '\\', '/'
         $pCl = $tgzCl -replace '\\', '/'
 
         $packageJson = @"
@@ -356,7 +360,8 @@ try {
       "@viberevert/git": "file:$pGi",
       "@viberevert/checks": "file:$pCh",
       "@viberevert/reporters": "file:$pRe",
-      "@viberevert/cli-commands": "file:$pCc"
+      "@viberevert/cli-commands": "file:$pCc",
+      "@viberevert/mcp": "file:$pMc"
     }
   }
 }
@@ -1158,6 +1163,442 @@ PHASE_12D_TOKEN = "TESTFIXTUREONLY_S9qX8wV7tS6rP5nM4kL3jH2gF1"
             throw 'Phase 12e cleanup: failed to remove sentinel hook before Phase 12b-last'
         }
         Write-Host '[ok] Phase 12e cleanup: sentinel removed'
+
+        Write-Section 'M G1a 12f: MCP server stdio probe (BOTH reserved names; R31 audit sentinel; D99.R locked single-shot)'
+
+        # === Local helpers (scoped to Phase 12f) ===
+
+        # Select-SingleAuditRecord: select exactly one audit record matching
+        # a predicate. Throws on count !== 1 with a diagnostic dump of all
+        # records. Used to select by record SHAPE rather than array index --
+        # JSON-RPC dispatch (R27) and audit-write completion are async, so
+        # audit-line order is NOT guaranteed to match request-input order.
+        function Select-SingleAuditRecord {
+            param(
+                [Parameter(Mandatory)][object[]]$Records,
+                [Parameter(Mandatory)][scriptblock]$Predicate,
+                [Parameter(Mandatory)][string]$Label
+            )
+            $matches = @($Records | Where-Object $Predicate)
+            if ($matches.Count -ne 1) {
+                throw "Phase 12f audit: expected exactly one '${Label}' record, got $($matches.Count). All records:`n$($Records | ConvertTo-Json -Depth 10)"
+            }
+            return $matches[0]
+        }
+
+        # Assert-Cat2Shape: lock the full Cat 2 wire shape per D99.O + R31:
+        #   result.isError === true
+        #   result.content.Count === 1
+        #   result.content[0].type === 'text'
+        #   result.content[0].text === <exact locked string> (R31 generic; tool name NOT echoed)
+        #   result.structuredContent === $null  (D99.O: Cat 2 carries no typed payload)
+        # The text uses EXACT equality (not regex) so whitespace / casing
+        # regressions surface as failures.
+        $expectedDeniedText = 'MCP error -32602: Tool not found'
+        function Assert-Cat2Shape {
+            param(
+                [Parameter(Mandatory)][object]$Resp,
+                [Parameter(Mandatory)][string]$IdLabel,
+                [Parameter(Mandatory)][string]$ProbeName,
+                [Parameter(Mandatory)][string]$ExpectedText
+            )
+            if (-not $Resp.result.isError) {
+                throw "Phase 12f id=${IdLabel} ${ProbeName}: expected result.isError=true (Cat 2 per D99.O)"
+            }
+            # @() wrap defends against PS 5.1's ConvertFrom-Json quirk where
+            # a single-element JSON array can unwrap to a bare object.
+            $content = @($Resp.result.content)
+            if ($content.Count -ne 1) {
+                throw "Phase 12f id=${IdLabel} ${ProbeName}: expected result.content to have exactly 1 entry, got $($content.Count) (D99.O Cat 2 shape lock)"
+            }
+            if ($content[0].type -ne 'text') {
+                throw "Phase 12f id=${IdLabel} ${ProbeName}: expected result.content[0].type='text', got '$($content[0].type)' (D99.O Cat 2 shape lock)"
+            }
+            if ($content[0].text -ne $ExpectedText) {
+                throw "Phase 12f id=${IdLabel} ${ProbeName}: text expected exactly '${ExpectedText}' (R31 generic message; tool name MUST NOT be echoed), got '$($content[0].text)'"
+            }
+            if ($null -ne $Resp.result.structuredContent) {
+                throw "Phase 12f id=${IdLabel} ${ProbeName}: Cat 2 MUST NOT have structuredContent (D99.O), got: $($Resp.result.structuredContent | ConvertTo-Json -Compress -Depth 10)"
+            }
+        }
+
+        # === Setup ===
+        # Temp files for input, stdout, stderr. File-redirection (not PS
+        # variable capture) for both output channels: bytes-clean (no PS
+        # variable encoding quirks on large output) AND separates stderr
+        # from stdout so D99.M.14 "mcp library never writes stderr" becomes
+        # a positive smoke assertion (success path -> empty stderr).
+        $mcpInputFile = Join-Path $scratch 'mcp-probe-input.ndjson'
+        $mcpOutputFile = Join-Path $scratch 'mcp-probe-output.ndjson'
+        $mcpStderrFile = Join-Path $scratch 'mcp-probe-stderr.txt'
+        $mcpAuditPath = Join-Path $scratch '.viberevert/mcp-audit.log'
+
+        # Defensive: clear any prior artifacts so we observe ONLY this
+        # probe's records. No prior smoke phase populates these paths,
+        # but a re-run with -KeepArtifacts could leave them behind.
+        foreach ($p in @($mcpInputFile, $mcpOutputFile, $mcpStderrFile, $mcpAuditPath)) {
+            if (Test-Path $p) { Remove-Item -Force $p }
+        }
+
+        # 7 input frames: 6 requests + 1 notification per MCP protocol.
+        # `notifications/initialized` (sent by real clients after the
+        # initialize response) has NO id field per JSON-RPC, so it
+        # produces NO response. Response count therefore stays at 6 even
+        # though we write 7 input frames. The stdio-server unit test
+        # sends this same sequence; smoke mirrors it for protocol
+        # conformance.
+        $mcpRequests = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke-12f","version":"0.0.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}',
+            '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}',
+            '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_policy","arguments":{}}}',
+            '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"rollback","arguments":{}}}',
+            '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"request_human_approval","arguments":{}}}',
+            '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"made_up_tool","arguments":{}}}'
+        )
+        # Newline-delimited JSON-RPC framing per D99.D (NOT LSP Content-
+        # Length headers). LF-only (no CRLF) per stdio protocol convention.
+        # Trailing LF after the last frame ensures the server's line reader
+        # emits the final message before EOF.
+        $mcpInputBody = ($mcpRequests -join "`n") + "`n"
+        # UTF-8 NO BOM. Server expects pure UTF-8; a BOM at byte 0 would
+        # corrupt the first request's JSON parse.
+        $utf8NoBomMcp = [System.Text.UTF8Encoding]::new($false)
+        [System.IO.File]::WriteAllText($mcpInputFile, $mcpInputBody, $utf8NoBomMcp)
+
+        # === Probe ===
+        # System.Diagnostics.Process with pre-buffered stdin + explicit
+        # StandardInput.Close() to send FIN. The cmd-file-redirect
+        # pattern (`cmd /c "... < input.ndjson"`) fails on Windows with
+        # the low-level SDK Server (D99.D) because cmd's stdin redirection
+        # does NOT propagate stdin EOF to the child Node process cleanly
+        # -- the SDK's StdioServerTransport relies on the stdin 'end'
+        # event to trigger transport close, which never fires under cmd
+        # file redirection (Node detects unsettled top-level await at
+        # process-exit time and exits with code 13). Explicit
+        # StandardInput.Close() via the .NET Process API sends the FIN
+        # that real MCP clients (subprocess-spawn + child.stdin.end())
+        # send -- mirrors stdio-server unit test behavior.
+        #
+        # cmd /c wrapper is still needed because pnpm.cmd is a Windows
+        # batch file that CreateProcess (UseShellExecute=$false) cannot
+        # launch directly.
+        #
+        # Bounded execution (30s timeout) + process-tree kill on timeout.
+        # Without these, a server regression (stuck audit close,
+        # unresolved Promise, deadlock) would hang the smoke forever via
+        # WaitForExit's default indefinite wait. taskkill /T /F kills the
+        # full cmd -> pnpm -> node process tree on Windows so no orphans
+        # survive the timeout. Bounded drain waits (5s) protect against
+        # stuck stream handles after the kill.
+        Write-Host '> pnpm exec viberevert mcp serve (System.Diagnostics.Process; pre-buffered stdin + StandardInput.Close() FIN; 30s timeout with /T /F tree-kill; concurrent stdout/stderr drain)'
+
+        $mcpTimeoutMs = 30000
+
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $env:ComSpec
+        $psi.Arguments = '/c pnpm exec viberevert mcp serve'
+        $psi.RedirectStandardInput = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $psi.WorkingDirectory = (Get-Location).Path
+
+        $proc = New-Object System.Diagnostics.Process
+        $proc.StartInfo = $psi
+        $null = $proc.Start()
+
+        # Write the 7-frame input body, then Close to send FIN. try/finally
+        # ensures Close() runs even if Write throws (e.g., child crashed
+        # mid-write); without the Close FIN, WaitForExit would always
+        # time out.
+        try {
+            $proc.StandardInput.Write($mcpInputBody)
+        } finally {
+            $proc.StandardInput.Close()
+        }
+
+        # Drain BOTH output streams concurrently into in-memory buffers
+        # (concurrent drain prevents pipe-buffer deadlock if the child
+        # writes >4KB to either stream before exit -- Windows pipe
+        # buffer is 4KB).
+        $stdoutMs = New-Object System.IO.MemoryStream
+        $stderrMs = New-Object System.IO.MemoryStream
+        $timedOut = $false
+
+        try {
+            $stdoutTask = $proc.StandardOutput.BaseStream.CopyToAsync($stdoutMs)
+            $stderrTask = $proc.StandardError.BaseStream.CopyToAsync($stderrMs)
+
+            if (-not $proc.WaitForExit($mcpTimeoutMs)) {
+                $timedOut = $true
+                # Kill the full cmd -> pnpm -> node process tree on
+                # Windows. /T = tree kill (children too); /F = force
+                # (don't ask for graceful close). Required because cmd
+                # spawns pnpm.cmd which spawns node -- killing just
+                # $proc (the cmd) leaves pnpm + node as orphans.
+                & taskkill /PID $proc.Id /T /F | Out-Null
+                $null = $proc.WaitForExit(5000)
+            }
+
+            # Bounded drain wait (5s) -- if the kill-tree didn't release
+            # the pipe handles cleanly, we still proceed with whatever
+            # was captured rather than hanging.
+            $null = $stdoutTask.Wait(5000)
+            $null = $stderrTask.Wait(5000)
+
+            $mcpExitCode = $proc.ExitCode
+            $stdoutBytes = $stdoutMs.ToArray()
+            $stderrBytes = $stderrMs.ToArray()
+        } finally {
+            $stdoutMs.Dispose()
+            $stderrMs.Dispose()
+            $proc.Dispose()
+        }
+
+        # Decode UTF-8 (no BOM) bytes -> string. Persist to the temp
+        # files for diagnostic inspection (Path A: $mcpInputFile retained
+        # as the exact bytes sent; output/stderr captured here for
+        # post-mortem; -KeepArtifacts preserves all of them on failure).
+        $utf8Reader = [System.Text.UTF8Encoding]::new($false)
+        $mcpStdoutText = $utf8Reader.GetString($stdoutBytes)
+        $mcpStderr = $utf8Reader.GetString($stderrBytes)
+        [System.IO.File]::WriteAllText($mcpOutputFile, $mcpStdoutText, $utf8NoBomMcp)
+        [System.IO.File]::WriteAllText($mcpStderrFile, $mcpStderr, $utf8NoBomMcp)
+        # Split on LF (UTF-8 LF only, matching the server's stdio output;
+        # the SDK does not emit CRLF). Filter empty trailing line.
+        $mcpStdout = @($mcpStdoutText -split "`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+
+        # Timeout check FIRST -- clear, distinct error before the
+        # exit-code check would surface a less-helpful "non-zero exit"
+        # message. On timeout, the process tree was killed so the exit
+        # code reflects the kill, not a graceful exit.
+        if ($timedOut) {
+            throw "Phase 12f: MCP server timed out after ${mcpTimeoutMs}ms (bounded execution; killed cmd -> pnpm -> node process tree via taskkill /T /F).`nStderr:`n$mcpStderr`nStdout:`n$($mcpStdout -join `"`n`")"
+        }
+
+        if ($mcpExitCode -ne 0) {
+            throw "Phase 12f: MCP server exited $mcpExitCode (expected 0).`nStderr:`n$mcpStderr`nStdout:`n$($mcpStdout -join `"`n`")"
+        }
+        if (-not [string]::IsNullOrWhiteSpace($mcpStderr)) {
+            throw "Phase 12f: expected EMPTY stderr on successful MCP serve (D99.M.14 -- the mcp library MUST NOT write to process.stderr; CLI MCPCommand only writes stderr on failure paths). Got:`n$mcpStderr"
+        }
+        Write-Host '[ok] Phase 12f: MCP server exited 0; stderr empty (D99.M.14 byte-channel discipline verified)'
+
+        # === Parse responses: STRICT (fail on non-JSON, missing id, dup id, unexpected id) ===
+        # Any non-JSON line on MCP stdout is protocol corruption per D99.D
+        # (stdio IS the JSON-RPC byte channel). Hard failure -- do NOT
+        # silently skip. Same for responses without id (smoke does not
+        # expect server-initiated notifications) and for any id outside
+        # the expected 1..6 set.
+        $expectedIds = @(1, 2, 3, 4, 5, 6)
+        $mcpResponses = @{}
+        foreach ($line in @($mcpStdout)) {
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            try {
+                $parsed = $line | ConvertFrom-Json
+            } catch {
+                throw "Phase 12f: non-JSON line on MCP stdout (protocol corruption per D99.D -- stdio must be pure JSON-RPC frames): '$line'. Full stdout:`n$($mcpStdout -join `"`n`")"
+            }
+            if ($null -eq $parsed.id) {
+                throw "Phase 12f: JSON-RPC frame without id field on stdout (smoke does NOT expect server-initiated notifications). Frame: '$line'"
+            }
+            $idInt = [int]$parsed.id
+            if ($expectedIds -notcontains $idInt) {
+                throw "Phase 12f: unexpected JSON-RPC response id=$idInt (expected one of $($expectedIds -join ',')). Full stdout:`n$($mcpStdout -join `"`n`")"
+            }
+            if ($mcpResponses.ContainsKey($idInt)) {
+                throw "Phase 12f: duplicate JSON-RPC response id=$idInt. Full stdout:`n$($mcpStdout -join `"`n`")"
+            }
+            $mcpResponses[$idInt] = $parsed
+        }
+        foreach ($id in $expectedIds) {
+            if (-not $mcpResponses.ContainsKey($id)) {
+                throw "Phase 12f: missing JSON-RPC response id=$id. Got ids: $($mcpResponses.Keys -join ','). Full stdout:`n$($mcpStdout -join `"`n`")"
+            }
+        }
+        Write-Host "[ok] Phase 12f: parsed exactly 6 JSON-RPC responses (ids 1..6 present; no dupes, no extras, no non-JSON lines on stdout)"
+
+        # === All 6 responses must be JSON-RPC SUCCESS envelopes (no top-level `error`) ===
+        # Cat 2 denials use result.isError=true on a JSON-RPC SUCCESS
+        # envelope per D99.O, NOT a JSON-RPC error envelope (-32602/-32603
+        # in the top-level error field). The top-level `error` field is
+        # reserved for Cat 4 (server-integrity throws via McpError). A
+        # regression that converted Cat 2 -> Cat 4 would silently break
+        # SDK client compatibility; this assertion is the wall.
+        foreach ($id in $expectedIds) {
+            if ($null -ne $mcpResponses[$id].error) {
+                throw "Phase 12f id=${id}: expected JSON-RPC success envelope (no top-level 'error' field per D99.O -- Cat 2 denials use result.isError=true on success envelope, NOT JSON-RPC error envelope; top-level error is reserved for Cat 4 integrity throws). Got error: $($mcpResponses[$id].error | ConvertTo-Json -Compress -Depth 10)"
+            }
+        }
+        Write-Host '[ok] Phase 12f: all 6 responses are JSON-RPC success envelopes (no top-level error; Cat 2 vs Cat 4 distinction preserved per D99.O)'
+
+        # === id=1 initialize: protocolVersion locked at "2025-06-18" (D99.Y) ===
+        $initResp = $mcpResponses[1]
+        if ($initResp.result.protocolVersion -ne '2025-06-18') {
+            throw "Phase 12f id=1 initialize: expected protocolVersion='2025-06-18' (D99.Y), got '$($initResp.result.protocolVersion)'"
+        }
+        Write-Host '[ok] Phase 12f id=1 initialize: protocolVersion=2025-06-18 (D99.Y locked)'
+
+        # === id=2 tools/list: 8 tools in D99.A order; both reserved names absent (D99.B) ===
+        $listResp = $mcpResponses[2]
+        $expectedTools = @(
+            'check_repo','explain_diff','classify_risk','list_risky_files','get_policy',
+            'start_session','create_checkpoint','generate_fix_prompt'
+        )
+        $actualTools = @($listResp.result.tools | ForEach-Object { $_.name })
+        if ($actualTools.Count -ne 8) {
+            throw "Phase 12f id=2 tools/list: expected 8 tools, got $($actualTools.Count): $($actualTools -join ',')"
+        }
+        for ($i = 0; $i -lt 8; $i++) {
+            if ($actualTools[$i] -ne $expectedTools[$i]) {
+                throw "Phase 12f id=2 tools/list: tool[$i] expected '$($expectedTools[$i])', got '$($actualTools[$i])' (D99.A order lock)"
+            }
+        }
+        foreach ($r in @('rollback', 'request_human_approval')) {
+            if ($actualTools -contains $r) {
+                throw "Phase 12f id=2 tools/list: reserved name '$r' MUST NOT appear in tools/list (D99.B)"
+            }
+        }
+        Write-Host '[ok] Phase 12f id=2 tools/list: 8 tools in D99.A order; both reserved names absent (D99.B)'
+
+        # === id=3 tools/call get_policy: Cat 1 success per D99.O ===
+        $getPolicyResp = $mcpResponses[3]
+        if ($getPolicyResp.result.isError) {
+            throw "Phase 12f id=3 get_policy: expected isError absent/false (Cat 1 success), got isError=$($getPolicyResp.result.isError). Response: $($getPolicyResp | ConvertTo-Json -Compress -Depth 10)"
+        }
+        if (-not $getPolicyResp.result.structuredContent.ok) {
+            throw "Phase 12f id=3 get_policy: expected structuredContent.ok=true, got: $($getPolicyResp.result.structuredContent | ConvertTo-Json -Compress -Depth 10)"
+        }
+        if ($null -eq $getPolicyResp.result.structuredContent.data.risk.block_on) {
+            throw "Phase 12f id=3 get_policy: expected data.risk.block_on present (loaded from .viberevert.yml), got: $($getPolicyResp.result.structuredContent.data | ConvertTo-Json -Compress -Depth 10)"
+        }
+        Write-Host '[ok] Phase 12f id=3 get_policy: Cat 1 success; structuredContent.ok=true; data.risk.block_on present'
+
+        # === id=4..6 tools/call denials: Cat 2 shape per D99.O + R31 ===
+        # All three denials must have IDENTICAL Cat 2 wire shape (no leak
+        # distinguishing reserved from unknown per D99.B). Assert-Cat2Shape
+        # locks the full shape per call.
+        Assert-Cat2Shape -Resp $mcpResponses[4] -IdLabel '4' -ProbeName 'rollback' -ExpectedText $expectedDeniedText
+        Write-Host '[ok] Phase 12f id=4 rollback: Cat 2 reserved-denial wire shape locked (D99.O + R31)'
+        Assert-Cat2Shape -Resp $mcpResponses[5] -IdLabel '5' -ProbeName 'request_human_approval' -ExpectedText $expectedDeniedText
+        Write-Host '[ok] Phase 12f id=5 request_human_approval: Cat 2 reserved-denial wire shape locked (D99.R BOTH reserved names probed)'
+        Assert-Cat2Shape -Resp $mcpResponses[6] -IdLabel '6' -ProbeName 'made_up_tool' -ExpectedText $expectedDeniedText
+        Write-Host '[ok] Phase 12f id=6 made_up_tool: Cat 2 unknown-denial wire shape IDENTICAL to reserved (no leak per D99.B)'
+
+        # === R31 raw-name absence in id=6 response (full-JSON substring scan) ===
+        # The raw unknown name "made_up_tool" MUST NOT appear ANYWHERE in
+        # the id=6 response JSON (not in text, not in any nested field).
+        # R31 contract: arbitrary unknown names are NEVER reflected.
+        $id6Json = ($mcpResponses[6] | ConvertTo-Json -Compress -Depth 10)
+        if ($id6Json.Contains('made_up_tool')) {
+            throw "Phase 12f id=6 made_up_tool: raw unknown name leaked into response JSON (R31 violation -- arbitrary unknown names MUST NOT be reflected in any response field). Response: $id6Json"
+        }
+        Write-Host '[ok] Phase 12f id=6: raw unknown name made_up_tool NOT in response JSON (R31 reflection lock)'
+
+        # === Audit log: 4 NDJSON records per D99.J locked shapes + R31 sentinel ===
+        # Selected BY SHAPE (not array index) because JSON-RPC dispatch is
+        # async (R27) and audit-write completion order may differ from
+        # request input order, especially since get_policy (real loadConfig
+        # IO) may complete after the Cat 2 string-compare denials.
+        if (-not (Test-Path $mcpAuditPath)) {
+            throw "Phase 12f audit: expected $mcpAuditPath to exist after MCP serve invocation"
+        }
+        $auditLines = @(Get-Content -Path $mcpAuditPath -Encoding UTF8 | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        if ($auditLines.Count -ne 4) {
+            throw "Phase 12f audit: expected exactly 4 NDJSON records, got $($auditLines.Count). Records:`n$($auditLines -join `"`n---`n`")"
+        }
+        $auditRecords = @($auditLines | ForEach-Object { $_ | ConvertFrom-Json })
+
+        # Select each record by SHAPE via predicate (event + tool_name + reserved)
+        $r1 = Select-SingleAuditRecord -Records $auditRecords -Label 'tool_call ok:true get_policy' `
+            -Predicate { $_.event -eq 'tool_call' -and $_.tool_name -eq 'get_policy' }
+        $r2 = Select-SingleAuditRecord -Records $auditRecords -Label 'tool_call_denied rollback (reserved)' `
+            -Predicate { $_.event -eq 'tool_call_denied' -and $_.tool_name -eq 'rollback' }
+        $r3 = Select-SingleAuditRecord -Records $auditRecords -Label 'tool_call_denied request_human_approval (reserved)' `
+            -Predicate { $_.event -eq 'tool_call_denied' -and $_.tool_name -eq 'request_human_approval' }
+        $r4 = Select-SingleAuditRecord -Records $auditRecords -Label 'tool_call_denied <unknown> (R31 sentinel)' `
+            -Predicate { $_.event -eq 'tool_call_denied' -and $_.tool_name -eq '<unknown>' -and $_.reserved -eq $false }
+
+        # ----- $r1 field-order + value assertions -----
+        # Locked field order (verified against packages/mcp/src/audit.ts
+        # L237): schema_version, event, ts, tool_name, ok, exit_code,
+        # duration_ms. schema_version is the writer-injected header
+        # field FIRST in every record.
+        $expectedR1Keys = @('schema_version','event','ts','tool_name','ok','exit_code','duration_ms')
+        $r1Keys = @($r1.PSObject.Properties.Name)
+        if (($r1Keys -join ',') -ne ($expectedR1Keys -join ',')) {
+            throw "Phase 12f audit r1 (get_policy): field order expected '$($expectedR1Keys -join ',')', got '$($r1Keys -join ',')' (D99.J locked field order)"
+        }
+        if ($r1.ok -ne $true) { throw "Phase 12f audit r1 (get_policy): ok expected true, got '$($r1.ok)'" }
+        if ($r1.exit_code -ne 0) { throw "Phase 12f audit r1 (get_policy): exit_code expected 0, got '$($r1.exit_code)'" }
+        Write-Host '[ok] Phase 12f audit r1 (get_policy): tool_call ok:true exit:0 (D99.J field order locked)'
+
+        # ----- $r2 + $r3 field-order + value assertions (reserved-denied shape) -----
+        # Locked field order (verified against packages/mcp/src/audit.ts
+        # L267): schema_version, event, ts, tool_name, ok, error_code,
+        # reserved, exposed, reason. R31: reserved names ARE in
+        # RESERVED_TOOL_NAMES -- audit echoes the sanitized name
+        # verbatim (already verified by Select predicate).
+        $expectedReservedKeys = @('schema_version','event','ts','tool_name','ok','error_code','reserved','exposed','reason')
+        foreach ($pair in @(@{rec=$r2; label='rollback'}, @{rec=$r3; label='request_human_approval'})) {
+            $rec = $pair.rec
+            $recKeys = @($rec.PSObject.Properties.Name)
+            if (($recKeys -join ',') -ne ($expectedReservedKeys -join ',')) {
+                throw "Phase 12f audit ($($pair.label)): field order expected '$($expectedReservedKeys -join ',')', got '$($recKeys -join ',')' (D99.J locked field order)"
+            }
+            if ($rec.ok -ne $false) { throw "Phase 12f audit ($($pair.label)): ok expected false, got '$($rec.ok)'" }
+            if ($rec.error_code -ne 'TOOL_NOT_FOUND') { throw "Phase 12f audit ($($pair.label)): error_code expected 'TOOL_NOT_FOUND', got '$($rec.error_code)'" }
+            if ($rec.reserved -ne $true) { throw "Phase 12f audit ($($pair.label)): reserved expected true, got '$($rec.reserved)'" }
+            if ($rec.exposed -ne $false) { throw "Phase 12f audit ($($pair.label)): exposed expected false, got '$($rec.exposed)'" }
+            if ($rec.reason -ne 'reserved_approval_gated_not_exposed') { throw "Phase 12f audit ($($pair.label)): reason expected 'reserved_approval_gated_not_exposed', got '$($rec.reason)'" }
+        }
+        Write-Host '[ok] Phase 12f audit r2 (rollback) + r3 (request_human_approval): tool_call_denied reserved:true reason locked (D99.J field order; R31 verbatim echo)'
+
+        # ----- $r4 field-order + value assertions (unknown-denied shape; R31 sentinel) -----
+        # Locked field order (verified against packages/mcp/src/audit.ts):
+        # schema_version, event, ts, tool_name, ok, error_code, reserved,
+        # exposed (NO 'reason' for unknown-denied). R31 SENTINEL:
+        # tool_name="<unknown>" (already verified by Select predicate);
+        # arbitrary unknown names MUST NOT be echoed in audit.
+        $expectedUnknownKeys = @('schema_version','event','ts','tool_name','ok','error_code','reserved','exposed')
+        $r4Keys = @($r4.PSObject.Properties.Name)
+        if (($r4Keys -join ',') -ne ($expectedUnknownKeys -join ',')) {
+            throw "Phase 12f audit r4 (<unknown>): field order expected '$($expectedUnknownKeys -join ',')', got '$($r4Keys -join ',')' (D99.J unknown-denied has NO 'reason' field)"
+        }
+        if ($r4.PSObject.Properties.Name -contains 'reason') {
+            throw "Phase 12f audit r4 (<unknown>): 'reason' field MUST be absent for unknown-denial (D99.J)"
+        }
+        Write-Host '[ok] Phase 12f audit r4 (<unknown>): tool_call_denied reserved:false NO reason (R31 sentinel via Select predicate)'
+
+        # === Cross-record audit invariants ===
+        $auditFullText = ($auditLines -join "`n")
+        # 1. No raw arguments anywhere (D99.J -- never log args).
+        foreach ($tok in @('"input"', '"args"', '"arguments"')) {
+            if ($auditFullText.Contains($tok)) {
+                throw "Phase 12f audit: forbidden token '$tok' found in audit log (D99.J -- raw arguments MUST NEVER be logged). Full audit:`n$auditFullText"
+            }
+        }
+        Write-Host '[ok] Phase 12f audit cross-record: NO input/args/arguments tokens (D99.J never-log-args)'
+
+        # 2. R31 sentinel substitution verified at byte level: raw unknown
+        # name 'made_up_tool' MUST NOT appear anywhere in the audit log
+        # (sentinel '<unknown>' replaces it at write time).
+        if ($auditFullText.Contains('made_up_tool')) {
+            throw "Phase 12f audit cross-record: raw unknown name 'made_up_tool' leaked into audit log (R31 violation -- sentinel '<unknown>' MUST replace arbitrary unknown names). Full audit:`n$auditFullText"
+        }
+        Write-Host '[ok] Phase 12f audit cross-record: raw unknown name made_up_tool NOT in audit (R31 sentinel substitution verified at byte level)'
+
+        Write-Host '[ok] Phase 12f: ALL probes + audit assertions green (6 JSON-RPC responses + 4 audit records; BOTH reserved names probed; R31 sentinel + reflection locks; no leak between reserved/unknown response or audit shapes; empty stderr per D99.M.14)'
+
+        # === Cleanup: remove all 4 Phase 12f temp files before Phase 12b-last ===
+        # Phase 12b-last operates on a clean state. We do NOT remove
+        # .viberevert/ because earlier phases populated it (e.g., 12c
+        # session artifacts).
+        foreach ($p in @($mcpInputFile, $mcpOutputFile, $mcpStderrFile, $mcpAuditPath)) {
+            Remove-Item -Force $p -ErrorAction SilentlyContinue
+        }
 
         Write-Section 'M C 12b: missing config (LAST scenario - corrupts state for any later steps)'
         Remove-Item -Force '.viberevert.yml'

@@ -740,6 +740,72 @@ export async function startServer(opts: { cwd: string }): Promise<void> {
   const registrationsByName = buildRegistrationsByName();
   const shutdown = createShutdownController();
 
+  // In-flight handler tracking for stdin-EOF shutdown.
+  //
+  // Three concerns layered:
+  //   (a) EOF MUST NOT signal graceful while a handler is mid-flight
+  //       (Phase 12f smoke proved get_policy can be in-flight when
+  //       stdin EOF arrives -- async dispatch, real loadConfig fs IO
+  //       + audit-record serialization).
+  //   (b) Even when activeHandlers reaches 0, the SDK has NOT YET
+  //       written the JSON-RPC response: the SDK serializes + writes
+  //       AFTER the handler Promise resolves, so trackHandler's
+  //       finally block runs BEFORE the write completes.
+  //       signalGraceful synchronously here would race server.close()
+  //       against the SDK's pending write. setImmediate defers by
+  //       one macrotask -- the SDK's continuation runs in the
+  //       interim, flushes the response, THEN the deferred check
+  //       fires signalGraceful.
+  //   (c) Buffered requests parsed-but-not-dispatched when EOF
+  //       arrives can still start a new handler between schedule
+  //       and fire. The re-check inside setImmediate handles this:
+  //       if activeHandlers > 0 at fire time, the signal is
+  //       suppressed; the next handler's finally re-schedules.
+  //
+  // signalGraceful is idempotent; once stdinGracefulScheduled is
+  // set, additional schedule calls are no-ops until the queued
+  // setImmediate fires.
+  let stdinClosed = false;
+  let activeHandlers = 0;
+  let stdinGracefulScheduled = false;
+
+  const scheduleMaybeSignalStdinGraceful = (): void => {
+    if (!stdinClosed || activeHandlers !== 0 || stdinGracefulScheduled) {
+      return;
+    }
+    stdinGracefulScheduled = true;
+    setImmediate(() => {
+      stdinGracefulScheduled = false;
+      // Re-check at fire time -- a new handler may have started
+      // between schedule and fire (buffered request dispatched mid-
+      // defer). Suppress signal in that case; the next handler's
+      // finally re-schedules.
+      if (stdinClosed && activeHandlers === 0) {
+        shutdown.signalGraceful();
+      }
+    });
+  };
+
+  const onStdinClosed = (): void => {
+    stdinClosed = true;
+    scheduleMaybeSignalStdinGraceful();
+  };
+
+  // fn is `() => T | Promise<T>` (not strictly Promise) because
+  // dispatchToolsList / dispatchToolsCall return their result types
+  // directly (sync). `await fn()` unwraps both sync values and
+  // Promises uniformly; the outer async wrapping always returns
+  // Promise<T> for the SDK's setRequestHandler contract.
+  const trackHandler = async <T>(fn: () => T | Promise<T>): Promise<T> => {
+    activeHandlers++;
+    try {
+      return await fn();
+    } finally {
+      activeHandlers--;
+      scheduleMaybeSignalStdinGraceful();
+    }
+  };
+
   const deps: DispatcherDeps = {
     audit,
     repoRoot,
@@ -762,16 +828,45 @@ export async function startServer(opts: { cwd: string }): Promise<void> {
   server.onclose = () => shutdown.signalGraceful();
   server.onerror = (err) => shutdown.signalUnhealthy("MCP server transport error", err);
 
+  // Stdin-EOF shutdown handlers registered BEFORE server.connect so
+  // they're in place before the SDK's transport begins consuming
+  // stdin. Discovered by Phase 12f smoke: the SDK's low-level
+  // Server + StdioServerTransport does NOT fire server.onclose on
+  // stdin EOF on the platforms / process-wrapper combinations we
+  // target. Without these handlers, startServer's await stays
+  // pending after stdin EOF until SIGINT/SIGTERM arrives or Node 22
+  // force-exits the deadlock (exit code 13).
+  //
+  // Listen to BOTH 'end' (clean EOF) AND 'close' (stream destroyed)
+  // -- defense-in-depth for Windows/shell/wrapper variations.
+  // Pre-connect placement closes the small window during
+  // `await server.connect(transport)` where the SDK is wiring up
+  // but EOF could already arrive. Cleanup runs in BOTH the boot-
+  // failure catch AND the normal-shutdown finally below; those
+  // paths are mutually exclusive so handlers are removed exactly
+  // once.
+  process.stdin.once("end", onStdinClosed);
+  process.stdin.once("close", onStdinClosed);
+
   try {
-    server.setRequestHandler(ListToolsRequestSchema, async () => dispatchToolsList(deps));
+    server.setRequestHandler(ListToolsRequestSchema, async () =>
+      trackHandler(() => dispatchToolsList(deps)),
+    );
     server.setRequestHandler(CallToolRequestSchema, async (req) =>
-      dispatchToolsCall({ name: req.params.name, arguments: req.params.arguments }, deps),
+      trackHandler(() =>
+        dispatchToolsCall({ name: req.params.name, arguments: req.params.arguments }, deps),
+      ),
     );
     await server.connect(transport);
   } catch (err) {
     // SDK wiring failure: close audit (best-effort -- the boot
     // outcome is already determined) then wrap as McpBootError. The
     // audit FH would otherwise leak across the failed boot.
+    // Also remove the pre-connect stdin handlers so they don't leak
+    // across a retried startServer call in the same process (test
+    // suites that exercise boot-failure paths and then retry).
+    process.stdin.off("end", onStdinClosed);
+    process.stdin.off("close", onStdinClosed);
     try {
       await audit.close();
     } catch {
@@ -800,6 +895,12 @@ export async function startServer(opts: { cwd: string }): Promise<void> {
     // outcome (graceful or McpBootError) is what the caller sees.
     process.off("SIGINT", onSignal);
     process.off("SIGTERM", onSignal);
+    // Mirror cleanup for stdin handlers (the boot-success path).
+    // The boot-failure path (catch above) removes them before throw;
+    // these two paths are mutually exclusive so handlers are
+    // removed exactly once.
+    process.stdin.off("end", onStdinClosed);
+    process.stdin.off("close", onStdinClosed);
     try {
       await server.close();
     } catch {

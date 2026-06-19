@@ -13,6 +13,7 @@ export default defineProject({
       ),
       "@viberevert/core": fileURLToPath(new URL("../core/src/index.ts", import.meta.url)),
       "@viberevert/git": fileURLToPath(new URL("../git/src/index.ts", import.meta.url)),
+      "@viberevert/mcp": fileURLToPath(new URL("../mcp/src/index.ts", import.meta.url)),
       "@viberevert/reporters": fileURLToPath(new URL("../reporters/src/index.ts", import.meta.url)),
       "@viberevert/session-format": fileURLToPath(
         new URL("../session-format/src/index.ts", import.meta.url),

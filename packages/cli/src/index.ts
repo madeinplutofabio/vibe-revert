@@ -21,6 +21,8 @@ import {
 import { Builtins, Cli } from "clipanion";
 import pkg from "../package.json" with { type: "json" };
 
+import { MCPCommand } from "./commands/mcp.js";
+
 const cli = new Cli({
   binaryName: "viberevert",
   binaryLabel: "VibeRevert",
@@ -42,5 +44,6 @@ cli.register(PromptFixCommand);
 cli.register(RollbackCommand);
 cli.register(HookInstallCommand);
 cli.register(HookUninstallCommand);
+cli.register(MCPCommand);
 
 await cli.runExit(process.argv.slice(2));

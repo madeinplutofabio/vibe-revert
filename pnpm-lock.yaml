@@ -47,6 +47,9 @@ importers:
       '@viberevert/cli-commands':
         specifier: workspace:*
         version: link:../cli-commands
+      '@viberevert/mcp':
+        specifier: workspace:*
+        version: link:../mcp
       clipanion:
         specifier: 3.2.1
         version: 3.2.1
