@@ -2769,6 +2769,149 @@ describe("Architectural invariants -- M G1a Step 2 D99.M @viberevert/mcp boundar
   });
 
   // ===========================================================================
+  // D99.M.5 -- No M G1b platform-integration imports
+  //            (adapter/installer/platform tokens; workspace OR local-path)
+  // ===========================================================================
+
+  it("D99.M.5: packages/mcp/src/** does NOT import M G1b adapter/installer/platform-integration code (workspace specifiers OR local-path segment tokens with extension normalization)", () => {
+    // Per the M G1a plan, packages/mcp must NOT depend on the husky/
+    // lefthook adapter engines, the install orchestration engine, or
+    // any platform-specific integration code. Those are M G1b scope
+    // (`@viberevert/adapters`, `@viberevert/installers`). Enforced
+    // along TWO independent axes via a single capture loop:
+    //
+    //   Axis 1 (workspace specifiers): forbids `@viberevert/adapters`
+    //     and `@viberevert/installers`, both exact match AND subpath
+    //     forms (`@viberevert/adapters/foo`). Catches the direct
+    //     `import { X } from "@viberevert/adapters"` attempt and the
+    //     less-obvious `import "@viberevert/installers/side-effect"`
+    //     form.
+    //
+    //   Axis 2 (local-path segment tokens, EXTENSION-NORMALIZED):
+    //     forbids RELATIVE imports where any path segment (after
+    //     stripping a trailing `.<ext>`) matches the explicit token
+    //     set. Extension normalization is critical because ESM/TS
+    //     compiled imports include extensions (`./platform.js`,
+    //     `./adapters.ts`, `../installers.mjs`); raw segment matching
+    //     would miss those bypasses.
+    //
+    //     Match semantics (after normalization):
+    //       - `./platform.js`        -> "platform"           MATCH
+    //       - `./platform-hook.js`   -> "platform-hook"      no match
+    //       - `./reporters`          -> "reporters"          no match
+    //       - `../installers/foo`    -> ["..","installers","foo"]  MATCH (installers)
+    //       - `./adapter.cjs`        -> "adapter"            MATCH (singular)
+    //       - `./platform-integration.ts` -> "platform-integration"  MATCH
+    //
+    //     Defense-in-depth: mcp/src does not currently have any of
+    //     these subdirectories; a future contributor adding one and
+    //     importing from it would still violate the M G1a boundary
+    //     even if no workspace dep was added.
+    //
+    // Allowlist is EXPLICIT (small named sets) rather than broad
+    // pattern allowance -- each new exception requires a deliberate
+    // edit to this test, not silent absorption by a permissive regex.
+    //
+    // Import-form coverage: a single capture-group regex covers
+    // import/export-from, dynamic `import()`, `require()`, TS
+    // `import = require()`, and side-effect `import "..."`. The
+    // `from\s+["']` arm catches BOTH `import X from "Y"` AND
+    // `export X from "Y"` (re-export from a forbidden module is
+    // also a violation). Type-only imports
+    // (`import type {} from "..."` / `export type {} from "..."`)
+    // are caught regardless of the leading `type` keyword -- even
+    // type-level coupling to platform-integration code is a smell
+    // at this boundary.
+    //
+    // Source pre-stripped via stripTsComments so comment-line
+    // mentions of forbidden specifiers do not false-positive.
+    const FORBIDDEN_WORKSPACE_PACKAGES = [
+      "@viberevert/adapters",
+      "@viberevert/installers",
+    ] as const;
+    // Explicit named token set covering singular + plural forms +
+    // platform-integration variants. Singular catches `./adapter.js`
+    // (a contributor naming the file in singular); plural catches
+    // `./adapters/foo`; -integration variants close the explicit
+    // sibling spelling.
+    const FORBIDDEN_LOCAL_PATH_TOKENS = [
+      "adapter",
+      "adapters",
+      "installer",
+      "installers",
+      "platform",
+      "platforms",
+      "platform-integration",
+      "platform-integrations",
+    ] as const;
+
+    // Capture group 1 = the unquoted import specifier string. Five
+    // alternations cover the import forms; each captures the
+    // specifier via the shared trailing `["']([^"']+)["']`.
+    const IMPORT_SPECIFIER_RE =
+      /(?:from\s+|import\s*\(\s*|require\s*\(\s*|import\s+\w+\s*=\s*require\s*\(\s*|import\s+)["']([^"']+)["']/g;
+
+    // Extension stripper: removes the LAST `.<ext>` from a basename.
+    // `platform.js`        -> `platform`
+    // `platform-hook.js`   -> `platform-hook`
+    // `foo.d.ts`           -> `foo.d`        (intentional; .d.ts not a concern here)
+    // `platform`           -> `platform`     (no-op on extensionless)
+    // `.platform`          -> ``             (dotfile basename collapses; edge case)
+    const stripExt = (segment: string): string => segment.replace(/\.[^.]+$/, "");
+
+    for (const { abs, rel } of mcpSrcTsFiles()) {
+      const source = stripTsComments(readFileSync(abs, "utf8"));
+      const lines = source.split("\n");
+      const offenders: Array<{
+        readonly lineNumber: number;
+        readonly specifier: string;
+        readonly reason: string;
+      }> = [];
+
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i] ?? "";
+        for (const match of line.matchAll(IMPORT_SPECIFIER_RE)) {
+          const specifier = match[1] ?? "";
+
+          // Axis 1: workspace-package specifier (exact OR subpath).
+          for (const pkg of FORBIDDEN_WORKSPACE_PACKAGES) {
+            if (specifier === pkg || specifier.startsWith(`${pkg}/`)) {
+              offenders.push({
+                lineNumber: i + 1,
+                specifier,
+                reason: `forbidden workspace package "${pkg}" (M G1a boundary; adapter/installer engines are M G1b scope)`,
+              });
+            }
+          }
+
+          // Axis 2: relative import with a forbidden whole-segment
+          // token (extension-normalized). Only relative specifiers
+          // (`./...` or `../...`) are checked; bare-package
+          // specifiers like "adapters-extra" or "@scope/adapters"
+          // do not trigger.
+          if (specifier.startsWith("./") || specifier.startsWith("../")) {
+            const segments = specifier.split("/").map(stripExt);
+            for (const token of FORBIDDEN_LOCAL_PATH_TOKENS) {
+              if (segments.includes(token)) {
+                offenders.push({
+                  lineNumber: i + 1,
+                  specifier,
+                  reason: `forbidden local-path segment "${token}" after extension-stripping (M G1a boundary defense-in-depth; no adapter/installer/platform subdirs or files in packages/mcp/src/**)`,
+                });
+              }
+            }
+          }
+        }
+      }
+
+      expect(
+        offenders,
+        `${rel} must not import M G1b adapter/installer/platform-integration code in any form (D99.M.5 -- workspace specifiers ${JSON.stringify(FORBIDDEN_WORKSPACE_PACKAGES)} OR relative-path segment tokens ${JSON.stringify(FORBIDDEN_LOCAL_PATH_TOKENS)} after stripping the trailing extension). Offenders: ${JSON.stringify(offenders)}`,
+      ).toEqual([]);
+    }
+  });
+
+  // ===========================================================================
   // D99.M.6 -- @viberevert/core import carve-out (allowed core surface, exact equality)
   // ===========================================================================
 
