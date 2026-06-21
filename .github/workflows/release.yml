@@ -38,7 +38,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
         with:
-          fetch-depth: 0   # full history so annotated-tag check + future tag-aware logic work
+          fetch-depth: 0      # full history so annotated-tag check + future tag-aware logic work
+          fetch-tags: true    # request annotated tag objects, not just refs
+
+      - name: Fetch annotated release tag object
+        # actions/checkout@v5 can resolve a tag-triggered ref to a
+        # lightweight tag pointing at the commit even with
+        # fetch-depth: 0 + fetch-tags: true, losing the annotated
+        # metadata (tagger, message) the validate step needs to
+        # distinguish annotated from lightweight tags. This explicit
+        # fetch forces the annotated tag object to land in the
+        # runner's local refs/tags/<TAG>.
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+          git cat-file -t "refs/tags/${GITHUB_REF_NAME}"
 
       - name: Enable Corepack
         run: corepack enable
