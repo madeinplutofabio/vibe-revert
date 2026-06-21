@@ -1,7 +1,6 @@
 {
   "name": "@viberevert/mcp",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.7.0-beta.0",
   "type": "module",
   "license": "Apache-2.0",
   "author": "Fabio Marcello Salvadori <fabio@madeinpluto.com>",
