@@ -47,3 +47,30 @@ jobs:
 
       - name: Test
         run: pnpm test
+
+  release-dry-run:
+    name: Release dry-run (Windows, pack + smoke)
+    needs: build-and-test
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Enable Corepack (uses runner's system Node; provides pnpm)
+        run: corepack enable
+
+      - name: Set up Node 22 with pnpm cache
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Smoke (PowerShell 7+, pwsh)
+        run: pwsh -ExecutionPolicy Bypass -File scripts/smoke-test.ps1
+
+      - name: Smoke (Windows PowerShell 5.1, powershell.exe)
+        run: powershell.exe -ExecutionPolicy Bypass -File scripts/smoke-test.ps1
