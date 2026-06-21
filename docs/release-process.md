@@ -185,18 +185,37 @@ rg -P '[^\x00-\x7F]' scripts/smoke-test.ps1
 
 ## Publishing to npm
 
-VibeRevert publishes 8 packages to npm via the GitHub Actions release workflow ([`.github/workflows/release.yml`](../.github/workflows/release.yml)), triggered by an annotated tag push. Local `pnpm publish` is reserved for emergencies (see [Manual emergency publish](#manual-emergency-publish)).
+VibeRevert publishes 8 packages to npm via the GitHub Actions release workflow ([`.github/workflows/release.yml`](../.github/workflows/release.yml)), triggered by an annotated tag push. The workflow authenticates exclusively via npm **Trusted Publishers (OIDC)** -- no long-lived token is stored. Local `npm publish` is reserved for emergencies and requires its own auth path (see [Manual emergency publish](#manual-emergency-publish)).
 
-### NPM_TOKEN setup
+### Trusted Publisher setup
 
-The release workflow authenticates using a repository secret named `NPM_TOKEN`.
+Each of the 8 publish-target packages on npm has a per-package Trusted Publisher configuration linking the package to this repo's `release.yml` workflow. When the workflow publishes, npm CLI 11.5.1+ exchanges a GitHub Actions OIDC token for short-lived publish credentials -- no `NPM_TOKEN` secret is required or used.
 
-1. Sign in to npmjs.com with the publisher account.
-2. At https://www.npmjs.com/settings/<user>/tokens, create a **granular access token** scoped as narrowly as npm allows: publish + read access for the unscoped `viberevert` package and for the `@viberevert` scope (or explicitly for the seven `@viberevert/*` packages if the npm UI requires package-by-package selection).
-3. In GitHub repo Settings → Secrets and variables → Actions, create a secret named `NPM_TOKEN` with the token value.
-4. Verify: `gh secret list --repo madeinplutofabio/vibe-revert` should show `NPM_TOKEN`.
+#### Prerequisite: 0.0.0 placeholder bootstrap
 
-The workflow's first publish-phase step asserts the secret exists AND runs `npm whoami` to confirm authentication before any `pnpm publish` invocation.
+npm's Trusted Publisher UI requires the package to exist before its access page is reachable. For each of the 8 publish-target packages, a one-time `0.0.0` placeholder must be published first via a non-OIDC auth path, such as interactive `npm login` or a granular access token, followed by `npm publish --access public`. After that single bootstrap, the package's Settings → Access page becomes available and Trusted Publisher can be configured.
+
+This bootstrap has been done for all 8 packages (`viberevert@0.0.0` + `@viberevert/{session-format,core,git,checks,reporters,cli-commands,mcp}@0.0.0` exist on npm). Any future new package requires its own bootstrap before it can join the OIDC publish flow.
+
+#### Per-package Trusted Publisher configuration
+
+For each of the 8 packages, on its npm Settings → Access page:
+
+1. Under "Trusted Publisher", select **GitHub Actions**.
+2. Configure:
+   - **Repository owner**: `madeinplutofabio`
+   - **Repository name**: `vibe-revert`
+   - **Workflow filename**: `release.yml`
+   - **Environment**: (leave blank)
+3. Save. The publisher policy takes effect immediately for subsequent publishes.
+
+Verification: all 8 packages must show the configured Trusted Publisher block before the release workflow can publish. The workflow has no `NPM_TOKEN` fallback; missing or mis-configured Trusted Publisher on any single package fails that package's `npm publish` step.
+
+#### Publishing access posture
+
+Per-package "Publishing access" should be set to **"Require two-factor authentication and disallow tokens (recommended)"** for production safety. This forces all publishes through Trusted Publishers and removes the token-bypass path entirely. The release workflow operates correctly under this strict posture (no token is involved).
+
+Manual emergency publish requires temporarily relaxing this setting; see [Manual emergency publish](#manual-emergency-publish).
 
 ### Tag-driven publish flow
 
@@ -221,11 +240,11 @@ The `publish` job performs (in order, fail-fast):
 - Tag regex validation (beta-only)
 - Annotated-tag enforcement via `git cat-file -t <tag>` (must be `"tag"`, not `"commit"`)
 - Cross-package version assertion (all 8 publish targets must equal tag suffix; 4 private packages must remain `private: true` at `0.0.0`)
-- `NPM_TOKEN` existence + `npm whoami`
+- npm CLI + Node version verification (npm `>= 11.5.1`, Node `>= 22.14.0` -- required by npm Trusted Publishing)
 - Full 4-gate: typecheck + lint + test + build
-- Pack 8 publish-target tarballs (asserts directory → package-name mapping; asserts count == 8)
+- Pack 8 publish-target tarballs via `pnpm pack` (asserts directory → package-name mapping; asserts count == 8)
 - Pre-publish `npm view` guard (404-strict: any non-404 error fails)
-- Publish 8 packages in dependency-safe order via `pnpm publish --access public --tag beta --provenance --no-git-checks`
+- Publish 8 packed `.tgz` files in dependency-safe order via `npm publish <tarball> --access public --tag beta --provenance` (no auth token; OIDC token issued via `id-token: write` permission + per-package Trusted Publisher config)
 
 `post-publish-smoke` runs `scripts/post-publish-smoke.ps1` on `windows-latest` with PowerShell 5.1; it installs `viberevert@beta` from npm and runs the full 7-frame Phase 12f MCP transcript against the published bytes. PowerShell 5.1 is intentional: it's the same parser that exposed Step 3's BOM-injection class, so the published path proves the same Windows surface.
 
@@ -258,7 +277,7 @@ Then fix the issue + bump to `0.7.0-beta.<N+1>` per the partial-publish policy.
 
 ### Partial-publish failure policy
 
-- **Pre-publish failure** (validation/build/test/pack/npm-view-guard fails before any `pnpm publish` runs): safe to retry the same tag.
+- **Pre-publish failure** (validation/build/test/pack/npm-view-guard fails before any `npm publish` runs): safe to retry the same tag.
   ```sh
   git tag -d v0.7.0-beta.N
   git push origin --delete v0.7.0-beta.N
@@ -300,7 +319,7 @@ The current workflow accepts unsigned annotated tags. GPG/SSH signing via `git t
 
 ## Manual emergency publish
 
-The canonical publish path is the GitHub Actions release workflow. **Local `pnpm publish` is reserved for emergencies** when CI is unavailable (GitHub Actions outage, workflow regression, etc.).
+The canonical publish path is the GitHub Actions release workflow, which uses Trusted Publishers / OIDC and requires no token. **Manual emergency publish is for the unusual case where the workflow cannot run** (GitHub Actions outage, release.yml regression that blocks publish, etc.) AND a critical fix MUST publish immediately.
 
 ### When to use
 
@@ -308,6 +327,20 @@ The canonical publish path is the GitHub Actions release workflow. **Local `pnpm
 - A workflow regression makes the release workflow itself unusable, blocking a needed publish.
 
 DO NOT use this path for routine releases. Reroute everything possible through the workflow.
+
+### Auth prerequisites (manual path)
+
+Manual `npm publish` cannot use OIDC -- there is no GitHub Actions runner outside CI. It requires a local npm CLI auth path:
+
+1. **A pre-existing token in `~/.npmrc`** with publish rights on `viberevert` + `@viberevert/*`. Fastest path if you've kept an emergency token for this purpose (and rotate it on a schedule).
+2. **Or an interactive `npm login`** to acquire fresh credentials at the time of need (typically requires 2FA).
+
+The npm-side package settings must ALSO allow token-based publishing:
+
+- Each package's **Settings → Access → Publishing access** must NOT be set to "Require two-factor authentication and disallow tokens (recommended)".
+- That recommended-secure setting blocks all token-based publishes by design. If it is active, manual publish will fail with an auth error until the setting is intentionally relaxed.
+
+If packages are configured Trusted-Publisher-only (the recommended posture), token publishing must be temporarily allowed on each affected package BEFORE attempting manual publish. **Restore the recommended posture immediately after the emergency publish completes** (see step 10 below).
 
 ### Procedure
 
@@ -319,44 +352,62 @@ From repo root, with a clean working tree at the release commit:
    - `pnpm install --frozen-lockfile`
    - `pnpm typecheck && pnpm lint && pnpm test && pnpm build`
 
-2. **Verify npm authentication.**
-   - `npm whoami` returns the publisher account.
-   - If not authenticated: `npm login`.
+2. **Verify npm CLI version.** `npm --version` must report `>= 11.5.1` (same minimum as the release workflow). Upgrade with `npm install -g npm@11` if needed.
 
-3. **Pre-publish guard.** For each of the 8 publish-target packages, confirm `npm view <pkg>@<version>` returns 404.
+3. **Acquire npm auth.** Choose ONE:
+   - Use a pre-existing `~/.npmrc` token: confirm `npm whoami` returns the publisher account.
+   - Or run `npm login` interactively and complete 2FA.
 
-4. **Disable the release workflow** to prevent the manual tag push from triggering a competing CI publish run.
+4. **Temporarily allow token publishing** on each of the 8 packages (only required if "Require two-factor authentication and disallow tokens" is currently set):
+   - For each package's npm Settings → Access → Publishing access, temporarily select a publishing-access mode that permits manual npm CLI publishing with your chosen local auth path.
+   - Update each of the 8 package settings pages.
+
+5. **Pre-publish guard.** For each of the 8 publish-target packages, confirm `npm view <pkg>@<version>` returns 404.
+
+6. **Disable the release workflow** to prevent the manual tag push from triggering a competing CI publish run.
    - GitHub repo → Actions → Release → "..." menu → "Disable workflow".
-   - Without this, pushing the tag in step 6 will trigger `.github/workflows/release.yml`. The pre-publish `npm view` guard inside the workflow will fail (the packages were just published manually in step 5), but the workflow run will be a noisy red CI signal and MUST NOT be interpreted as the canonical release.
+   - Without this, pushing the tag in step 8 will trigger `.github/workflows/release.yml`. The pre-publish `npm view` guard inside the workflow will fail (the packages were just published manually in step 7), but the workflow run will be a noisy red CI signal and MUST NOT be interpreted as the canonical release.
 
-5. **Publish in dependency-safe order:**
+7. **Pack + publish in dependency-safe order:**
    ```sh
+   PACK_DIR=$(mktemp -d)
    for dir in packages/session-format packages/core packages/git packages/checks packages/reporters packages/cli-commands packages/mcp packages/cli; do
-     (cd "$dir" && pnpm publish --access public --tag beta --no-git-checks)
+     (cd "$dir" && pnpm pack --pack-destination "$PACK_DIR")
+   done
+
+   for tgz in viberevert-session-format viberevert-core viberevert-git viberevert-checks viberevert-reporters viberevert-cli-commands viberevert-mcp viberevert; do
+     npm publish "$PACK_DIR/${tgz}-<VERSION>.tgz" --access public --tag beta
    done
    ```
+   Note: `--provenance` is NOT used here -- it requires OIDC, which is unavailable outside GitHub Actions.
 
-6. **Tag + push** (the Release workflow is disabled, so this push does not trigger the canonical publish workflow):
+8. **Tag + push** (the Release workflow is disabled, so this push does not trigger the canonical publish workflow):
    ```sh
    git tag -a v0.7.0-beta.N -m "v0.7.0-beta.N (emergency manual publish)"
    git push origin v0.7.0-beta.N
    ```
 
-7. **Run the post-publish smoke manually:**
+9. **Run the post-publish smoke manually:**
    ```powershell
    powershell.exe -ExecutionPolicy Bypass -File scripts/post-publish-smoke.ps1 -ExpectedVersion 0.7.0-beta.N
    ```
 
-8. **Create the GitHub Release** via `gh release create` or the web UI. The release body should explicitly note the manual emergency publish path so it's distinguishable from a workflow-published release.
+10. **Restore the safe posture on all 8 packages:**
+    - For each package's Settings → Access → Publishing access, switch back to "Require two-factor authentication and disallow tokens (recommended)".
+    - Confirm Trusted Publisher is still configured (it should be; the OIDC config is separate from the tokens-posture toggle).
+    - Routine releases must continue to flow through OIDC only.
 
-9. **Re-enable the release workflow** immediately after the emergency release is documented:
-   - GitHub repo → Actions → Release → "..." menu → "Enable workflow".
-   - Do NOT leave the workflow disabled. The next routine beta MUST go through the canonical path.
+11. **Create the GitHub Release** via `gh release create` or the web UI. The release body should explicitly note the manual emergency publish path AND that provenance is absent on this version.
+
+12. **Re-enable the release workflow** immediately after the emergency release is documented:
+    - GitHub repo → Actions → Release → "..." menu → "Enable workflow".
+    - Do NOT leave the workflow disabled. The next routine beta MUST go through the canonical path.
 
 ### Caveats
 
-- **Provenance attestation is LOST.** Manual `pnpm publish` cannot generate SLSA provenance because there is no OIDC token outside the GitHub Actions runner. Published packages will show no "Provenance" badge on npm.
+- **Provenance attestation is LOST.** Manual `npm publish` cannot generate SLSA provenance because there is no GitHub Actions OIDC token outside the workflow runner. Published packages will show no "Provenance" badge on npm for the emergency version.
 - **Open a follow-up** to fix the underlying reason the workflow wasn't usable, and **re-publish via the workflow at the next beta iteration** to restore provenance.
+- **Token rotation.** If an emergency token was used in step 3.1, rotate it on the npm Settings → Tokens page after the emergency is over.
 
 ## License
 

@@ -43,12 +43,11 @@ jobs:
       - name: Enable Corepack
         run: corepack enable
 
-      - name: Set up Node 22 with pnpm cache and npm registry auth
+      - name: Set up Node 22 with pnpm cache
         uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: pnpm
-          registry-url: https://registry.npmjs.org/
 
       - name: Validate tag (beta-only) + annotated + 8 publish targets + 4 private packages
         id: validate
@@ -130,27 +129,39 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Validate NPM_TOKEN secret exists
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Verify Node and npm meet Trusted Publishing minimums
         shell: bash
         run: |
-          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
-            echo "NPM_TOKEN secret is not set in the repository."
+          set -euo pipefail
+          # npm Trusted Publishing requires npm CLI >= 11.5.1 and Node
+          # >= 22.14.0 (https://docs.npmjs.com/trusted-publishers).
+          # Install npm 11 pinned to the major: `npm@latest` could drift
+          # to a future major with a stricter Node engine and break this
+          # runner later. Within npm 11, patch updates are safe.
+          npm install -g npm@11
+          node -e '
+          const semver = (v) => v.replace(/^v/, "").split(".").map(Number);
+          const ge = (a, b) => {
+            const aa = semver(a), bb = semver(b);
+            for (let i = 0; i < 3; i++) {
+              if (aa[i] > bb[i]) return true;
+              if (aa[i] < bb[i]) return false;
+            }
+            return true;
+          };
+          const nodeVersion = process.version;
+          if (!ge(nodeVersion, "22.14.0")) {
+            console.error(`Node ${nodeVersion} < 22.14.0 required for npm Trusted Publishing`);
+            process.exit(1);
+          }
+          '
+          npm_version="$(npm --version)"
+          min_npm="11.5.1"
+          if [ "$(printf '%s\n' "$min_npm" "$npm_version" | sort -V | head -1)" != "$min_npm" ]; then
+            echo "npm version $npm_version < $min_npm required for npm Trusted Publishing"
             exit 1
           fi
-          echo "NPM_TOKEN secret is present (length: ${#NODE_AUTH_TOKEN})."
-
-      - name: Validate npm authentication (npm whoami)
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        shell: bash
-        run: |
-          if ! WHO=$(npm whoami 2>&1); then
-            echo "npm whoami failed: $WHO"
-            exit 1
-          fi
-          echo "Authenticated as: $WHO"
+          echo "Node $(node --version) and npm ${npm_version} meet Trusted Publishing minimums."
 
       - name: Typecheck
         run: pnpm typecheck
@@ -218,7 +229,6 @@ jobs:
 
       - name: Pre-publish guard -- assert no target version is already published (404-strict)
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           VERSION: ${{ steps.validate.outputs.version }}
         shell: bash
         run: |
@@ -255,54 +265,47 @@ jobs:
             fi
           done
 
-      - name: Publish 8 packages in dependency-safe order
+      - name: Publish 8 packed tarballs in dependency-safe order (Trusted Publisher / OIDC)
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           VERSION: ${{ steps.validate.outputs.version }}
         shell: bash
         run: |
           set -euo pipefail
-          PUBLISH_DIRS=(
-            "packages/session-format"
-            "packages/core"
-            "packages/git"
-            "packages/checks"
-            "packages/reporters"
-            "packages/cli-commands"
-            "packages/mcp"
-            "packages/cli"
+          PACK_DIR="${RUNNER_TEMP}/viberevert-pack"
+          # Locked tarball filenames matching the pack step's output,
+          # in dependency-safe publish order. Scoped packages produce
+          # viberevert-<name>-VERSION.tgz; the unscoped viberevert root
+          # CLI produces viberevert-VERSION.tgz (digit-leading suffix).
+          PUBLISH_TGZ=(
+            "viberevert-session-format-${VERSION}.tgz"
+            "viberevert-core-${VERSION}.tgz"
+            "viberevert-git-${VERSION}.tgz"
+            "viberevert-checks-${VERSION}.tgz"
+            "viberevert-reporters-${VERSION}.tgz"
+            "viberevert-cli-commands-${VERSION}.tgz"
+            "viberevert-mcp-${VERSION}.tgz"
+            "viberevert-${VERSION}.tgz"
           )
-          EXPECTED_NAMES=(
-            "@viberevert/session-format"
-            "@viberevert/core"
-            "@viberevert/git"
-            "@viberevert/checks"
-            "@viberevert/reporters"
-            "@viberevert/cli-commands"
-            "@viberevert/mcp"
-            "viberevert"
-          )
-          # Defense-in-depth: independent mapping assertion immediately
-          # before the irreversible publish loop. Pack step already
-          # verified this, but a between-step regression (manual edit,
-          # etc.) shouldn't be able to reach publish.
-          for i in "${!PUBLISH_DIRS[@]}"; do
-            actual="$(node -p "require('./${PUBLISH_DIRS[$i]}/package.json').name")"
-            expected="${EXPECTED_NAMES[$i]}"
-            if [ "$actual" != "$expected" ]; then
-              echo "Publish directory mismatch at index $i: ${PUBLISH_DIRS[$i]} has package name '$actual', expected '$expected'"
+          # Assert every tarball is present before any publish runs.
+          # This is defense-in-depth against a between-step regression
+          # (the pack step already produced and counted them).
+          for tgz in "${PUBLISH_TGZ[@]}"; do
+            if [ ! -f "$PACK_DIR/$tgz" ]; then
+              echo "ERROR: expected packed tarball missing: $PACK_DIR/$tgz"
               exit 1
             fi
           done
-          echo "All 8 publish directories map to the locked package names in order."
+          echo "All 8 expected tarballs present in $PACK_DIR."
 
-          for dir in "${PUBLISH_DIRS[@]}"; do
-            echo "==> Publishing $dir"
+          for tgz in "${PUBLISH_TGZ[@]}"; do
+            echo "==> Publishing $tgz via OIDC Trusted Publisher"
             # --access public: required for scoped packages, harmless for unscoped viberevert
             # --tag beta:     dist-tag for pre-release (NOT latest)
             # --provenance:   SLSA attestation via OIDC (requires id-token: write)
-            # --no-git-checks: dist/ build outputs are uncommitted; pnpm would otherwise refuse
-            (cd "$dir" && pnpm publish --access public --tag beta --provenance --no-git-checks)
+            # No auth token: npm CLI 11.5.1+ uses GitHub Actions OIDC
+            # token automatically when id-token: write is granted AND
+            # a Trusted Publisher is configured for the package on npm.
+            npm publish "$PACK_DIR/$tgz" --access public --tag beta --provenance
           done
           echo "All 8 packages published at version ${VERSION} with dist-tag beta."
 
