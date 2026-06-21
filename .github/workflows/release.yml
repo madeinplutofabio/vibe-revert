@@ -178,17 +178,17 @@ jobs:
           fi
           echo "Node $(node --version) and npm ${npm_version} meet Trusted Publishing minimums."
 
-      - name: Typecheck
-        run: pnpm typecheck
-
       - name: Lint
         run: pnpm lint
 
-      - name: Test
-        run: pnpm test
+      - name: Typecheck
+        run: pnpm typecheck
 
       - name: Build
         run: pnpm build
+
+      - name: Test
+        run: pnpm test
 
       - name: Pack 8 publish-target tarballs (validate pack surface before publish)
         shell: bash
