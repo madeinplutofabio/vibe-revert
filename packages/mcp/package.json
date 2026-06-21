@@ -28,7 +28,7 @@
     "@viberevert/cli-commands": "workspace:*",
     "@viberevert/core": "workspace:*",
     "@viberevert/session-format": "workspace:*",
-    "zod": "4.4.1"
+    "zod": "4.4.3"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",

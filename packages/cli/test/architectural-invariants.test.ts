@@ -3306,7 +3306,7 @@ describe("Architectural invariants -- M G1a Step 2 D99.M @viberevert/mcp boundar
   // D99.M.11 -- packages/mcp/package.json dependency map (Step 3 surface)
   // ===========================================================================
 
-  it("D99.M.11 (Step 3 surface, post-3.3): packages/mcp/package.json dependencies EXACTLY {@modelcontextprotocol/sdk: 1.29.0, zod: 4.4.1, @viberevert/cli-commands: workspace:*, @viberevert/core: workspace:*, @viberevert/session-format: workspace:*}; forbidden deps absent from all dep sections", () => {
+  it("D99.M.11 (Step 3 surface, post-3.3): packages/mcp/package.json dependencies EXACTLY {@modelcontextprotocol/sdk: 1.29.0, zod: 4.4.3, @viberevert/cli-commands: workspace:*, @viberevert/core: workspace:*, @viberevert/session-format: workspace:*}; forbidden deps absent from all dep sections", () => {
     // Step 3 surface post-3.3: MCP SDK + zod + 3 workspace deps
     // (cli-commands + core + session-format -- the last added in
     // slice 3.3 because check_repo's handler uses ReportFileSchema
@@ -3322,7 +3322,7 @@ describe("Architectural invariants -- M G1a Step 2 D99.M @viberevert/mcp boundar
       "@viberevert/cli-commands": "workspace:*",
       "@viberevert/core": "workspace:*",
       "@viberevert/session-format": "workspace:*",
-      zod: "4.4.1",
+      zod: "4.4.3",
     });
 
     const FORBIDDEN: ReadonlyArray<string> = [

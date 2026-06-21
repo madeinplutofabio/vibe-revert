@@ -442,13 +442,13 @@ describe("start_session definition export", () => {
   });
 
   it("inputSchema has no cwd-like keys (D99.M.17)", () => {
-    const props = (definition.inputSchema.properties ?? {}) as Record<string, unknown>;
+    const props = (definition.inputSchema.properties ?? {}) as { task?: unknown };
     const forbidden = ["cwd", "target_repo", "repo", "directory", "repo_path", "working_directory"];
     for (const k of Object.keys(props)) expect(forbidden).not.toContain(k);
   });
 
   it("inputSchema's only property is 'task'", () => {
-    const props = (definition.inputSchema.properties ?? {}) as Record<string, unknown>;
+    const props = (definition.inputSchema.properties ?? {}) as { task?: unknown };
     expect(Object.keys(props)).toEqual(["task"]);
   });
 
@@ -458,8 +458,8 @@ describe("start_session definition export", () => {
     // .transform((s) => s.trim()).refine(...) in the schema, the
     // pattern property would be missing here and this test catches
     // it before MCP consumers see the regression.
-    const props = (definition.inputSchema.properties ?? {}) as Record<string, unknown>;
-    const task = props["task"] as { type?: unknown; pattern?: unknown };
+    const props = (definition.inputSchema.properties ?? {}) as { task?: unknown };
+    const task = props.task as { type?: unknown; pattern?: unknown };
     expect(task.type).toBe("string");
     expect(task.pattern).toBe("\\S");
   });

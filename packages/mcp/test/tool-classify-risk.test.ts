@@ -73,7 +73,7 @@ function makeReport(results: CheckResult[]): ReportFile {
       session_id: "rpt_01ABCDEFGHJKMNPQRSTVWXYZ12",
       started_at: "2026-06-01T00:00:00Z",
       detected_frameworks: [],
-      risk_level: results.length > 0 ? results[0]!.level : "low",
+      risk_level: results[0]?.level ?? "low",
       changed_files: [],
       results,
       rollback_available: false,

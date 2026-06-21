@@ -499,26 +499,26 @@ describe("create_checkpoint definition export", () => {
   });
 
   it("inputSchema has no cwd-like keys (D99.M.17)", () => {
-    const props = (definition.inputSchema.properties ?? {}) as Record<string, unknown>;
+    const props = (definition.inputSchema.properties ?? {}) as { name?: unknown };
     const forbidden = ["cwd", "target_repo", "repo", "directory", "repo_path", "working_directory"];
     for (const k of Object.keys(props)) expect(forbidden).not.toContain(k);
   });
 
   it("inputSchema's only property is 'name' (no `message` -- operation does not accept it)", () => {
-    const props = (definition.inputSchema.properties ?? {}) as Record<string, unknown>;
+    const props = (definition.inputSchema.properties ?? {}) as { name?: unknown };
     expect(Object.keys(props)).toEqual(["name"]);
   });
 
   it("inputSchema exposes name as a string with maxLength === MAX_NAME_LEN", () => {
-    const props = (definition.inputSchema.properties ?? {}) as Record<string, unknown>;
-    const name = props["name"] as { type?: unknown; maxLength?: unknown };
+    const props = (definition.inputSchema.properties ?? {}) as { name?: unknown };
+    const name = props.name as { type?: unknown; maxLength?: unknown };
     expect(name.type).toBe("string");
     expect(name.maxLength).toBe(MAX_NAME_LEN);
   });
 
   it("inputSchema's `name` carries a pattern constraint somewhere in its schema", () => {
-    const props = (definition.inputSchema.properties ?? {}) as Record<string, unknown>;
-    const name = props["name"] as Record<string, unknown>;
+    const props = (definition.inputSchema.properties ?? {}) as { name?: unknown };
+    const name = props.name as Record<string, unknown>;
     expect(JSON.stringify(name)).toContain('"pattern"');
   });
 

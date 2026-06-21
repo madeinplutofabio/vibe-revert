@@ -610,25 +610,27 @@ describe("generate_fix_prompt handler: typed-error mapping", () => {
 // ============================================================================
 
 describe("generate_fix_prompt definition export", () => {
+  type FixPromptSchemaProps = { session?: unknown; report?: unknown };
+
   it("name is 'generate_fix_prompt'", () => {
     expect(definition.name).toBe("generate_fix_prompt");
   });
 
   it("inputSchema has no cwd-like keys (D99.M.17)", () => {
-    const props = (definition.inputSchema.properties ?? {}) as Record<string, unknown>;
+    const props = (definition.inputSchema.properties ?? {}) as FixPromptSchemaProps;
     const forbidden = ["cwd", "target_repo", "repo", "directory", "repo_path", "working_directory"];
     for (const k of Object.keys(props)) expect(forbidden).not.toContain(k);
   });
 
   it("inputSchema's properties are exactly 'session' and 'report' (no other keys)", () => {
-    const props = (definition.inputSchema.properties ?? {}) as Record<string, unknown>;
+    const props = (definition.inputSchema.properties ?? {}) as FixPromptSchemaProps;
     expect(Object.keys(props).sort()).toEqual(["report", "session"]);
   });
 
   it("inputSchema exposes session and report as strings with maxLength === MAX_ID_LEN", () => {
-    const props = (definition.inputSchema.properties ?? {}) as Record<string, unknown>;
-    const session = props["session"] as { type?: unknown; maxLength?: unknown };
-    const report = props["report"] as { type?: unknown; maxLength?: unknown };
+    const props = (definition.inputSchema.properties ?? {}) as FixPromptSchemaProps;
+    const session = props.session as { type?: unknown; maxLength?: unknown };
+    const report = props.report as { type?: unknown; maxLength?: unknown };
     expect(session.type).toBe("string");
     expect(session.maxLength).toBe(MAX_ID_LEN);
     expect(report.type).toBe("string");
@@ -636,9 +638,9 @@ describe("generate_fix_prompt definition export", () => {
   });
 
   it("inputSchema's `session` and `report` each carry a pattern constraint somewhere in their schema", () => {
-    const props = (definition.inputSchema.properties ?? {}) as Record<string, unknown>;
-    const session = props["session"] as Record<string, unknown>;
-    const report = props["report"] as Record<string, unknown>;
+    const props = (definition.inputSchema.properties ?? {}) as FixPromptSchemaProps;
+    const session = props.session as Record<string, unknown>;
+    const report = props.report as Record<string, unknown>;
     expect(JSON.stringify(session)).toContain('"pattern"');
     expect(JSON.stringify(report)).toContain('"pattern"');
   });
