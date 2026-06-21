@@ -73,7 +73,7 @@
 // stderr. PowerShell asserts this (silent-on-success contract).
 
 import { spawn, spawnSync } from "node:child_process";
-import { writeFileSync, existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import process from "node:process";
 
 // ============================================================================
@@ -132,8 +132,15 @@ if (!existsSync(args.input)) {
 
 const inputBytes = readFileSync(args.input);
 
-if (inputBytes.length >= 3 && inputBytes[0] === 0xef && inputBytes[1] === 0xbb && inputBytes[2] === 0xbf) {
-  process.stderr.write(`mcp-stdio-probe: --input starts with UTF-8 BOM (EF BB BF). PowerShell must write with UTF8Encoding($false). Path: ${args.input}\n`);
+if (
+  inputBytes.length >= 3 &&
+  inputBytes[0] === 0xef &&
+  inputBytes[1] === 0xbb &&
+  inputBytes[2] === 0xbf
+) {
+  process.stderr.write(
+    `mcp-stdio-probe: --input starts with UTF-8 BOM (EF BB BF). PowerShell must write with UTF8Encoding($false). Path: ${args.input}\n`,
+  );
   process.exit(1);
 }
 
@@ -156,14 +163,18 @@ for (let i = 0; i < inputLines.length; i++) {
   try {
     parsed = JSON.parse(line);
   } catch {
-    process.stderr.write(`mcp-stdio-probe: --input line ${i + 1} is not valid JSON: ${JSON.stringify(line)}\n`);
+    process.stderr.write(
+      `mcp-stdio-probe: --input line ${i + 1} is not valid JSON: ${JSON.stringify(line)}\n`,
+    );
     process.exit(1);
   }
   const expectsResponse = parsed.id !== undefined && parsed.id !== null;
   if (expectsResponse) {
     const key = String(parsed.id);
     if (seenInputIds.has(key)) {
-      process.stderr.write(`mcp-stdio-probe: --input contains duplicate JSON-RPC id ${key} (line ${i + 1})\n`);
+      process.stderr.write(
+        `mcp-stdio-probe: --input contains duplicate JSON-RPC id ${key} (line ${i + 1})\n`,
+      );
       process.exit(1);
     }
     seenInputIds.add(key);
@@ -222,13 +233,15 @@ function pushLine(line) {
 
 child.stdout.on("data", (chunk) => {
   stdoutBuf = Buffer.concat([stdoutBuf, chunk]);
-  let lfIdx;
-  while ((lfIdx = stdoutBuf.indexOf(0x0a)) !== -1) {
+  for (;;) {
+    const lfIdx = stdoutBuf.indexOf(0x0a);
+    if (lfIdx === -1) break;
     const lineBytes = stdoutBuf.subarray(0, lfIdx);
     stdoutBuf = stdoutBuf.subarray(lfIdx + 1);
-    const trimmed = lineBytes.length > 0 && lineBytes[lineBytes.length - 1] === 0x0d
-      ? lineBytes.subarray(0, lineBytes.length - 1)
-      : lineBytes;
+    const trimmed =
+      lineBytes.length > 0 && lineBytes[lineBytes.length - 1] === 0x0d
+        ? lineBytes.subarray(0, lineBytes.length - 1)
+        : lineBytes;
     pushLine(trimmed.toString("utf8"));
   }
 });
@@ -284,17 +297,23 @@ async function waitForResponse(expectedId) {
     try {
       line = await readNextLine(remaining);
     } catch (err) {
-      throw new Error(`expected response id=${expectedId}: ${err.message}${sideFrames.length ? `; side frames: ${JSON.stringify(sideFrames)}` : ""}${getSpawnErrorText()}`);
+      throw new Error(
+        `expected response id=${expectedId}: ${err.message}${sideFrames.length ? `; side frames: ${JSON.stringify(sideFrames)}` : ""}${getSpawnErrorText()}`,
+      );
     }
     if (line === null) {
-      throw new Error(`stdout EOF before response id=${expectedId} received${sideFrames.length ? `; side frames: ${JSON.stringify(sideFrames)}` : ""}${getSpawnErrorText()}`);
+      throw new Error(
+        `stdout EOF before response id=${expectedId} received${sideFrames.length ? `; side frames: ${JSON.stringify(sideFrames)}` : ""}${getSpawnErrorText()}`,
+      );
     }
     if (line.trim().length === 0) continue;
     let parsed;
     try {
       parsed = JSON.parse(line);
     } catch {
-      throw new Error(`non-JSON stdout line (protocol corruption per D99.D): ${JSON.stringify(line)}`);
+      throw new Error(
+        `non-JSON stdout line (protocol corruption per D99.D): ${JSON.stringify(line)}`,
+      );
     }
     if (parsed.id === undefined || parsed.id === null) {
       // Notification — tolerated side frame; keep waiting.
@@ -305,14 +324,20 @@ async function waitForResponse(expectedId) {
     if (actualKey !== String(expectedId)) {
       // STRICT: serialized transcript means any non-matching id at
       // this point is invalid (out-of-order or duplicate).
-      throw new Error(`expected response id=${expectedId}, got id=${actualKey} on serialized request-response transcript (out-of-order or duplicate response). Line: ${JSON.stringify(line)}`);
+      throw new Error(
+        `expected response id=${expectedId}, got id=${actualKey} on serialized request-response transcript (out-of-order or duplicate response). Line: ${JSON.stringify(line)}`,
+      );
     }
     if (parsed.error !== undefined) {
-      throw new Error(`expected JSON-RPC success envelope for id=${expectedId} (D99.O), got top-level error: ${JSON.stringify(parsed.error)}`);
+      throw new Error(
+        `expected JSON-RPC success envelope for id=${expectedId} (D99.O), got top-level error: ${JSON.stringify(parsed.error)}`,
+      );
     }
     return parsed;
   }
-  throw new Error(`timeout after ${PER_RESPONSE_TIMEOUT_MS}ms waiting for response id=${expectedId}${getSpawnErrorText()}`);
+  throw new Error(
+    `timeout after ${PER_RESPONSE_TIMEOUT_MS}ms waiting for response id=${expectedId}${getSpawnErrorText()}`,
+  );
 }
 
 // ============================================================================
@@ -331,9 +356,8 @@ function getAuditDump() {
 }
 
 function writeArtifacts(responses) {
-  const outputBody = responses.length > 0
-    ? `${responses.map((r) => JSON.stringify(r)).join("\n")}\n`
-    : "";
+  const outputBody =
+    responses.length > 0 ? `${responses.map((r) => JSON.stringify(r)).join("\n")}\n` : "";
   writeFileSync(args.output, outputBody, { encoding: "utf8" });
   writeFileSync(args.stderr, stderrBuf, { encoding: "utf8" });
 }
@@ -385,10 +409,12 @@ try {
   // Wait for close (not exit) so stdio is fully drained.
   const closeInfo = await Promise.race([
     childClosePromise.then((info) => ({ ...info, timedOut: false })),
-    new Promise((resolve) => setTimeout(() => {
-      killChildTree();
-      resolve({ code: null, signal: null, timedOut: true });
-    }, CLOSE_TIMEOUT_MS)),
+    new Promise((resolve) =>
+      setTimeout(() => {
+        killChildTree();
+        resolve({ code: null, signal: null, timedOut: true });
+      }, CLOSE_TIMEOUT_MS),
+    ),
   ]);
 
   // If we killed on timeout, wait briefly for close to settle so
@@ -410,23 +436,33 @@ try {
   writeArtifacts(receivedResponses);
 
   if (closeInfo.timedOut) {
-    process.stderr.write(`mcp-stdio-probe failure: MCP server did not close within ${CLOSE_TIMEOUT_MS}ms after stdin close; killed via taskkill /T /F.${getAuditDump()}${getSpawnErrorText()}\nStderr:\n${stderrBuf}\n`);
+    process.stderr.write(
+      `mcp-stdio-probe failure: MCP server did not close within ${CLOSE_TIMEOUT_MS}ms after stdin close; killed via taskkill /T /F.${getAuditDump()}${getSpawnErrorText()}\nStderr:\n${stderrBuf}\n`,
+    );
     process.exit(1);
   }
   if (closeInfo.code !== 0) {
-    process.stderr.write(`mcp-stdio-probe failure: MCP server closed with code ${closeInfo.code}${closeInfo.signal ? ` signal ${closeInfo.signal}` : ""} after stdin close (expected 0).${getAuditDump()}${getSpawnErrorText()}\nStderr:\n${stderrBuf}\n`);
+    process.stderr.write(
+      `mcp-stdio-probe failure: MCP server closed with code ${closeInfo.code}${closeInfo.signal ? ` signal ${closeInfo.signal}` : ""} after stdin close (expected 0).${getAuditDump()}${getSpawnErrorText()}\nStderr:\n${stderrBuf}\n`,
+    );
     process.exit(1);
   }
   if (stderrBuf.trim().length > 0) {
-    process.stderr.write(`mcp-stdio-probe failure: expected EMPTY stderr on successful MCP serve (D99.M.14 -- mcp library MUST NOT write to process.stderr; CLI MCPCommand only writes stderr on failure paths). Got:\n${stderrBuf}\n`);
+    process.stderr.write(
+      `mcp-stdio-probe failure: expected EMPTY stderr on successful MCP serve (D99.M.14 -- mcp library MUST NOT write to process.stderr; CLI MCPCommand only writes stderr on failure paths). Got:\n${stderrBuf}\n`,
+    );
     process.exit(1);
   }
   if (trailingLines.length > 0) {
-    process.stderr.write(`mcp-stdio-probe failure: server emitted ${trailingLines.length} unexpected stdout line(s) after all ${expectedIds.length} expected response(s): ${JSON.stringify(trailingLines)}\n`);
+    process.stderr.write(
+      `mcp-stdio-probe failure: server emitted ${trailingLines.length} unexpected stdout line(s) after all ${expectedIds.length} expected response(s): ${JSON.stringify(trailingLines)}\n`,
+    );
     process.exit(1);
   }
   if (receivedResponses.length !== expectedIds.length) {
-    process.stderr.write(`mcp-stdio-probe failure: expected ${expectedIds.length} responses, got ${receivedResponses.length} (internal logic error in transcript loop)\n`);
+    process.stderr.write(
+      `mcp-stdio-probe failure: expected ${expectedIds.length} responses, got ${receivedResponses.length} (internal logic error in transcript loop)\n`,
+    );
     process.exit(1);
   }
 
@@ -437,6 +473,8 @@ try {
   // we write mcp-stderr.txt.
   await awaitCloseOrTimeout(FAILURE_CLOSE_WAIT_MS);
   writeArtifacts(receivedResponses);
-  process.stderr.write(`mcp-stdio-probe failure: ${err.message}${getAuditDump()}${getSpawnErrorText()}\nStderr captured before failure:\n${stderrBuf}\n`);
+  process.stderr.write(
+    `mcp-stdio-probe failure: ${err.message}${getAuditDump()}${getSpawnErrorText()}\nStderr captured before failure:\n${stderrBuf}\n`,
+  );
   process.exit(1);
 }
