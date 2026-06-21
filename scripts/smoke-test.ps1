@@ -1181,6 +1181,127 @@ PHASE_12D_TOKEN = "TESTFIXTUREONLY_S9qX8wV7tS6rP5nM4kL3jH2gF1"
 
         # === Local helpers (scoped to Phase 12f) ===
 
+        # Send-McpFrame: write one JSON-RPC frame + LF terminator to
+        # the MCP server's stdin as explicit UTF-8 bytes via
+        # BaseStream (bypasses the StreamWriter encoding layer for
+        # PS 5.1 / PS 7+ determinism, locked in the M RP Step 3 fix).
+        # Flushes after write so the bytes reach the OS pipe before
+        # the next call. Used by the interactive request-response
+        # flow to send one frame at a time.
+        function Send-McpFrame {
+            param(
+                [Parameter(Mandatory)][System.Diagnostics.Process]$Proc,
+                [Parameter(Mandatory)][string]$JsonLine,
+                [Parameter(Mandatory)][System.Text.UTF8Encoding]$Utf8Encoder
+            )
+            $bytes = $Utf8Encoder.GetBytes($JsonLine + "`n")
+            $Proc.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length)
+            $Proc.StandardInput.BaseStream.Flush()
+        }
+
+        # Get-McpAuditDump: read the current audit log contents (if
+        # present) as a string suitable for inclusion in error
+        # messages. The MCP server's server.onerror -> shutdown
+        # .signalUnhealthy path wraps the underlying SDK error as a
+        # generic "MCP server transport error" stderr line at
+        # server.ts:829, swallowing the actual SDK error message;
+        # the audit log's server_integrity_failure record (when
+        # written) IS the post-mortem channel that preserves the
+        # underlying error. Factored so both the in-flight failure
+        # paths (Wait-McpResponseById timeout/EOF) and the post-exit
+        # failure paths can share the same dump format.
+        function Get-McpAuditDump {
+            param(
+                [Parameter(Mandatory)][string]$AuditPath,
+                [Parameter(Mandatory)][System.Text.UTF8Encoding]$Utf8Encoder
+            )
+            if (Test-Path $AuditPath) {
+                $auditBytes = [System.IO.File]::ReadAllBytes($AuditPath)
+                $auditText = $Utf8Encoder.GetString($auditBytes)
+                return "`nAudit log (${AuditPath}):`n${auditText}"
+            }
+            return "`nAudit log (${AuditPath}): NOT PRESENT (server failed before openAuditLog ran -- very early boot failure)"
+        }
+
+        # Wait-McpResponseById: read stdout lines from the MCP server
+        # (via the supplied StreamReader) until a JSON-RPC response
+        # with the expected id is received, then return the parsed
+        # response. Bounded by a single fixed deadline across the
+        # whole wait so a stream of blank lines or unrelated server
+        # notifications cannot extend the wait indefinitely.
+        # Server-initiated notifications (JSON-RPC frames without
+        # id) and responses for other ids are captured into
+        # $sideFrames and included in any subsequent timeout/EOF
+        # error message for diagnostics, but do not satisfy the
+        # wait. Blank lines are tolerated. Non-JSON stdout fails
+        # immediately (protocol corruption per D99.D). The id
+        # comparison uses string equality to sidestep PowerShell
+        # numeric casting edge cases. The top-level JSON-RPC error
+        # check (D99.O) is enforced inline on the matching response
+        # so a Cat 2 vs Cat 4 distinction regression fails at the
+        # response boundary instead of later validation.
+        function Wait-McpResponseById {
+            param(
+                [Parameter(Mandatory)][System.IO.StreamReader]$Reader,
+                [Parameter(Mandatory)][int]$ExpectedId,
+                [Parameter(Mandatory)][string]$ProbeName,
+                [Parameter(Mandatory)][int]$TimeoutMs,
+                [Parameter(Mandatory)][string]$AuditPath,
+                [Parameter(Mandatory)][System.Text.UTF8Encoding]$Utf8Encoder
+            )
+
+            $deadline = [System.Diagnostics.Stopwatch]::StartNew()
+            $sideFrames = New-Object System.Collections.Generic.List[string]
+
+            while ($deadline.ElapsedMilliseconds -lt $TimeoutMs) {
+                $remainingMs = [Math]::Max(1, $TimeoutMs - [int]$deadline.ElapsedMilliseconds)
+                $readTask = $Reader.ReadLineAsync()
+
+                if (-not $readTask.Wait($remainingMs)) {
+                    $auditTail = Get-McpAuditDump -AuditPath $AuditPath -Utf8Encoder $Utf8Encoder
+                    $sideDump = if ($sideFrames.Count -gt 0) { "`nSide frames before timeout:`n$($sideFrames -join "`n")" } else { "" }
+                    throw "Phase 12f ${ProbeName} (id=${ExpectedId}): timeout after ${TimeoutMs}ms waiting for response.${sideDump}${auditTail}"
+                }
+
+                $line = $readTask.Result
+                if ($null -eq $line) {
+                    $auditTail = Get-McpAuditDump -AuditPath $AuditPath -Utf8Encoder $Utf8Encoder
+                    $sideDump = if ($sideFrames.Count -gt 0) { "`nSide frames before EOF:`n$($sideFrames -join "`n")" } else { "" }
+                    throw "Phase 12f ${ProbeName} (id=${ExpectedId}): stdout EOF before response received (server likely crashed before responding).${sideDump}${auditTail}"
+                }
+
+                if ([string]::IsNullOrWhiteSpace($line)) {
+                    continue
+                }
+
+                try {
+                    $resp = $line | ConvertFrom-Json
+                } catch {
+                    throw "Phase 12f ${ProbeName} (id=${ExpectedId}): non-JSON line on stdout (protocol corruption per D99.D -- stdio must be pure JSON-RPC frames): '$line'"
+                }
+
+                if ($null -eq $resp.id) {
+                    $sideFrames.Add($line)
+                    continue
+                }
+
+                if ("$($resp.id)" -ne "$ExpectedId") {
+                    $sideFrames.Add($line)
+                    continue
+                }
+
+                if ($null -ne $resp.error) {
+                    throw "Phase 12f ${ProbeName} (id=${ExpectedId}): expected JSON-RPC success envelope (no top-level 'error' field per D99.O -- Cat 2 denials use result.isError=true on success envelope, NOT JSON-RPC error envelope; top-level error is reserved for Cat 4 integrity throws). Got error: $($resp.error | ConvertTo-Json -Compress -Depth 10)"
+                }
+
+                return $resp
+            }
+
+            $auditTail = Get-McpAuditDump -AuditPath $AuditPath -Utf8Encoder $Utf8Encoder
+            $sideDump = if ($sideFrames.Count -gt 0) { "`nSide frames before timeout:`n$($sideFrames -join "`n")" } else { "" }
+            throw "Phase 12f ${ProbeName} (id=${ExpectedId}): timeout after ${TimeoutMs}ms waiting for response.${sideDump}${auditTail}"
+        }
+
         # Select-SingleAuditRecord: select exactly one audit record matching
         # a predicate. Throws on count !== 1 with a diagnostic dump of all
         # records. Used to select by record SHAPE rather than array index --
@@ -1270,43 +1391,56 @@ PHASE_12D_TOKEN = "TESTFIXTUREONLY_S9qX8wV7tS6rP5nM4kL3jH2gF1"
             '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"made_up_tool","arguments":{}}}'
         )
         # Newline-delimited JSON-RPC framing per D99.D (NOT LSP Content-
-        # Length headers). LF-only (no CRLF) per stdio protocol convention.
-        # Trailing LF after the last frame ensures the server's line reader
-        # emits the final message before EOF.
+        # Length headers). LF-only (no CRLF). Send-McpFrame appends the LF
+        # terminator per call; the $mcpInputBody assembly here is purely
+        # a diagnostic snapshot persisted to $mcpInputFile so a failure
+        # can be reproduced post-mortem by re-feeding the same bytes.
         $mcpInputBody = ($mcpRequests -join "`n") + "`n"
         # UTF-8 NO BOM. Server expects pure UTF-8; a BOM at byte 0 would
-        # corrupt the first request's JSON parse.
+        # corrupt the first request's JSON parse. The same encoder is
+        # passed into Send-McpFrame / Wait-McpResponseById / Get-McpAuditDump
+        # so all byte<->string boundaries use one explicit encoding.
         $utf8NoBomMcp = [System.Text.UTF8Encoding]::new($false)
         [System.IO.File]::WriteAllText($mcpInputFile, $mcpInputBody, $utf8NoBomMcp)
 
+        # Drift guard: $mcpRequests + interactive transcript below are
+        # paired by frame index. If a future change adds/removes frames,
+        # this assertion catches the mismatch before the harness runs.
+        if ($mcpRequests.Count -ne 7) {
+            throw "Phase 12f: internal error -- expected 7 frames in `$mcpRequests, got $($mcpRequests.Count). The interactive transcript below assumes exactly 7 frames in the documented order."
+        }
+
         # === Probe ===
-        # System.Diagnostics.Process with pre-buffered stdin + explicit
-        # StandardInput.Close() to send FIN. The cmd-file-redirect
-        # pattern (`cmd /c "... < input.ndjson"`) fails on Windows with
-        # the low-level SDK Server (D99.D) because cmd's stdin redirection
-        # does NOT propagate stdin EOF to the child Node process cleanly
-        # -- the SDK's StdioServerTransport relies on the stdin 'end'
-        # event to trigger transport close, which never fires under cmd
-        # file redirection (Node detects unsettled top-level await at
-        # process-exit time and exits with code 13). Explicit
-        # StandardInput.Close() via the .NET Process API sends the FIN
-        # that real MCP clients (subprocess-spawn + child.stdin.end())
-        # send -- mirrors stdio-server unit test behavior.
+        # Interactive request-response harness: Send-McpFrame writes one
+        # JSON-RPC frame, Wait-McpResponseById reads the matching
+        # response (skipped for the notification frame, which produces
+        # none) before the next frame is sent. stdin is closed ONLY
+        # after all 6 responses have been received, so stdin EOF never
+        # races with in-flight response writes. Replaces the prior
+        # "blast all frames + close stdin immediately" pattern that
+        # exposed an SDK transport race on GHA windows-latest under
+        # powershell.exe -- the audit log showed 3 denial records but
+        # stdout was empty because the SDK's stdout writes were failing
+        # after stdin EOF arrived while get_policy was still in flight.
+        # The interactive flow matches real MCP client semantics
+        # (write -> read -> write -> read), eliminating the race
+        # deterministically across PowerShell versions and runner
+        # environments.
         #
         # cmd /c wrapper is still needed because pnpm.cmd is a Windows
         # batch file that CreateProcess (UseShellExecute=$false) cannot
         # launch directly.
         #
-        # Bounded execution (30s timeout) + process-tree kill on timeout.
-        # Without these, a server regression (stuck audit close,
-        # unresolved Promise, deadlock) would hang the smoke forever via
-        # WaitForExit's default indefinite wait. taskkill /T /F kills the
-        # full cmd -> pnpm -> node process tree on Windows so no orphans
-        # survive the timeout. Bounded drain waits (5s) protect against
-        # stuck stream handles after the kill.
-        Write-Host '> pnpm exec viberevert mcp serve (System.Diagnostics.Process; pre-buffered stdin + StandardInput.Close() FIN; 30s timeout with /T /F tree-kill; concurrent stdout/stderr drain)'
+        # Bounded execution: per-response 15s via Wait-McpResponseById's
+        # single deadline; overall 30s for clean exit after stdin close
+        # via WaitForExit + taskkill /T /F on the cmd -> pnpm -> node
+        # process tree. The catch block below also tree-kills on ANY
+        # transcript failure (timeout, EOF, wire-shape violation), so
+        # a thrown transcript exception cannot leak orphan processes.
+        Write-Host '> pnpm exec viberevert mcp serve (System.Diagnostics.Process; interactive request-response harness; per-response 15s + overall 30s exit timeouts; /T /F tree-kill on overall timeout OR transcript failure; concurrent stderr drain)'
 
-        $mcpTimeoutMs = 30000
+        $mcpResponseTimeoutMs = 15000
+        $mcpExitTimeoutMs = 30000
 
         $psi = New-Object System.Diagnostics.ProcessStartInfo
         $psi.FileName = $env:ComSpec
@@ -1322,145 +1456,177 @@ PHASE_12D_TOKEN = "TESTFIXTUREONLY_S9qX8wV7tS6rP5nM4kL3jH2gF1"
         $proc.StartInfo = $psi
         $null = $proc.Start()
 
-        # Write the 7-frame input body as explicit UTF-8 bytes via the
-        # BaseStream (bypasses the StreamWriter encoding layer), then
-        # Close to send FIN. PS 5.1's .NET Framework defaults the
-        # StreamWriter to the system ANSI code page; PS 7's .NET Core
-        # defaults to UTF-8. ASCII JSON survives both encodings, but
-        # state/buffering differences between the runtimes manifested
-        # as an SDK transport error on the GHA Windows runner under
-        # powershell.exe (PS 5.1). Writing UTF-8 bytes directly to the
-        # underlying OS pipe via BaseStream is encoding-deterministic
-        # across PS versions and runner locales. try/finally ensures
-        # Close() runs even if Write throws (e.g., child crashed mid-
-        # write); without the Close FIN, WaitForExit would always
-        # time out.
-        try {
-            $mcpInputBytes = $utf8NoBomMcp.GetBytes($mcpInputBody)
-            $proc.StandardInput.BaseStream.Write($mcpInputBytes, 0, $mcpInputBytes.Length)
-            $proc.StandardInput.BaseStream.Flush()
-        } finally {
-            $proc.StandardInput.Close()
-        }
-
-        # Drain BOTH output streams concurrently into in-memory buffers
-        # (concurrent drain prevents pipe-buffer deadlock if the child
-        # writes >4KB to either stream before exit -- Windows pipe
-        # buffer is 4KB).
-        $stdoutMs = New-Object System.IO.MemoryStream
+        # stdout via sync StreamReader (line-by-line, UTF-8 explicit).
+        # PS 5.1's New-Object with multiple constructor args requires
+        # -ArgumentList @(...); inline parentheses can pass the first
+        # arg as a single object/array under some parser modes.
+        # stderr via async CopyToAsync drain (captured at end). Separate
+        # paths because we need to interleave stdin writes with stdout
+        # reads inside the transcript loop; stderr is fire-and-collect.
+        $stdoutReader = New-Object System.IO.StreamReader -ArgumentList @($proc.StandardOutput.BaseStream, $utf8NoBomMcp)
         $stderrMs = New-Object System.IO.MemoryStream
+        $mcpResponses = @{}
+        $receivedRawLines = New-Object System.Collections.Generic.List[string]
         $timedOut = $false
+        $stderrTask = $null
+        # Cleanup guard: tracks whether we've already closed stdin.
+        # The catch block below uses this to avoid double-close on
+        # the failure path that occurs AFTER the happy-path close.
+        $stdinClosed = $false
 
         try {
-            $stdoutTask = $proc.StandardOutput.BaseStream.CopyToAsync($stdoutMs)
             $stderrTask = $proc.StandardError.BaseStream.CopyToAsync($stderrMs)
 
-            if (-not $proc.WaitForExit($mcpTimeoutMs)) {
+            # Frame 0: initialize -> id 1 response
+            Send-McpFrame -Proc $proc -JsonLine $mcpRequests[0] -Utf8Encoder $utf8NoBomMcp
+            $mcpResponses[1] = Wait-McpResponseById -Reader $stdoutReader -ExpectedId 1 `
+                -ProbeName 'initialize' -TimeoutMs $mcpResponseTimeoutMs `
+                -AuditPath $mcpAuditPath -Utf8Encoder $utf8NoBomMcp
+            $receivedRawLines.Add(($mcpResponses[1] | ConvertTo-Json -Compress -Depth 20))
+
+            # Frame 1: notifications/initialized (no id, no response per JSON-RPC)
+            Send-McpFrame -Proc $proc -JsonLine $mcpRequests[1] -Utf8Encoder $utf8NoBomMcp
+
+            # Frame 2: tools/list -> id 2 response
+            Send-McpFrame -Proc $proc -JsonLine $mcpRequests[2] -Utf8Encoder $utf8NoBomMcp
+            $mcpResponses[2] = Wait-McpResponseById -Reader $stdoutReader -ExpectedId 2 `
+                -ProbeName 'tools/list' -TimeoutMs $mcpResponseTimeoutMs `
+                -AuditPath $mcpAuditPath -Utf8Encoder $utf8NoBomMcp
+            $receivedRawLines.Add(($mcpResponses[2] | ConvertTo-Json -Compress -Depth 20))
+
+            # Frame 3: tools/call get_policy -> id 3 response (Cat 1 success)
+            Send-McpFrame -Proc $proc -JsonLine $mcpRequests[3] -Utf8Encoder $utf8NoBomMcp
+            $mcpResponses[3] = Wait-McpResponseById -Reader $stdoutReader -ExpectedId 3 `
+                -ProbeName 'tools/call get_policy' -TimeoutMs $mcpResponseTimeoutMs `
+                -AuditPath $mcpAuditPath -Utf8Encoder $utf8NoBomMcp
+            $receivedRawLines.Add(($mcpResponses[3] | ConvertTo-Json -Compress -Depth 20))
+
+            # Frame 4: tools/call rollback -> id 4 response (Cat 2 reserved denial)
+            Send-McpFrame -Proc $proc -JsonLine $mcpRequests[4] -Utf8Encoder $utf8NoBomMcp
+            $mcpResponses[4] = Wait-McpResponseById -Reader $stdoutReader -ExpectedId 4 `
+                -ProbeName 'tools/call rollback' -TimeoutMs $mcpResponseTimeoutMs `
+                -AuditPath $mcpAuditPath -Utf8Encoder $utf8NoBomMcp
+            $receivedRawLines.Add(($mcpResponses[4] | ConvertTo-Json -Compress -Depth 20))
+
+            # Frame 5: tools/call request_human_approval -> id 5 response (Cat 2 reserved denial)
+            Send-McpFrame -Proc $proc -JsonLine $mcpRequests[5] -Utf8Encoder $utf8NoBomMcp
+            $mcpResponses[5] = Wait-McpResponseById -Reader $stdoutReader -ExpectedId 5 `
+                -ProbeName 'tools/call request_human_approval' -TimeoutMs $mcpResponseTimeoutMs `
+                -AuditPath $mcpAuditPath -Utf8Encoder $utf8NoBomMcp
+            $receivedRawLines.Add(($mcpResponses[5] | ConvertTo-Json -Compress -Depth 20))
+
+            # Frame 6: tools/call made_up_tool -> id 6 response (Cat 2 unknown denial)
+            Send-McpFrame -Proc $proc -JsonLine $mcpRequests[6] -Utf8Encoder $utf8NoBomMcp
+            $mcpResponses[6] = Wait-McpResponseById -Reader $stdoutReader -ExpectedId 6 `
+                -ProbeName 'tools/call made_up_tool' -TimeoutMs $mcpResponseTimeoutMs `
+                -AuditPath $mcpAuditPath -Utf8Encoder $utf8NoBomMcp
+            $receivedRawLines.Add(($mcpResponses[6] | ConvertTo-Json -Compress -Depth 20))
+
+            # All 6 responses received. Now close stdin to signal
+            # graceful shutdown. The in-flight handler gate
+            # (M G1a Step 4 fix) drains any pending handlers before
+            # the server exits with code 0.
+            $proc.StandardInput.Close()
+            $stdinClosed = $true
+
+            if (-not $proc.WaitForExit($mcpExitTimeoutMs)) {
                 $timedOut = $true
                 # Kill the full cmd -> pnpm -> node process tree on
                 # Windows. /T = tree kill (children too); /F = force
-                # (don't ask for graceful close). Required because cmd
-                # spawns pnpm.cmd which spawns node -- killing just
-                # $proc (the cmd) leaves pnpm + node as orphans.
+                # (don't ask for graceful close). Required because
+                # cmd spawns pnpm.cmd which spawns node -- killing
+                # just $proc (the cmd) leaves pnpm + node as orphans.
                 & taskkill /PID $proc.Id /T /F | Out-Null
                 $null = $proc.WaitForExit(5000)
             }
 
-            # Bounded drain wait (5s) -- if the kill-tree didn't release
-            # the pipe handles cleanly, we still proceed with whatever
-            # was captured rather than hanging.
-            $null = $stdoutTask.Wait(5000)
-            $null = $stderrTask.Wait(5000)
+            # Bounded stderr drain wait (5s) -- if the kill-tree
+            # didn't release the pipe handles cleanly, we still
+            # proceed with whatever was captured rather than hanging.
+            if ($null -ne $stderrTask) {
+                $null = $stderrTask.Wait(5000)
+            }
 
             $mcpExitCode = $proc.ExitCode
-            $stdoutBytes = $stdoutMs.ToArray()
             $stderrBytes = $stderrMs.ToArray()
+        } catch {
+            # Transcript failure (timeout, EOF, wire-shape violation,
+            # etc.): close stdin (if not already), tree-kill the
+            # cmd -> pnpm -> node tree, drain stderr, then rethrow
+            # the original exception. Without this, a thrown transcript
+            # exception would leave the child processes alive past
+            # smoke completion -- the finally below only disposes
+            # handles, it does not stop processes.
+            try {
+                if (-not $stdinClosed) {
+                    $proc.StandardInput.Close()
+                    $stdinClosed = $true
+                }
+            } catch {
+                # Preserve the original transcript failure.
+            }
+
+            if (-not $proc.HasExited) {
+                & taskkill /PID $proc.Id /T /F | Out-Null
+                $null = $proc.WaitForExit(5000)
+            }
+
+            if ($null -ne $stderrTask) {
+                $null = $stderrTask.Wait(5000)
+            }
+
+            throw
         } finally {
-            $stdoutMs.Dispose()
-            $stderrMs.Dispose()
-            $proc.Dispose()
+            if ($null -ne $stdoutReader) {
+                $stdoutReader.Dispose()
+            }
+            if ($null -ne $stderrMs) {
+                $stderrMs.Dispose()
+            }
+            if ($null -ne $proc) {
+                $proc.Dispose()
+            }
         }
 
-        # Decode UTF-8 (no BOM) bytes -> string. Persist to the temp
-        # files for diagnostic inspection (Path A: $mcpInputFile retained
-        # as the exact bytes sent; output/stderr captured here for
-        # post-mortem; -KeepArtifacts preserves all of them on failure).
-        $utf8Reader = [System.Text.UTF8Encoding]::new($false)
-        $mcpStdoutText = $utf8Reader.GetString($stdoutBytes)
-        $mcpStderr = $utf8Reader.GetString($stderrBytes)
-        [System.IO.File]::WriteAllText($mcpOutputFile, $mcpStdoutText, $utf8NoBomMcp)
+        # Decode + persist diagnostic artifacts. $mcpOutputFile content
+        # is the re-serialized responses (compact JSON) rather than the
+        # raw stdout bytes; for byte-perfect repro use $mcpInputFile as
+        # input and a future run will produce comparable wire output.
+        $mcpStderr = $utf8NoBomMcp.GetString($stderrBytes)
+        $mcpResponseTranscriptText = ($receivedRawLines -join "`n")
+        [System.IO.File]::WriteAllText($mcpOutputFile, $mcpResponseTranscriptText, $utf8NoBomMcp)
         [System.IO.File]::WriteAllText($mcpStderrFile, $mcpStderr, $utf8NoBomMcp)
-        # Split on LF (UTF-8 LF only, matching the server's stdio output;
-        # the SDK does not emit CRLF). Filter empty trailing line.
-        $mcpStdout = @($mcpStdoutText -split "`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
 
-        # Timeout check FIRST -- clear, distinct error before the
-        # exit-code check would surface a less-helpful "non-zero exit"
-        # message. On timeout, the process tree was killed so the exit
-        # code reflects the kill, not a graceful exit.
-        # On failure paths (timeout OR non-zero exit), append audit-log
-        # contents to the diagnostic message. The MCP server's
-        # server.onerror -> shutdown.signalUnhealthy path wraps the
-        # underlying SDK error as a generic "MCP server transport
-        # error" stderr line at server.ts:829, swallowing the actual
-        # SDK error message. The audit log's server_integrity_failure
-        # record IS the post-mortem channel that preserves the
-        # underlying error -- include it in the thrown message so CI
-        # logs surface what the SDK actually reported.
-        $auditDump = ''
-        if (Test-Path $mcpAuditPath) {
-            $auditBytes = [System.IO.File]::ReadAllBytes($mcpAuditPath)
-            $auditText = $utf8NoBomMcp.GetString($auditBytes)
-            $auditDump = "`nAudit log (${mcpAuditPath}):`n${auditText}"
-        } else {
-            $auditDump = "`nAudit log (${mcpAuditPath}): NOT PRESENT (server failed before openAuditLog ran -- very early boot failure)"
-        }
-
+        # Post-exit failure checks. Per-response failures (timeout,
+        # EOF, wrong id, top-level error envelope) already threw from
+        # Wait-McpResponseById; reaching here means all 6 responses
+        # were captured AND stdin was closed cleanly. Now verify
+        # clean exit + empty stderr.
         if ($timedOut) {
-            throw "Phase 12f: MCP server timed out after ${mcpTimeoutMs}ms (bounded execution; killed cmd -> pnpm -> node process tree via taskkill /T /F).`nStderr:`n$mcpStderr`nStdout:`n$($mcpStdout -join `"`n`")${auditDump}"
+            $auditTail = Get-McpAuditDump -AuditPath $mcpAuditPath -Utf8Encoder $utf8NoBomMcp
+            throw "Phase 12f: MCP server timed out after ${mcpExitTimeoutMs}ms waiting for clean exit after stdin close (bounded execution; killed cmd -> pnpm -> node process tree via taskkill /T /F).`nStderr:`n$mcpStderr${auditTail}"
         }
 
         if ($mcpExitCode -ne 0) {
-            throw "Phase 12f: MCP server exited $mcpExitCode (expected 0).`nStderr:`n$mcpStderr`nStdout:`n$($mcpStdout -join `"`n`")${auditDump}"
+            $auditTail = Get-McpAuditDump -AuditPath $mcpAuditPath -Utf8Encoder $utf8NoBomMcp
+            throw "Phase 12f: MCP server exited $mcpExitCode after stdin close (expected 0).`nStderr:`n$mcpStderr${auditTail}"
         }
         if (-not [string]::IsNullOrWhiteSpace($mcpStderr)) {
             throw "Phase 12f: expected EMPTY stderr on successful MCP serve (D99.M.14 -- the mcp library MUST NOT write to process.stderr; CLI MCPCommand only writes stderr on failure paths). Got:`n$mcpStderr"
         }
-        Write-Host '[ok] Phase 12f: MCP server exited 0; stderr empty (D99.M.14 byte-channel discipline verified)'
+        Write-Host '[ok] Phase 12f: MCP server exited 0 after stdin close; stderr empty (D99.M.14 byte-channel discipline verified)'
 
-        # === Parse responses: STRICT (fail on non-JSON, missing id, dup id, unexpected id) ===
-        # Any non-JSON line on MCP stdout is protocol corruption per D99.D
-        # (stdio IS the JSON-RPC byte channel). Hard failure -- do NOT
-        # silently skip. Same for responses without id (smoke does not
-        # expect server-initiated notifications) and for any id outside
-        # the expected 1..6 set.
+        # All 6 responses captured during interactive flow (sanity
+        # check: any id missing here means a programming error in
+        # the transcript above, not a server failure -- server
+        # failures would have thrown from Wait-McpResponseById).
         $expectedIds = @(1, 2, 3, 4, 5, 6)
-        $mcpResponses = @{}
-        foreach ($line in @($mcpStdout)) {
-            if ([string]::IsNullOrWhiteSpace($line)) { continue }
-            try {
-                $parsed = $line | ConvertFrom-Json
-            } catch {
-                throw "Phase 12f: non-JSON line on MCP stdout (protocol corruption per D99.D -- stdio must be pure JSON-RPC frames): '$line'. Full stdout:`n$($mcpStdout -join `"`n`")"
-            }
-            if ($null -eq $parsed.id) {
-                throw "Phase 12f: JSON-RPC frame without id field on stdout (smoke does NOT expect server-initiated notifications). Frame: '$line'"
-            }
-            $idInt = [int]$parsed.id
-            if ($expectedIds -notcontains $idInt) {
-                throw "Phase 12f: unexpected JSON-RPC response id=$idInt (expected one of $($expectedIds -join ',')). Full stdout:`n$($mcpStdout -join `"`n`")"
-            }
-            if ($mcpResponses.ContainsKey($idInt)) {
-                throw "Phase 12f: duplicate JSON-RPC response id=$idInt. Full stdout:`n$($mcpStdout -join `"`n`")"
-            }
-            $mcpResponses[$idInt] = $parsed
-        }
         foreach ($id in $expectedIds) {
             if (-not $mcpResponses.ContainsKey($id)) {
-                throw "Phase 12f: missing JSON-RPC response id=$id. Got ids: $($mcpResponses.Keys -join ','). Full stdout:`n$($mcpStdout -join `"`n`")"
+                throw "Phase 12f: internal error -- missing JSON-RPC response id=$id after interactive flow. Got ids: $($mcpResponses.Keys -join ',')"
             }
         }
-        Write-Host "[ok] Phase 12f: parsed exactly 6 JSON-RPC responses (ids 1..6 present; no dupes, no extras, no non-JSON lines on stdout)"
+        Write-Host "[ok] Phase 12f: collected exactly 6 JSON-RPC responses via interactive request-response flow (ids 1..6)"
 
         # === All 6 responses must be JSON-RPC SUCCESS envelopes (no top-level `error`) ===
         # Cat 2 denials use result.isError=true on a JSON-RPC SUCCESS
