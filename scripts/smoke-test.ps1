@@ -1322,12 +1322,23 @@ PHASE_12D_TOKEN = "TESTFIXTUREONLY_S9qX8wV7tS6rP5nM4kL3jH2gF1"
         $proc.StartInfo = $psi
         $null = $proc.Start()
 
-        # Write the 7-frame input body, then Close to send FIN. try/finally
-        # ensures Close() runs even if Write throws (e.g., child crashed
-        # mid-write); without the Close FIN, WaitForExit would always
+        # Write the 7-frame input body as explicit UTF-8 bytes via the
+        # BaseStream (bypasses the StreamWriter encoding layer), then
+        # Close to send FIN. PS 5.1's .NET Framework defaults the
+        # StreamWriter to the system ANSI code page; PS 7's .NET Core
+        # defaults to UTF-8. ASCII JSON survives both encodings, but
+        # state/buffering differences between the runtimes manifested
+        # as an SDK transport error on the GHA Windows runner under
+        # powershell.exe (PS 5.1). Writing UTF-8 bytes directly to the
+        # underlying OS pipe via BaseStream is encoding-deterministic
+        # across PS versions and runner locales. try/finally ensures
+        # Close() runs even if Write throws (e.g., child crashed mid-
+        # write); without the Close FIN, WaitForExit would always
         # time out.
         try {
-            $proc.StandardInput.Write($mcpInputBody)
+            $mcpInputBytes = $utf8NoBomMcp.GetBytes($mcpInputBody)
+            $proc.StandardInput.BaseStream.Write($mcpInputBytes, 0, $mcpInputBytes.Length)
+            $proc.StandardInput.BaseStream.Flush()
         } finally {
             $proc.StandardInput.Close()
         }
@@ -1387,12 +1398,30 @@ PHASE_12D_TOKEN = "TESTFIXTUREONLY_S9qX8wV7tS6rP5nM4kL3jH2gF1"
         # exit-code check would surface a less-helpful "non-zero exit"
         # message. On timeout, the process tree was killed so the exit
         # code reflects the kill, not a graceful exit.
+        # On failure paths (timeout OR non-zero exit), append audit-log
+        # contents to the diagnostic message. The MCP server's
+        # server.onerror -> shutdown.signalUnhealthy path wraps the
+        # underlying SDK error as a generic "MCP server transport
+        # error" stderr line at server.ts:829, swallowing the actual
+        # SDK error message. The audit log's server_integrity_failure
+        # record IS the post-mortem channel that preserves the
+        # underlying error -- include it in the thrown message so CI
+        # logs surface what the SDK actually reported.
+        $auditDump = ''
+        if (Test-Path $mcpAuditPath) {
+            $auditBytes = [System.IO.File]::ReadAllBytes($mcpAuditPath)
+            $auditText = $utf8NoBomMcp.GetString($auditBytes)
+            $auditDump = "`nAudit log (${mcpAuditPath}):`n${auditText}"
+        } else {
+            $auditDump = "`nAudit log (${mcpAuditPath}): NOT PRESENT (server failed before openAuditLog ran -- very early boot failure)"
+        }
+
         if ($timedOut) {
-            throw "Phase 12f: MCP server timed out after ${mcpTimeoutMs}ms (bounded execution; killed cmd -> pnpm -> node process tree via taskkill /T /F).`nStderr:`n$mcpStderr`nStdout:`n$($mcpStdout -join `"`n`")"
+            throw "Phase 12f: MCP server timed out after ${mcpTimeoutMs}ms (bounded execution; killed cmd -> pnpm -> node process tree via taskkill /T /F).`nStderr:`n$mcpStderr`nStdout:`n$($mcpStdout -join `"`n`")${auditDump}"
         }
 
         if ($mcpExitCode -ne 0) {
-            throw "Phase 12f: MCP server exited $mcpExitCode (expected 0).`nStderr:`n$mcpStderr`nStdout:`n$($mcpStdout -join `"`n`")"
+            throw "Phase 12f: MCP server exited $mcpExitCode (expected 0).`nStderr:`n$mcpStderr`nStdout:`n$($mcpStdout -join `"`n`")${auditDump}"
         }
         if (-not [string]::IsNullOrWhiteSpace($mcpStderr)) {
             throw "Phase 12f: expected EMPTY stderr on successful MCP serve (D99.M.14 -- the mcp library MUST NOT write to process.stderr; CLI MCPCommand only writes stderr on failure paths). Got:`n$mcpStderr"
