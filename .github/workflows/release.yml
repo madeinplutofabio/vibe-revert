@@ -1,0 +1,375 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Fabio Marcello Salvadori
+
+name: Release
+
+# Beta-only tag-push trigger for this milestone (v0.7.0-beta.N). When
+# stable releases ship (v0.7.0+), this workflow's regex must be widened
+# OR a separate stable workflow must be added -- the post-publish smoke,
+# release body, and --tag beta dist-tag here are all beta-specific.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+# Global release concurrency. One npm publish at a time across ALL
+# tags -- prevents concurrent betas (e.g., v0.7.0-beta.0 and
+# v0.7.0-beta.1 pushed close together) from racing the same npm
+# packages and the `beta` dist-tag. cancel-in-progress=false: a
+# second tag push MUST NOT cancel an in-flight publish.
+concurrency:
+  group: npm-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish 8 packages to npm (Ubuntu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write   # npm --provenance requires OIDC token issuance
+    outputs:
+      version: ${{ steps.validate.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0   # full history so annotated-tag check + future tag-aware logic work
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Set up Node 22 with pnpm cache and npm registry auth
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: https://registry.npmjs.org/
+
+      - name: Validate tag (beta-only) + annotated + 8 publish targets + 4 private packages
+        id: validate
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG_REF="${GITHUB_REF_NAME}"
+
+          # Beta-only regex for this milestone. Stable v0.7.0 ships
+          # via a separate workflow path; the dist-tag/post-publish
+          # smoke here are beta-specific.
+          if [[ ! "$TAG_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+$ ]]; then
+            echo "Unexpected release tag: $TAG_REF (expected v<MAJOR>.<MINOR>.<PATCH>-beta.<N>)"
+            exit 1
+          fi
+
+          # Enforce annotated tag (M RP plan locked). Lightweight tags
+          # are git-cat-file type "commit"; annotated tags are type "tag".
+          TAG_TYPE="$(git cat-file -t "refs/tags/${TAG_REF}")"
+          if [[ "$TAG_TYPE" != "tag" ]]; then
+            echo "Release tag ${TAG_REF} must be an annotated tag, not a lightweight tag (git cat-file type: ${TAG_TYPE})."
+            echo "Recreate with: git tag -a ${TAG_REF} -m \"${TAG_REF}\" && git push origin ${TAG_REF}"
+            exit 1
+          fi
+
+          VERSION="${TAG_REF#v}"
+          export VERSION
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+          # Validate package.json state: all 8 publish-target versions
+          # equal the tag suffix AND the 4 private packages remain
+          # private at 0.0.0. Either mismatch is a hard failure.
+          node -e '
+            const fs = require("fs");
+            const version = process.env.VERSION;
+            const publishTargets = [
+              "packages/cli/package.json",
+              "packages/cli-commands/package.json",
+              "packages/mcp/package.json",
+              "packages/core/package.json",
+              "packages/git/package.json",
+              "packages/checks/package.json",
+              "packages/reporters/package.json",
+              "packages/session-format/package.json",
+            ];
+            for (const p of publishTargets) {
+              const pkg = JSON.parse(fs.readFileSync(p, "utf8"));
+              if (pkg.version !== version) {
+                console.error(`${p}: expected version ${version}, got ${pkg.version}`);
+                process.exit(1);
+              }
+              if (pkg.private === true) {
+                console.error(`${p}: still has private: true (must be removed for publish)`);
+                process.exit(1);
+              }
+            }
+            console.log(`All 8 publish-target package versions match tag ${version}; private flags removed.`);
+
+            const privateStubs = [
+              "packages/adapters/package.json",
+              "packages/installers/package.json",
+              "packages/policies-basic/package.json",
+              "package.json",
+            ];
+            for (const p of privateStubs) {
+              const pkg = JSON.parse(fs.readFileSync(p, "utf8"));
+              if (pkg.private !== true) {
+                console.error(`${p}: expected private: true (must NOT publish)`);
+                process.exit(1);
+              }
+              if (pkg.version !== "0.0.0") {
+                console.error(`${p}: expected version "0.0.0", got "${pkg.version}"`);
+                process.exit(1);
+              }
+            }
+            console.log("All 4 private packages remain private at 0.0.0.");
+          '
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Validate NPM_TOKEN secret exists
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        shell: bash
+        run: |
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "NPM_TOKEN secret is not set in the repository."
+            exit 1
+          fi
+          echo "NPM_TOKEN secret is present (length: ${#NODE_AUTH_TOKEN})."
+
+      - name: Validate npm authentication (npm whoami)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        shell: bash
+        run: |
+          if ! WHO=$(npm whoami 2>&1); then
+            echo "npm whoami failed: $WHO"
+            exit 1
+          fi
+          echo "Authenticated as: $WHO"
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
+      - name: Pack 8 publish-target tarballs (validate pack surface before publish)
+        shell: bash
+        run: |
+          set -euo pipefail
+          PACK_DIR="${RUNNER_TEMP}/viberevert-pack"
+          mkdir -p "$PACK_DIR"
+          PUBLISH_DIRS=(
+            "packages/session-format"
+            "packages/core"
+            "packages/git"
+            "packages/checks"
+            "packages/reporters"
+            "packages/cli-commands"
+            "packages/mcp"
+            "packages/cli"
+          )
+          EXPECTED_NAMES=(
+            "@viberevert/session-format"
+            "@viberevert/core"
+            "@viberevert/git"
+            "@viberevert/checks"
+            "@viberevert/reporters"
+            "@viberevert/cli-commands"
+            "@viberevert/mcp"
+            "viberevert"
+          )
+          # Defense-in-depth: assert directory-to-name mapping before
+          # the pack loop. Catches "wrong dir / wrong package" failure
+          # modes that a count check alone would miss.
+          for i in "${!PUBLISH_DIRS[@]}"; do
+            actual="$(node -p "require('./${PUBLISH_DIRS[$i]}/package.json').name")"
+            expected="${EXPECTED_NAMES[$i]}"
+            if [ "$actual" != "$expected" ]; then
+              echo "Publish directory mismatch at index $i: ${PUBLISH_DIRS[$i]} has package name '$actual', expected '$expected'"
+              exit 1
+            fi
+          done
+          echo "All 8 publish directories map to the locked package names in order."
+
+          for dir in "${PUBLISH_DIRS[@]}"; do
+            echo "==> Packing $dir"
+            (cd "$dir" && pnpm pack --pack-destination "$PACK_DIR")
+          done
+          count="$(find "$PACK_DIR" -maxdepth 1 -name '*.tgz' | wc -l | tr -d ' ')"
+          if [ "$count" != "8" ]; then
+            echo "Expected exactly 8 packed tarballs, got $count"
+            find "$PACK_DIR" -maxdepth 1 -type f -print
+            exit 1
+          fi
+          echo "All 8 publish-target tarballs packed into $PACK_DIR:"
+          find "$PACK_DIR" -maxdepth 1 -name '*.tgz' -printf '  %f\n'
+
+      - name: Pre-publish guard -- assert no target version is already published (404-strict)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ steps.validate.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          PUBLISH_TARGETS=(
+            "@viberevert/session-format"
+            "@viberevert/core"
+            "@viberevert/git"
+            "@viberevert/checks"
+            "@viberevert/reporters"
+            "@viberevert/cli-commands"
+            "@viberevert/mcp"
+            "viberevert"
+          )
+          view_err="$(mktemp)"
+          trap 'rm -f "$view_err"' EXIT
+          for pkg in "${PUBLISH_TARGETS[@]}"; do
+            echo "Checking ${pkg}@${VERSION} on npm registry..."
+            : > "$view_err"
+            if npm view "${pkg}@${VERSION}" version >/dev/null 2>"$view_err"; then
+              echo "ERROR: ${pkg}@${VERSION} already exists on npm."
+              echo "Per partial-publish policy, bump to next beta iteration; do NOT reuse this version."
+              exit 1
+            fi
+            # 404 is the only "safely not present" signal. Any other
+            # error (auth, network, registry outage) is ambiguous and
+            # MUST NOT be treated as "publish OK".
+            if grep -Eq "(E404|404 Not Found|not found)" "$view_err"; then
+              echo "  ${pkg}@${VERSION}: not present (publish OK)"
+            else
+              echo "ERROR: could not safely determine whether ${pkg}@${VERSION} exists. npm view stderr:"
+              cat "$view_err"
+              exit 1
+            fi
+          done
+
+      - name: Publish 8 packages in dependency-safe order
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ steps.validate.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          PUBLISH_DIRS=(
+            "packages/session-format"
+            "packages/core"
+            "packages/git"
+            "packages/checks"
+            "packages/reporters"
+            "packages/cli-commands"
+            "packages/mcp"
+            "packages/cli"
+          )
+          EXPECTED_NAMES=(
+            "@viberevert/session-format"
+            "@viberevert/core"
+            "@viberevert/git"
+            "@viberevert/checks"
+            "@viberevert/reporters"
+            "@viberevert/cli-commands"
+            "@viberevert/mcp"
+            "viberevert"
+          )
+          # Defense-in-depth: independent mapping assertion immediately
+          # before the irreversible publish loop. Pack step already
+          # verified this, but a between-step regression (manual edit,
+          # etc.) shouldn't be able to reach publish.
+          for i in "${!PUBLISH_DIRS[@]}"; do
+            actual="$(node -p "require('./${PUBLISH_DIRS[$i]}/package.json').name")"
+            expected="${EXPECTED_NAMES[$i]}"
+            if [ "$actual" != "$expected" ]; then
+              echo "Publish directory mismatch at index $i: ${PUBLISH_DIRS[$i]} has package name '$actual', expected '$expected'"
+              exit 1
+            fi
+          done
+          echo "All 8 publish directories map to the locked package names in order."
+
+          for dir in "${PUBLISH_DIRS[@]}"; do
+            echo "==> Publishing $dir"
+            # --access public: required for scoped packages, harmless for unscoped viberevert
+            # --tag beta:     dist-tag for pre-release (NOT latest)
+            # --provenance:   SLSA attestation via OIDC (requires id-token: write)
+            # --no-git-checks: dist/ build outputs are uncommitted; pnpm would otherwise refuse
+            (cd "$dir" && pnpm publish --access public --tag beta --provenance --no-git-checks)
+          done
+          echo "All 8 packages published at version ${VERSION} with dist-tag beta."
+
+  post-publish-smoke:
+    name: Post-publish smoke (Windows PowerShell 5.1)
+    needs: publish
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Run post-publish smoke against viberevert@beta
+        env:
+          RELEASE_VERSION: ${{ needs.publish.outputs.version }}
+        # PS 5.1 (powershell.exe) is the same parser that surfaced
+        # Step 3's BOM-injection class. Post-publish smoke runs here
+        # so published bytes pass the same Windows path that
+        # release-dry-run validates against locally-packed bytes.
+        run: powershell.exe -ExecutionPolicy Bypass -File scripts/post-publish-smoke.ps1 -ExpectedVersion "$env:RELEASE_VERSION"
+
+  github-release:
+    name: Create GitHub Release
+    needs: [publish, post-publish-smoke]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write   # create the GitHub Release
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          draft: false
+          prerelease: true
+          body: |
+            VibeRevert ${{ github.ref_name }} beta release.
+
+            Published npm packages (dist-tag `beta`, version `${{ needs.publish.outputs.version }}`):
+            - `@viberevert/session-format`
+            - `@viberevert/core`
+            - `@viberevert/git`
+            - `@viberevert/checks`
+            - `@viberevert/reporters`
+            - `@viberevert/cli-commands`
+            - `@viberevert/mcp`
+            - `viberevert`
+
+            Install: `npm install viberevert@beta`
+
+            Post-publish smoke (Windows PowerShell 5.1) passed against `viberevert@beta`:
+            - `npm install` + version match
+            - `npx viberevert --version` / `doctor` / `init --profile generic`
+            - MCP server stdio probe: full 7-frame Phase 12f transcript (6 responses + 4 audit records)
+            - MCP wire-shape locks: D99.Y protocolVersion, D99.A 8-tool order, D99.B reserved hiding, D99.O Cat 1/Cat 2, R31 reflection locks
+            - MCP server exited 0 cleanly with empty stderr
+
+            CHANGELOG cutover happens in M RP Step 6 (post-publish documentation pass).
