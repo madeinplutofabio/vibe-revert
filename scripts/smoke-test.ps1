@@ -1427,24 +1427,42 @@ PHASE_12D_TOKEN = "TESTFIXTUREONLY_S9qX8wV7tS6rP5nM4kL3jH2gF1"
         # deterministically across PowerShell versions and runner
         # environments.
         #
-        # cmd /c wrapper is still needed because pnpm.cmd is a Windows
-        # batch file that CreateProcess (UseShellExecute=$false) cannot
-        # launch directly.
+        # Launch node.exe directly with the installed viberevert entry.
+        # The historic cmd /c pnpm exec ... wrapper introduces a
+        # us -> cmd -> pnpm.cmd -> node stdin chain that interactive
+        # request-response harnesses cannot reliably drive on
+        # GHA windows-latest PS 5.1: cmd's redirected-stdin buffering
+        # held the initialize frame in cmd until close-on-shutdown,
+        # but the interactive flow never closes stdin until after all
+        # responses arrive -- producing stdout EOF before the first
+        # response was even readable. Direct node.exe launch eliminates
+        # both the cmd and pnpm.cmd layers; stdin goes straight to the
+        # MCP server process. (Other phases that use cmd /c pnpm exec
+        # are non-interactive and unaffected.) Test-Path guards against
+        # a smoke ordering bug where Phase 12f runs before the scratch
+        # pnpm install populated node_modules.
         #
         # Bounded execution: per-response 15s via Wait-McpResponseById's
         # single deadline; overall 30s for clean exit after stdin close
-        # via WaitForExit + taskkill /T /F on the cmd -> pnpm -> node
-        # process tree. The catch block below also tree-kills on ANY
-        # transcript failure (timeout, EOF, wire-shape violation), so
-        # a thrown transcript exception cannot leak orphan processes.
-        Write-Host '> pnpm exec viberevert mcp serve (System.Diagnostics.Process; interactive request-response harness; per-response 15s + overall 30s exit timeouts; /T /F tree-kill on overall timeout OR transcript failure; concurrent stderr drain)'
+        # via WaitForExit + taskkill /T /F on the node process tree.
+        # The catch block below also tree-kills on ANY transcript
+        # failure (timeout, EOF, wire-shape violation), so a thrown
+        # transcript exception cannot leak orphan processes.
+        Write-Host '> node node_modules/viberevert/dist/index.js mcp serve (System.Diagnostics.Process; direct node launch; interactive request-response harness; per-response 15s + overall 30s exit timeouts; /T /F tree-kill on overall timeout OR transcript failure; concurrent stderr drain)'
 
         $mcpResponseTimeoutMs = 15000
         $mcpExitTimeoutMs = 30000
 
+        $nodeBin = (Get-Command node).Source
+        $viberevertEntry = Join-Path (Get-Location).Path 'node_modules/viberevert/dist/index.js'
+
+        if (-not (Test-Path $viberevertEntry)) {
+            throw "Phase 12f: expected installed viberevert entrypoint missing: $viberevertEntry"
+        }
+
         $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName = $env:ComSpec
-        $psi.Arguments = '/c pnpm exec viberevert mcp serve'
+        $psi.FileName = $nodeBin
+        $psi.Arguments = """$viberevertEntry"" mcp serve"
         $psi.RedirectStandardInput = $true
         $psi.RedirectStandardOutput = $true
         $psi.RedirectStandardError = $true
@@ -1531,11 +1549,11 @@ PHASE_12D_TOKEN = "TESTFIXTUREONLY_S9qX8wV7tS6rP5nM4kL3jH2gF1"
 
             if (-not $proc.WaitForExit($mcpExitTimeoutMs)) {
                 $timedOut = $true
-                # Kill the full cmd -> pnpm -> node process tree on
-                # Windows. /T = tree kill (children too); /F = force
-                # (don't ask for graceful close). Required because
-                # cmd spawns pnpm.cmd which spawns node -- killing
-                # just $proc (the cmd) leaves pnpm + node as orphans.
+                # Tree-kill the node process and any children.
+                # /T = tree kill (children too); /F = force (don't
+                # ask for graceful close). Direct node.exe launch
+                # means the tree is shallow but /T is kept for
+                # defense-in-depth in case node spawned helpers.
                 & taskkill /PID $proc.Id /T /F | Out-Null
                 $null = $proc.WaitForExit(5000)
             }
@@ -1552,11 +1570,16 @@ PHASE_12D_TOKEN = "TESTFIXTUREONLY_S9qX8wV7tS6rP5nM4kL3jH2gF1"
         } catch {
             # Transcript failure (timeout, EOF, wire-shape violation,
             # etc.): close stdin (if not already), tree-kill the
-            # cmd -> pnpm -> node tree, drain stderr, then rethrow
-            # the original exception. Without this, a thrown transcript
-            # exception would leave the child processes alive past
-            # smoke completion -- the finally below only disposes
-            # handles, it does not stop processes.
+            # node process tree, drain stderr, then rethrow the
+            # original exception enriched with stderr context.
+            # Without this, a thrown transcript exception would leave
+            # the child process alive past smoke completion -- the
+            # finally below only disposes handles, it does not stop
+            # processes. Stderr enrichment is critical for diagnosing
+            # early-failure cases where audit log is empty (server
+            # crashed before openAuditLog or before processing any
+            # tool call) -- stderr is the only channel that carries
+            # the underlying error in that window.
             try {
                 if (-not $stdinClosed) {
                     $proc.StandardInput.Close()
@@ -1573,6 +1596,15 @@ PHASE_12D_TOKEN = "TESTFIXTUREONLY_S9qX8wV7tS6rP5nM4kL3jH2gF1"
 
             if ($null -ne $stderrTask) {
                 $null = $stderrTask.Wait(5000)
+            }
+
+            $transcriptStderr = ''
+            if ($stderrMs.Length -gt 0) {
+                $transcriptStderr = $utf8NoBomMcp.GetString($stderrMs.ToArray())
+            }
+
+            if (-not [string]::IsNullOrWhiteSpace($transcriptStderr)) {
+                throw "$($_.Exception.Message)`nStderr before transcript failure:`n$transcriptStderr"
             }
 
             throw
@@ -1604,7 +1636,7 @@ PHASE_12D_TOKEN = "TESTFIXTUREONLY_S9qX8wV7tS6rP5nM4kL3jH2gF1"
         # clean exit + empty stderr.
         if ($timedOut) {
             $auditTail = Get-McpAuditDump -AuditPath $mcpAuditPath -Utf8Encoder $utf8NoBomMcp
-            throw "Phase 12f: MCP server timed out after ${mcpExitTimeoutMs}ms waiting for clean exit after stdin close (bounded execution; killed cmd -> pnpm -> node process tree via taskkill /T /F).`nStderr:`n$mcpStderr${auditTail}"
+            throw "Phase 12f: MCP server timed out after ${mcpExitTimeoutMs}ms waiting for clean exit after stdin close (bounded execution; killed node process tree via taskkill /T /F).`nStderr:`n$mcpStderr${auditTail}"
         }
 
         if ($mcpExitCode -ne 0) {
