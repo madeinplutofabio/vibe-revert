@@ -76,10 +76,25 @@ const defaultLoader: StartServerLoader = () => import("@viberevert/mcp");
 /**
  * Render a thrown value as a one-line diagnostic for stderr.
  * Mirrors the cli-commands handleKnownError pattern: extract
- * .message from real Errors; String() everything else.
+ * .message from real Errors; String() everything else. When
+ * .cause is present (e.g., McpBootError wrapping the underlying
+ * SDK transport error from server.onerror), append it so the
+ * actual cause is visible at the stderr boundary -- the static
+ * outer message alone is insufficient for diagnosing transport
+ * or boot failures (locked after Step 3 CI iterations showed
+ * "MCP server transport error" repeatedly without the SDK's
+ * underlying message). The cause's error.name is included
+ * because SDK transport errors often distinguish via class
+ * (e.g., "Error" vs "TypeError") in addition to message text.
  */
 function formatError(err: unknown): string {
   if (err instanceof Error) {
+    if (err.cause instanceof Error) {
+      return `${err.message}: ${err.cause.name}: ${err.cause.message}`;
+    }
+    if (err.cause !== undefined) {
+      return `${err.message}: ${String(err.cause)}`;
+    }
     return err.message;
   }
   return String(err);
