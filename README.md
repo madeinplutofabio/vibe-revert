@@ -2,7 +2,7 @@
 
 > The safety belt for vibe coding.
 
-**Status:** `v0.7.0-beta` work in progress. Not yet released.
+**Status:** `v0.7.0-beta.0` (first public beta).
 
 VibeRevert makes AI coding sessions **visible, reversible, and safer**.
 
@@ -12,17 +12,16 @@ fix prompt, and rollback metadata.
 
 ## Install
 
-Available after the first public beta ships:
-
 ```bash
-npx viberevert init
-viberevert run claude
-viberevert check
-viberevert prompt-fix
-viberevert rollback
+npm install -g viberevert@beta
+viberevert --version
+viberevert doctor
+viberevert init --profile generic
+viberevert mcp serve
 ```
 
 Works with Claude Code, Codex, Cursor, Copilot, Windsurf, and any Git repo.
+The MCP server contract (8 tools, JSON-RPC over stdio) is in `docs/mcp-contract.md`.
 
 ## What it does
 

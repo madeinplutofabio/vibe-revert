@@ -409,6 +409,35 @@ From repo root, with a clean working tree at the release commit:
 - **Open a follow-up** to fix the underlying reason the workflow wasn't usable, and **re-publish via the workflow at the next beta iteration** to restore provenance.
 - **Token rotation.** If an emergency token was used in step 3.1, rotate it on the npm Settings → Tokens page after the emergency is over.
 
+## First-beta retrospective
+
+Captured 2026-06-22, after `v0.7.0-beta.0` shipped via run [27918710334](https://github.com/madeinplutofabio/vibe-revert/actions/runs/27918710334).
+
+### What worked
+
+- **Trusted Publisher / OIDC.** Once configured per-package, eliminated the entire `NPM_TOKEN` attack surface -- no long-lived secret to rotate, and publish provenance attestations are emitted automatically by npm CLI 11.5.1+ running under `id-token: write`.
+- **Locked publish set + directory-to-name mapping assertion.** The workflow enumerates the 8 publish targets explicitly and asserts each tarball filename maps to the expected package name before any `npm publish` runs. Prevented the entire class of "wrong package published" failures.
+- **404-strict `npm view` pre-publish guard.** Confirmed that no version `0.7.0-beta.0` already existed for any of the 8 packages before the publish loop started -- safety belt against a partial re-publish overwriting earlier work.
+- **Post-publish smoke on Windows PowerShell 5.1.** Validated published bytes against the same parser class that surfaced the BOM injection bug in Step 3. The probe installed `viberevert@beta` from the live registry (with 80s of retry budget for npm CDN propagation), ran the full 7-frame MCP transcript via `scripts/mcp-stdio-probe.mjs`, and confirmed graceful stdin-EOF shutdown in 1m24s.
+- **Bumping the canonical commit to fix a workflow defect, then deleting and recreating the tag at the new HEAD.** Safe pre-publish retry pattern that required no version bump -- npm never saw `0.7.0-beta.0` until the workflow was actually correct.
+
+### What surprised
+
+- **In the first tag-triggered release run, the runner did not have the annotated tag object available after checkout** even with `fetch-depth: 0`. Required `fetch-tags: true` in the checkout step AND an explicit `git fetch origin refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}` step before the annotated-tag check could see the tag's true type. Without both, the tag arrived as a lightweight ref and the validation step rejected it.
+- **Workflow gate order matters between `release.yml` and `ci.yml`.** Tests resolve cross-package workspace deps via the `dist/` symlinks; running Test before Build breaks resolution with "Failed to resolve entry for package" errors. Both workflows MUST use the same Lint -> Typecheck -> Build -> Test order. `release.yml` was reordered in Step 4E to match `ci.yml` exactly.
+- **npm Trusted Publisher configuration requires the package to exist before its Access page is reachable.** Bootstrapped each of the 8 packages at version `0.0.0` via interactive `npm login` + `npm publish --access public` BEFORE the per-package OIDC trust config could be set in the npm UI. Chicken-and-egg solved with a one-time placeholder publish.
+- **PowerShell 5.1's `Process.StandardInput` auto-`StreamWriter` injects a UTF-8 BOM preamble** when first written to. Broke MCP JSON-RPC framing silently in Step 3 (the SDK's stream consumer parsed `\uFEFF{...}` as malformed JSON). Pivoted the entire MCP stdio transport to a Node-side probe (`scripts/mcp-stdio-probe.mjs`) that owns byte-level framing with explicit UTF-8 `Buffer` writes -- removes PowerShell/.NET from the transport path entirely.
+- **`softprops/action-gh-release@v2` emitted an action-runtime deprecation warning during the first beta release run.** Not a failure mode -- the release-creation step still succeeded -- but flagged as a tracking item.
+
+### Pinned for `v0.7.1-beta` (M RP follow-ups)
+
+- **M RP-2 -- Tag signing.** Add `git tag -s` enforcement to the validate step. Requires GPG or SSH signing infrastructure for the maintainer's publishing account.
+- **Track or replace `softprops/action-gh-release`** if the runtime deprecation warning becomes blocking; `gh release create` is the fallback.
+- **First changesets-driven release.** Validate the `pnpm changeset` workflow end-to-end on `v0.7.1-beta`. Exercises per-package `CHANGELOG.md` generation as documented in `CONTRIBUTING.md`.
+- **CI matrix expansion** to macOS and additional supported Node versions. Keep the release-publish job on Node 22+ because npm Trusted Publishing requires Node >=22.14.0.
+- **husky / commitlint enforcement.** Currently cultural convention only -- no enforcement at commit time.
+- **`viberevert@latest` dist-tag policy.** Currently points at the `0.0.0` placeholder from the Trusted Publisher bootstrap. The first stable `v0.7.0` (sans `-beta`) will promote to `latest` via a separate stable-release workflow path (M RP-3 if dedicated work is needed).
+
 ## License
 
 Apache-2.0. See the repository `LICENSE` and `NOTICE` files.

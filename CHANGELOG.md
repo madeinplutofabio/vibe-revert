@@ -8,10 +8,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Planned for v0.7.0-beta. This release is not published yet; this
-section is the working changelog for the beta release candidate.
-Major surface covered below; see per-feature contract docs under
-`docs/` for authoritative shape locks.
+(No unreleased changes yet.)
+
+## [0.7.0-beta.0] - 2026-06-22
+
+First public beta. Published to npm as `viberevert@beta` and the
+seven supporting `@viberevert/*` packages at version `0.7.0-beta.0`.
+See per-feature contract docs under `docs/` for authoritative shape
+locks.
 
 ### Added
 
@@ -74,3 +78,6 @@ Major surface covered below; see per-feature contract docs under
 - Node >=22, TypeScript 5.9, biome lint/format, vitest, clipanion 3.x.
 - ASCII-only at byte level across MCP source (D99.M.13) and per-tool
   hook scripts (D98.M.4).
+
+[Unreleased]: https://github.com/madeinplutofabio/vibe-revert/compare/v0.7.0-beta.0...HEAD
+[0.7.0-beta.0]: https://github.com/madeinplutofabio/vibe-revert/releases/tag/v0.7.0-beta.0
