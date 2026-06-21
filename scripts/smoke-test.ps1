@@ -247,6 +247,18 @@ foreach ($tool in @('pnpm', 'git', 'node')) {
     Write-Host "[ok] $tool on PATH"
 }
 
+$rootPackage = Get-Content (Join-Path $repoRoot 'package.json') -Raw | ConvertFrom-Json
+$rootPackageManager = [string]$rootPackage.packageManager
+if ([string]::IsNullOrWhiteSpace($rootPackageManager)) {
+    Write-Host "[FAIL] root package.json missing 'packageManager' field (cannot derive scratch pnpm pin under Corepack)"
+    exit 1
+}
+if (-not $rootPackageManager.StartsWith('pnpm@')) {
+    Write-Host "[FAIL] root package.json packageManager must be a pnpm pin for smoke scratch install: $rootPackageManager"
+    exit 1
+}
+Write-Host "[ok] root package.json packageManager=$rootPackageManager"
+
 # --- Main flow inside try/finally for guaranteed cleanup -------------------
 
 try {
@@ -345,6 +357,7 @@ try {
   "name": "viberevert-smoke",
   "version": "0.0.0",
   "private": true,
+  "packageManager": "$rootPackageManager",
   "dependencies": {
     "@viberevert/session-format": "file:$pSf",
     "@viberevert/core": "file:$pCo",
