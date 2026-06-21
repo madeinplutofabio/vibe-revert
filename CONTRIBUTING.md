@@ -36,6 +36,10 @@ submit it under the project's license.
 4. Run `pnpm install && pnpm lint && pnpm typecheck && pnpm build && pnpm test` locally.
 5. Open a pull request. Include the issue number in the description.
 
+### Submitting a changeset
+
+For package-affecting changes targeting `v0.7.1-beta.N` and later, include a changeset entry in your PR via `pnpm changeset` from the repo root. Follow the prompts to select affected packages + bump type; commit the generated `.changeset/*.md` file alongside your code change. The first beta (`v0.7.0-beta.N`) uses a manual version-bump path and does NOT consume changesets; from `v0.7.1-beta` onwards this becomes the canonical mechanism for per-package CHANGELOG generation. See the [changesets docs](https://github.com/changesets/changesets) for details.
+
 ## Code style
 
 - Formatter and linter: `biome` (run `pnpm format` and `pnpm lint`).

@@ -30,10 +30,10 @@ pwsh -File scripts/smoke-test.ps1
 The script:
 
 1. Builds the workspace (`pnpm build`) before packing so the smoke test never exercises stale `dist/` output.
-2. Packs the currently pack-tested packages (`@viberevert/session-format`, `@viberevert/core`, `@viberevert/git`, `viberevert`) into a temp dir.
+2. Packs all 8 publish-target packages (`@viberevert/session-format`, `@viberevert/core`, `@viberevert/git`, `@viberevert/checks`, `@viberevert/reporters`, `@viberevert/cli-commands`, `@viberevert/mcp`, `viberevert`) into a temp dir.
 3. Sets up a throwaway scratch directory with a real `git init` and committed initial state.
 4. Installs the packed tarballs (with the `pnpm.overrides` workaround — see Known Issues below).
-5. Exercises the current command surface: `init`, `doctor`, `--version`, `checkpoint`, `checkpoints`, `start`, `end`, `sessions`.
+5. Exercises the full CLI command surface (`init`, `doctor`, `--version`, `start`/`end`, `checkpoint`/`checkpoints`/`sessions`, `check`, `report`, `prompt-fix`, `rollback`, `hook install`/`uninstall`, `mcp serve`) across 38 phases including Phase 12f's MCP stdio probe (driven by `scripts/mcp-stdio-probe.mjs`).
 6. Cleans up scratch + pack directories on success; on failure, prints their paths before exiting so the failure can be inspected.
 
 Exit code 0 on success; non-zero with a clear error on failure. The script does NOT push or publish. It runs `pnpm build`, so it may update normal build artifacts, but it does not intentionally modify source files.
@@ -129,7 +129,7 @@ Remove-Item -Recurse -Force $packDir
 
 The `dependencies` block satisfies the top-level `viberevert` dep plus the direct internal deps; the `pnpm.overrides` block forces transitive resolutions inside `viberevert`'s own dep tree to use the local tarballs instead of the npm registry.
 
-This workaround becomes unnecessary once the packages are published to npm (a v0.7.0-beta release task — not yet scheduled). For now, it is the canonical local-smoke-test pattern.
+This workaround is the canonical local-smoke-test pattern for unpublished version states and for CI's `release-dry-run` job. It is NOT needed for the post-publish smoke (`scripts/post-publish-smoke.ps1`), which installs `viberevert@beta` from the npm registry directly.
 
 ### 2. PowerShell 5.1 UTF-8 BOM in JSON test fixtures
 
@@ -182,6 +182,181 @@ rg -P '[^\x00-\x7F]' scripts/smoke-test.ps1
 ```
 
 **Background.** This is the read-side facet of the same root cause as §2 (PowerShell 5.1's UTF-8 handling is BOM-dependent). §2 covers the write-side — files PowerShell *creates* without `UTF8Encoding($false)` get an unwanted BOM that breaks downstream JSON parsers. §3 covers the read-side — files PowerShell *reads* without a BOM get parsed via the active code page, which mangles multi-byte UTF-8. Both facets disappear under pwsh 7+ (PowerShell 7's `.ps1` parser is UTF-8 by default), but the repo's smoke-test target is Windows PowerShell 5.1 because it is the system PowerShell on stock Windows 10/11.
+
+## Publishing to npm
+
+VibeRevert publishes 8 packages to npm via the GitHub Actions release workflow ([`.github/workflows/release.yml`](../.github/workflows/release.yml)), triggered by an annotated tag push. Local `pnpm publish` is reserved for emergencies (see [Manual emergency publish](#manual-emergency-publish)).
+
+### NPM_TOKEN setup
+
+The release workflow authenticates using a repository secret named `NPM_TOKEN`.
+
+1. Sign in to npmjs.com with the publisher account.
+2. At https://www.npmjs.com/settings/<user>/tokens, create a **granular access token** scoped as narrowly as npm allows: publish + read access for the unscoped `viberevert` package and for the `@viberevert` scope (or explicitly for the seven `@viberevert/*` packages if the npm UI requires package-by-package selection).
+3. In GitHub repo Settings → Secrets and variables → Actions, create a secret named `NPM_TOKEN` with the token value.
+4. Verify: `gh secret list --repo madeinplutofabio/vibe-revert` should show `NPM_TOKEN`.
+
+The workflow's first publish-phase step asserts the secret exists AND runs `npm whoami` to confirm authentication before any `pnpm publish` invocation.
+
+### Tag-driven publish flow
+
+The release workflow triggers ONLY on annotated tag pushes matching the beta regex `v<MAJOR>.<MINOR>.<PATCH>-beta.<N>`. Stable releases ship through a separate workflow path (not yet implemented).
+
+End-to-end:
+
+1. **Bump versions locally.** Update all 8 publish-target `package.json` files to the new beta version.
+2. **Commit + push to main.** CI's `build-and-test` and `release-dry-run` jobs validate the new version end-to-end.
+3. **Create the annotated tag** (must be annotated; lightweight tags are rejected):
+   ```sh
+   git tag -a v0.7.0-beta.0 -m "v0.7.0-beta.0"
+   ```
+4. **Push the tag:**
+   ```sh
+   git push origin v0.7.0-beta.0
+   ```
+5. **Workflow runs automatically.** 3 jobs in strict sequence: `publish` (Ubuntu) → `post-publish-smoke` (Windows PowerShell 5.1) → `github-release` (Ubuntu).
+
+The `publish` job performs (in order, fail-fast):
+
+- Tag regex validation (beta-only)
+- Annotated-tag enforcement via `git cat-file -t <tag>` (must be `"tag"`, not `"commit"`)
+- Cross-package version assertion (all 8 publish targets must equal tag suffix; 4 private packages must remain `private: true` at `0.0.0`)
+- `NPM_TOKEN` existence + `npm whoami`
+- Full 4-gate: typecheck + lint + test + build
+- Pack 8 publish-target tarballs (asserts directory → package-name mapping; asserts count == 8)
+- Pre-publish `npm view` guard (404-strict: any non-404 error fails)
+- Publish 8 packages in dependency-safe order via `pnpm publish --access public --tag beta --provenance --no-git-checks`
+
+`post-publish-smoke` runs `scripts/post-publish-smoke.ps1` on `windows-latest` with PowerShell 5.1; it installs `viberevert@beta` from npm and runs the full 7-frame Phase 12f MCP transcript against the published bytes. PowerShell 5.1 is intentional: it's the same parser that exposed Step 3's BOM-injection class, so the published path proves the same Windows surface.
+
+`github-release` creates a prerelease GitHub Release pointing at the tag, with body describing the published packages.
+
+### Provenance attestation
+
+The `--provenance` flag enables SLSA attestation via GitHub OIDC. The publish job declares `permissions: id-token: write` to allow OIDC token issuance. Published packages on npm show a "Provenance" badge linking back to the workflow run.
+
+### dist-tag discipline
+
+All beta publishes go to dist-tag `beta`, NEVER `latest`. The workflow hardcodes `--tag beta`. Users install with:
+
+```sh
+npm install viberevert@beta
+```
+
+`npm install viberevert` (no tag) resolves to the `latest` dist-tag, which may point at the existing `0.0.0` placeholder (pre-reserved by the publisher account) or a future stable release. **During the beta phase, always use `viberevert@beta`.** First stable `v0.7.0` ships through a separate stable workflow path and would promote to `latest`.
+
+### Rollback procedure
+
+If a published version is broken, **do NOT use `npm unpublish`** -- the 72-hour window has strict dep-graph restrictions and damages dependent packages' integrity. Instead, deprecate:
+
+```sh
+npm deprecate viberevert@0.7.0-beta.N "Broken: <reason>. Use 0.7.0-beta.<N+1>."
+# Repeat for each of the 8 published packages
+```
+
+Then fix the issue + bump to `0.7.0-beta.<N+1>` per the partial-publish policy.
+
+### Partial-publish failure policy
+
+- **Pre-publish failure** (validation/build/test/pack/npm-view-guard fails before any `pnpm publish` runs): safe to retry the same tag.
+  ```sh
+  git tag -d v0.7.0-beta.N
+  git push origin --delete v0.7.0-beta.N
+  # fix the issue, recreate and push the tag
+  ```
+
+- **Partial-publish failure** (at least 1 of the 8 packages already landed on npm when the workflow failed): DO NOT reuse the tag or version -- npm versions are effectively immutable. Treat as a new beta iteration:
+  1. Deprecate the partially-published packages.
+  2. Bump all 8 publish-target versions to `0.7.0-beta.<N+1>`.
+  3. Commit, tag `v0.7.0-beta.<N+1>`, push.
+
+## Tagging convention
+
+### Format
+
+`v<MAJOR>.<MINOR>.<PATCH>[-beta.<N>]`
+
+Examples:
+- `v0.7.0-beta.0` — first beta of v0.7.0
+- `v0.7.0-beta.1` — second beta iteration (after first beta needed a respin)
+- `v0.7.0` — stable (not supported by current release workflow; separate stable workflow path TBD)
+
+### Package version equals tag suffix
+
+The version in all 8 publish-target `package.json` files MUST equal the tag suffix (sans `v` prefix). The release workflow asserts this and refuses to publish on mismatch.
+
+### Annotated tags only
+
+Lightweight tags (`git tag <name>`) are refs pointing at a commit. Annotated tags (`git tag -a <name> -m "<msg>"`) carry tagger metadata. The release workflow enforces annotated tags via `git cat-file -t <tag>` checking for type `"tag"`.
+
+```sh
+git tag -a v0.7.0-beta.0 -m "v0.7.0-beta.0"
+git push origin v0.7.0-beta.0
+```
+
+### Tag signing
+
+The current workflow accepts unsigned annotated tags. GPG/SSH signing via `git tag -s` is a known follow-up (M RP-2 task) and will be enforced via workflow validation once signing infrastructure is in place. For v0.7.0-beta releases, annotated unsigned tags are acceptable.
+
+## Manual emergency publish
+
+The canonical publish path is the GitHub Actions release workflow. **Local `pnpm publish` is reserved for emergencies** when CI is unavailable (GitHub Actions outage, workflow regression, etc.).
+
+### When to use
+
+- GitHub Actions is down AND a critical fix MUST publish immediately.
+- A workflow regression makes the release workflow itself unusable, blocking a needed publish.
+
+DO NOT use this path for routine releases. Reroute everything possible through the workflow.
+
+### Procedure
+
+From repo root, with a clean working tree at the release commit:
+
+1. **Verify local state matches the intended release.**
+   - `git status` clean.
+   - All 8 publish-target `package.json` versions equal the target version.
+   - `pnpm install --frozen-lockfile`
+   - `pnpm typecheck && pnpm lint && pnpm test && pnpm build`
+
+2. **Verify npm authentication.**
+   - `npm whoami` returns the publisher account.
+   - If not authenticated: `npm login`.
+
+3. **Pre-publish guard.** For each of the 8 publish-target packages, confirm `npm view <pkg>@<version>` returns 404.
+
+4. **Disable the release workflow** to prevent the manual tag push from triggering a competing CI publish run.
+   - GitHub repo → Actions → Release → "..." menu → "Disable workflow".
+   - Without this, pushing the tag in step 6 will trigger `.github/workflows/release.yml`. The pre-publish `npm view` guard inside the workflow will fail (the packages were just published manually in step 5), but the workflow run will be a noisy red CI signal and MUST NOT be interpreted as the canonical release.
+
+5. **Publish in dependency-safe order:**
+   ```sh
+   for dir in packages/session-format packages/core packages/git packages/checks packages/reporters packages/cli-commands packages/mcp packages/cli; do
+     (cd "$dir" && pnpm publish --access public --tag beta --no-git-checks)
+   done
+   ```
+
+6. **Tag + push** (the Release workflow is disabled, so this push does not trigger the canonical publish workflow):
+   ```sh
+   git tag -a v0.7.0-beta.N -m "v0.7.0-beta.N (emergency manual publish)"
+   git push origin v0.7.0-beta.N
+   ```
+
+7. **Run the post-publish smoke manually:**
+   ```powershell
+   powershell.exe -ExecutionPolicy Bypass -File scripts/post-publish-smoke.ps1 -ExpectedVersion 0.7.0-beta.N
+   ```
+
+8. **Create the GitHub Release** via `gh release create` or the web UI. The release body should explicitly note the manual emergency publish path so it's distinguishable from a workflow-published release.
+
+9. **Re-enable the release workflow** immediately after the emergency release is documented:
+   - GitHub repo → Actions → Release → "..." menu → "Enable workflow".
+   - Do NOT leave the workflow disabled. The next routine beta MUST go through the canonical path.
+
+### Caveats
+
+- **Provenance attestation is LOST.** Manual `pnpm publish` cannot generate SLSA provenance because there is no OIDC token outside the GitHub Actions runner. Published packages will show no "Provenance" badge on npm.
+- **Open a follow-up** to fix the underlying reason the workflow wasn't usable, and **re-publish via the workflow at the next beta iteration** to restore provenance.
 
 ## License
 
