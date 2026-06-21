@@ -46,6 +46,18 @@ Out of scope in v0.7.0-beta: husky / lefthook adapter integration (deferred to M
 
 See [`docs/hook-contract.md`](https://github.com/madeinplutofabio/vibe-revert/blob/main/docs/hook-contract.md) for the full contract: refusal copy table, exit-code policy (D98.K + D98.F translation), hook script verbatim text, `--force` scope lock, `--restore` validate-before-mutate semantics, metadata-fingerprint guard, and architectural invariants (D98.M.1-14).
 
+## MCP server
+
+`viberevert mcp serve` boots a local Model Context Protocol server over stdio that exposes VibeRevert's read-only and local-write tools to AI coding agents. The server is config-blind (no `.viberevert.yml` required) and binds to the repository it was launched in — one server, one repository, one audit log at `.viberevert/mcp-audit.log`.
+
+Eight tools are exposed in v0.7.0-beta: `check_repo`, `explain_diff`, `classify_risk`, `list_risky_files`, `get_policy` (read-only); `start_session`, `create_checkpoint`, `generate_fix_prompt` (local-write). Two names are reserved and intentionally hidden from `tools/list`: `rollback` and `request_human_approval` — both return a generic `Tool not found` envelope identical to any other unknown name, with no leak of "exists but blocked".
+
+Raw tool arguments are NEVER logged to the audit; records contain call metadata such as tool name, timestamp, ok/exit-code, and duration. Stdin EOF triggers graceful shutdown, with in-flight tool calls allowed to complete before the process exits.
+
+Out of scope in v0.7.0-beta: HTTP / SSE transport (stdio only), per-tool `cwd` parameter (confused-deputy risk), execution tools beyond the three local-write tools above, and cross-repository operation.
+
+See [`docs/mcp-contract.md`](https://github.com/madeinplutofabio/vibe-revert/blob/main/docs/mcp-contract.md) for the full contract: tool input/output shapes, dispatcher matrix, audit record shapes, output caps, timeout policy, library discipline, and architectural invariants (D99.M.1-22).
+
 ## License
 
 Apache-2.0. See the repository [LICENSE](https://github.com/madeinplutofabio/vibe-revert/blob/main/LICENSE) and [NOTICE](https://github.com/madeinplutofabio/vibe-revert/blob/main/NOTICE).

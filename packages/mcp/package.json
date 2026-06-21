@@ -5,6 +5,21 @@
   "type": "module",
   "license": "Apache-2.0",
   "author": "Fabio Marcello Salvadori <fabio@madeinpluto.com>",
+  "description": "Model Context Protocol server for VibeRevert.",
+  "homepage": "https://github.com/madeinplutofabio/vibe-revert#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/madeinplutofabio/vibe-revert.git",
+    "directory": "packages/mcp"
+  },
+  "bugs": {
+    "url": "https://github.com/madeinplutofabio/vibe-revert/issues"
+  },
+  "keywords": [
+    "viberevert",
+    "mcp",
+    "model-context-protocol"
+  ],
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -15,7 +30,8 @@
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=22"

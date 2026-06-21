@@ -5,6 +5,22 @@
   "type": "module",
   "license": "Apache-2.0",
   "author": "Fabio Marcello Salvadori <fabio@madeinpluto.com>",
+  "description": "Command implementations and in-process Clipanion harness for the VibeRevert CLI.",
+  "homepage": "https://github.com/madeinplutofabio/vibe-revert#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/madeinplutofabio/vibe-revert.git",
+    "directory": "packages/cli-commands"
+  },
+  "bugs": {
+    "url": "https://github.com/madeinplutofabio/vibe-revert/issues"
+  },
+  "keywords": [
+    "viberevert",
+    "cli",
+    "clipanion",
+    "commands"
+  ],
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -15,7 +31,8 @@
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=22"
