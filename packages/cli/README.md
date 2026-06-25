@@ -2,11 +2,11 @@
 
 > The VibeRevert CLI.
 
-The user-facing command-line tool. Provides `init`, `checkpoint`, `run`, `check`, `report`, `prompt-fix`, `rollback`, `hook install`, `hook uninstall`, and integration installers.
+The user-facing command-line tool. Provides `init`, `checkpoint`, `check`, `report`, `prompt-fix`, `rollback`, `hook install`, `hook uninstall`, and `mcp serve`. Integration installers (`install --cursor / --claude / --github-action`) ship in v0.7.1-beta. The wrapper command (`run`) is deferred to M G2.
 
 Part of [VibeRevert](https://github.com/madeinplutofabio/vibe-revert) — the safety belt for vibe coding.
 
-**Status:** `v0.7.0-beta` work in progress. Public API may change before v1.0.
+**Status:** `v0.7.0-beta.0` published; `v0.7.1-beta` in progress (M G1b). Public API may change before v1.0.
 
 ## Rollback
 

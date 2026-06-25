@@ -20,7 +20,7 @@ viberevert init --profile generic
 viberevert mcp serve
 ```
 
-Works with Claude Code, Codex, Cursor, Copilot, Windsurf, and any Git repo.
+Works with any Git repo today. MCP support is available for compatible clients; first-class Cursor and Claude Code installers ship in v0.7.1-beta. See [docs/integrations.md](docs/integrations.md) for status.
 The MCP server contract (8 tools, JSON-RPC over stdio) is in `docs/mcp-contract.md`.
 
 ## What it does
@@ -28,7 +28,6 @@ The MCP server contract (8 tools, JSON-RPC over stdio) is in `docs/mcp-contract.
 - Creates a checkpoint before AI coding sessions.
 - Records what the agent changed.
 - Flags risky edits involving auth, payments, databases, secrets, dependencies, and infrastructure.
-- Guards dangerous commands launched through its wrapper.
 - Generates an AI-readable fix prompt for the next iteration.
 - Provides a rollback path for local repository state.
 

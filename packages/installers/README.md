@@ -2,11 +2,11 @@
 
 > Non-destructive third-party config writers.
 
-Detects, plans, applies, and uninstalls VibeRevert integration entries in Cursor, Claude Code, Codex, and GitHub Actions configs without overwriting user data.
+Detects, plans, applies, and uninstalls VibeRevert integrations for Cursor (project-local), Claude Code (project-local), and GitHub Actions configuration without overwriting user data. Codex deferred pending upstream stability (M G1b-followup-3). Global (home-dir) installs deferred to a future milestone (M G1b-followup-10). Public from v0.7.1-beta.0.
 
 Part of [VibeRevert](https://github.com/madeinplutofabio/vibe-revert) — the safety belt for vibe coding.
 
-**Status:** `v0.7.0-beta` work in progress. Public API may change before v1.0.
+**Status:** First public release at `v0.7.1-beta.0` (M G1b). Public API may change before v1.0.
 
 ## License
 

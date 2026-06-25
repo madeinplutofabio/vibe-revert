@@ -8,7 +8,24 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-(No unreleased changes yet.)
+### Documentation
+
+- Removed stale capability claims about Codex / Copilot / Windsurf
+  integrations, wrapper commands (`viberevert run` deferred to M G2),
+  and policy packs that are not shipped yet. Affected: root
+  `README.md`, `packages/cli/README.md`,
+  `packages/installers/README.md`, `packages/adapters/README.md`,
+  and `packages/policies-basic/README.md`.
+- Added `docs/integrations.md` with the per-adapter ship-status table:
+  cursor / claude / direct-hook / husky / lefthook / github-action
+  planned for M G1b; codex deferred pending the 90-day stability gate;
+  global installs deferred to M G1b-followup-10.
+- Updated per-package `Status:` lines to reflect the actual release
+  shape: `v0.7.0-beta.0` published, first public release at
+  `v0.7.1-beta.0`, or private stub through `v0.7.1-beta`.
+- Added `plans/milestone_rp_to_g1b_reconciliation.md` to document why
+  the final M G1b scope differs from earlier drafts without rewriting
+  the archived M RP plan.
 
 ## [0.7.0-beta.0] - 2026-06-22
 

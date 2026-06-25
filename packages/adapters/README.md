@@ -2,11 +2,11 @@
 
 > Agent and tool integration adapters.
 
-Thin glue between VibeRevert's session lifecycle and specific AI coding tools (shell wrapper, Claude Code, Cursor, Codex, GitHub Action).
+Read-only adapters that detect and plan VibeRevert integration writes for Claude Code (project-local), Cursor (project-local), GitHub Actions workflow text, direct `.git/hooks/` writes, and husky / lefthook hook managers. Owns the single implementation of hook-manager detection, hook script constants, and sentinel-block helpers shared with `@viberevert/cli-commands`. Never reads `.viberevert/integrations.json` because that is `@viberevert/installers`' job. Mutation is performed by `@viberevert/installers`; this package is read-only by design.
 
 Part of [VibeRevert](https://github.com/madeinplutofabio/vibe-revert) — the safety belt for vibe coding.
 
-**Status:** `v0.7.0-beta` work in progress. Public API may change before v1.0.
+**Status:** First public release at `v0.7.1-beta.0` (M G1b). Public API may change before v1.0.
 
 ## License
 
