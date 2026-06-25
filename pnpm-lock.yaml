@@ -60,6 +60,9 @@ importers:
 
   packages/cli-commands:
     dependencies:
+      '@viberevert/adapters':
+        specifier: workspace:*
+        version: link:../adapters
       '@viberevert/checks':
         specifier: workspace:*
         version: link:../checks

@@ -7,6 +7,7 @@ import { defineProject } from "vitest/config";
 export default defineProject({
   resolve: {
     alias: {
+      "@viberevert/adapters": fileURLToPath(new URL("../adapters/src/index.ts", import.meta.url)),
       "@viberevert/checks": fileURLToPath(new URL("../checks/src/index.ts", import.meta.url)),
       "@viberevert/core": fileURLToPath(new URL("../core/src/index.ts", import.meta.url)),
       "@viberevert/git": fileURLToPath(new URL("../git/src/index.ts", import.meta.url)),

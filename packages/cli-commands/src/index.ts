@@ -162,5 +162,10 @@ export { RuntimeEnvInvalidError } from "./runtime-env.js";
 //     check-orchestration.ts, check-since-resolution.ts,
 //     checkpoint-helpers.ts (the whole module, modulo the 3 exports
 //     covered by the "not exported" notes above), report-paths.ts,
-//     rollback-orchestration.ts, hook-script.ts, hook-managers.ts,
-//     profiles/, etc.
+//     rollback-orchestration.ts, profiles/, etc.
+//
+//   - hook-script.ts, hook-managers.ts     (moved to @viberevert/adapters)
+//     → moved per the D98.M.8 amendment (M G1b Step 1) to break the
+//       cli-commands → installers → adapters → cli-commands cycle.
+//       hook-install.ts and hook-uninstall.ts import the surface via
+//       @viberevert/adapters; this barrel does NOT re-export it.

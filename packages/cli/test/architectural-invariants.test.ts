@@ -1372,8 +1372,8 @@ describe("Architectural invariants -- M F D98.M hook subsystem boundaries", () =
 
   const HOOK_INSTALL_REL = "packages/cli-commands/src/commands/hook-install.ts";
   const HOOK_UNINSTALL_REL = "packages/cli-commands/src/commands/hook-uninstall.ts";
-  const HOOK_MANAGERS_REL = "packages/cli-commands/src/hook-managers.ts";
-  const HOOK_SCRIPT_REL = "packages/cli-commands/src/hook-script.ts";
+  const HOOK_MANAGERS_REL = "packages/adapters/src/hook-managers.ts";
+  const HOOK_SCRIPT_REL = "packages/adapters/src/hook-script.ts";
   const HOOK_SOURCE_RELS: ReadonlyArray<string> = [
     HOOK_INSTALL_REL,
     HOOK_UNINSTALL_REL,
@@ -1751,12 +1751,16 @@ describe("Architectural invariants -- M F D98.M hook subsystem boundaries", () =
   // D98.M.8 -- import-count locks for cross-file symbols
   // ===========================================================================
 
-  it("D98.M.8: HOOK_SCRIPT_TEMPLATE imported exactly once in hook-install.ts from ../hook-script.js; MANAGED_BY_MARKER imported exactly once in EACH of install + uninstall from ../hook-script.js; detectHookManagers imported once from ../hook-managers.js + called once in hook-install.ts", () => {
-    // D98.M.8 locks the symbol-import surface for cross-file symbols
-    // from hook-script.ts and hook-managers.ts. Catches accidental
-    // template inlining, marker drift, or duplicate detection
-    // invocations (one import does NOT prevent two calls -- both
-    // locks are required for detectHookManagers).
+  it("D98.M.8: HOOK_SCRIPT_TEMPLATE imported exactly once in hook-install.ts from @viberevert/adapters; MANAGED_BY_MARKER imported exactly once in EACH of install + uninstall from @viberevert/adapters; detectHookManagers imported once from @viberevert/adapters + called once in hook-install.ts", () => {
+    // D98.M.8 amendment (M G1b Step 1): hook-managers.ts and hook-script.ts
+    // moved from packages/cli-commands/src/ to packages/adapters/src/.
+    // hook-install.ts and hook-uninstall.ts now import the surface via
+    // the @viberevert/adapters package barrel. The "single call site"
+    // part of the original lock is preserved; the "single implementation"
+    // part is reinforced AND moves DOWN a package layer to break the
+    // dependency cycle. Catches accidental template inlining, marker
+    // drift, or duplicate detection invocations (one import does NOT
+    // prevent two calls -- both locks are required for detectHookManagers).
     //
     // **Multi-line imports**: biome formats imports with >3 symbols as
     // multi-line blocks where each symbol sits on its own line --
@@ -1768,13 +1772,13 @@ describe("Architectural invariants -- M F D98.M hook subsystem boundaries", () =
     // across newlines naturally (no /s flag needed).
     //
     // **Source-module anchoring**: each named-import count is tied to
-    // the EXACT locked module specifier (../hook-script.js or
-    // ../hook-managers.js). Catches the bypass where a future
-    // maintainer might import HOOK_SCRIPT_TEMPLATE from a forked /
-    // re-exporting module like `./somewhere-else.js` -- the symbol
-    // would appear in an import block but NOT in our locked-source
-    // import. The `countNamedImportFrom` helper composes the symbol
-    // and specifier into one anchored regex.
+    // the EXACT locked module specifier (@viberevert/adapters). Catches
+    // the bypass where a future maintainer might import
+    // HOOK_SCRIPT_TEMPLATE from a forked / re-exporting module like
+    // `./somewhere-else.js` -- the symbol would appear in an import
+    // block but NOT in our locked-source import. The
+    // `countNamedImportFrom` helper composes the symbol and specifier
+    // into one anchored regex.
     //
     // detectHookManagers's CALL site is still checked via findOffenders
     // since function calls sit on one line.
@@ -1817,24 +1821,23 @@ describe("Architectural invariants -- M F D98.M hook subsystem boundaries", () =
     const installSourceStripped = stripCommentsToString(installSource);
     const uninstallSourceStripped = stripCommentsToString(uninstallSource);
 
-    const hookScriptSpecifier = String.raw`\.\.\/hook-script\.js`;
-    const hookManagersSpecifier = String.raw`\.\.\/hook-managers\.js`;
+    const adaptersSpecifier = String.raw`@viberevert\/adapters`;
 
     // HOOK_SCRIPT_TEMPLATE: exactly 1 import in install (from
-    // ../hook-script.js); absent in uninstall.
+    // @viberevert/adapters); absent in uninstall.
     const tmplInInstall = countNamedImportFrom(
       installSourceStripped,
       "HOOK_SCRIPT_TEMPLATE",
-      hookScriptSpecifier,
+      adaptersSpecifier,
     );
     expect(
       tmplInInstall,
-      `hook-install.ts must import HOOK_SCRIPT_TEMPLATE exactly once from "../hook-script.js" (D98.M.8). Found ${tmplInInstall}.`,
+      `hook-install.ts must import HOOK_SCRIPT_TEMPLATE exactly once from "@viberevert/adapters" (D98.M.8). Found ${tmplInInstall}.`,
     ).toBe(1);
     const tmplInUninstall = countNamedImportFrom(
       uninstallSourceStripped,
       "HOOK_SCRIPT_TEMPLATE",
-      hookScriptSpecifier,
+      adaptersSpecifier,
     );
     expect(
       tmplInUninstall,
@@ -1842,38 +1845,38 @@ describe("Architectural invariants -- M F D98.M hook subsystem boundaries", () =
     ).toBe(0);
 
     // MANAGED_BY_MARKER: exactly 1 import in EACH of install + uninstall
-    // (both from ../hook-script.js).
+    // (both from @viberevert/adapters).
     const markerInInstall = countNamedImportFrom(
       installSourceStripped,
       "MANAGED_BY_MARKER",
-      hookScriptSpecifier,
+      adaptersSpecifier,
     );
     expect(
       markerInInstall,
-      `hook-install.ts must import MANAGED_BY_MARKER exactly once from "../hook-script.js" (D98.M.8). Found ${markerInInstall}.`,
+      `hook-install.ts must import MANAGED_BY_MARKER exactly once from "@viberevert/adapters" (D98.M.8). Found ${markerInInstall}.`,
     ).toBe(1);
     const markerInUninstall = countNamedImportFrom(
       uninstallSourceStripped,
       "MANAGED_BY_MARKER",
-      hookScriptSpecifier,
+      adaptersSpecifier,
     );
     expect(
       markerInUninstall,
-      `hook-uninstall.ts must import MANAGED_BY_MARKER exactly once from "../hook-script.js" (D98.M.8). Found ${markerInUninstall}.`,
+      `hook-uninstall.ts must import MANAGED_BY_MARKER exactly once from "@viberevert/adapters" (D98.M.8). Found ${markerInUninstall}.`,
     ).toBe(1);
 
-    // detectHookManagers: exactly 1 import (from ../hook-managers.js)
+    // detectHookManagers: exactly 1 import (from @viberevert/adapters)
     // + exactly 1 call site in hook-install.ts. One import does NOT
     // prevent two calls -- both locks are required to catch duplicate
     // invocations.
     const detectImports = countNamedImportFrom(
       installSourceStripped,
       "detectHookManagers",
-      hookManagersSpecifier,
+      adaptersSpecifier,
     );
     expect(
       detectImports,
-      `hook-install.ts must import detectHookManagers exactly once from "../hook-managers.js" (D98.M.8). Found ${detectImports}.`,
+      `hook-install.ts must import detectHookManagers exactly once from "@viberevert/adapters" (D98.M.8). Found ${detectImports}.`,
     ).toBe(1);
     const detectCalls = findOffenders(installSource, /\bdetectHookManagers\s*\(\s*repoRoot\s*\)/);
     expect(
@@ -2164,6 +2167,177 @@ describe("Architectural invariants -- M F D98.M hook subsystem boundaries", () =
       offenders,
       `hook-script.ts must NOT assign HOOK_SCRIPT_TEMPLATE via a raw multi-line template literal (D98.M.14). Use [...lines].join("\\n") + "\\n" instead. Matches: ${JSON.stringify(offenders)}`,
     ).toEqual([]);
+  });
+});
+
+// =============================================================================
+// M G1b D101.M -- @viberevert/adapters package boundaries
+// =============================================================================
+//
+// Three invariants lock the new public seam created by M G1b Step 1's
+// cycle break (D98.M.8 amendment). The hook surface (hook-managers.ts +
+// hook-script.ts) moved from packages/cli-commands/src/ into
+// packages/adapters/src/, breaking the dependency cycle that would have
+// formed when packages/installers and packages/cli-commands both needed
+// the same hook surface:
+//
+//   - D101.M.1 -- Adapter read-only discipline: packages/adapters/src/
+//     MUST NOT contain any filesystem-mutating call symbols (writeFile,
+//     mkdir, rename, rm, chmod, unlink) or process-spawn symbols
+//     (child_process, exec, spawn). Adapters MAY read fs during
+//     detect/plan (lstat, readFile), but MUST NEVER mutate. The mutating
+//     engine lives in @viberevert/installers; adapters compute Plans,
+//     never apply them.
+//
+//   - D101.M.1b -- Integrations-store ownership: packages/adapters/src/
+//     MUST NOT contain any reference to "integrations.json". That store
+//     is owned exclusively by @viberevert/installers; adapters describe
+//     desired state and have no concept of "already installed" (that
+//     decision happens in the installer engine via InstallOutcome's
+//     applied / noop / refused union). If adapters could read
+//     integrations.json, the read-only vs. write-only layer split would
+//     collapse and NoopPlan-style logic would creep back into adapters.
+//
+//   - D101.M.2 -- Hook surface re-export: packages/adapters/src/index.ts
+//     MUST export the moved hook surface symbols (detectHookManagers +
+//     hook-script constants + formatBackupTimestamp + the two
+//     hook-managers error classes). cli-commands' hook-install.ts and
+//     hook-uninstall.ts depend on this barrel re-export per the D98.M.8
+//     amendment; if it disappears, those files break.
+
+describe("Architectural invariants -- M G1b D101.M @viberevert/adapters boundaries", () => {
+  const ADAPTERS_SRC_DIR = "packages/adapters/src";
+  const ADAPTERS_BARREL_REL = "packages/adapters/src/index.ts";
+
+  // ===========================================================================
+  // D101.M.1 -- adapters source MUST NOT call fs-mutation or spawn symbols
+  // ===========================================================================
+
+  it("D101.M.1: packages/adapters/src/** MUST NOT call writeFile / mkdir / rename / rm / chmod / unlink / child_process / exec / spawn (adapter read-only discipline)", () => {
+    // Per D101.A, adapters are READ-ONLY: they may inspect filesystem
+    // state during detect/plan (lstat, readFile) but MUST NEVER mutate.
+    // Mutation lives in @viberevert/installers's engine. This invariant
+    // catches accidental drift -- a future maintainer reaching for
+    // `writeFile` inside an adapter would silently break the layer
+    // separation that the D98.M.8 cycle break depends on.
+    //
+    // Source is pre-stripped via `stripTsComments` so docstrings
+    // mentioning forbidden tokens by name don't false-positive
+    // (e.g., "// installers, not adapters, calls writeFile here").
+    const FORBIDDEN: ReadonlyArray<{ name: string; pattern: RegExp }> = [
+      { name: "writeFile(", pattern: /\bwriteFile\s*\(/ },
+      { name: "writeFileSync(", pattern: /\bwriteFileSync\s*\(/ },
+      { name: "mkdir(", pattern: /\bmkdir\s*\(/ },
+      { name: "mkdirSync(", pattern: /\bmkdirSync\s*\(/ },
+      { name: "rename(", pattern: /\brename\s*\(/ },
+      { name: "renameSync(", pattern: /\brenameSync\s*\(/ },
+      { name: "rm(", pattern: /\brm\s*\(/ },
+      { name: "rmSync(", pattern: /\brmSync\s*\(/ },
+      { name: "rmdir(", pattern: /\brmdir\s*\(/ },
+      { name: "rmdirSync(", pattern: /\brmdirSync\s*\(/ },
+      { name: "chmod(", pattern: /\bchmod\s*\(/ },
+      { name: "chmodSync(", pattern: /\bchmodSync\s*\(/ },
+      { name: "unlink(", pattern: /\bunlink\s*\(/ },
+      { name: "unlinkSync(", pattern: /\bunlinkSync\s*\(/ },
+      { name: 'from "node:child_process"', pattern: /from\s*["']node:child_process["']/ },
+      { name: 'from "child_process"', pattern: /from\s*["']child_process["']/ },
+      { name: "exec(", pattern: /\bexec\s*\(/ },
+      { name: "execSync(", pattern: /\bexecSync\s*\(/ },
+      { name: "spawn(", pattern: /\bspawn\s*\(/ },
+      { name: "spawnSync(", pattern: /\bspawnSync\s*\(/ },
+      { name: "execFile(", pattern: /\bexecFile\s*\(/ },
+      { name: "execFileSync(", pattern: /\bexecFileSync\s*\(/ },
+    ];
+
+    const srcDirAbs = join(REPO_ROOT, ADAPTERS_SRC_DIR);
+    const files = findTsFiles(srcDirAbs);
+    expect(
+      files.length,
+      `D101.M.1 self-check: expected at least one .ts file under ${ADAPTERS_SRC_DIR}/.`,
+    ).toBeGreaterThan(0);
+
+    for (const absPath of files) {
+      const rel = relative(REPO_ROOT, absPath).replace(/\\/g, "/");
+      const source = stripTsComments(readFileSync(absPath, "utf8"));
+      for (const { name, pattern } of FORBIDDEN) {
+        const offenders = findOffenders(source, pattern);
+        expect(
+          offenders,
+          `${rel} must NOT call ${name} (D101.M.1 adapter read-only discipline). Mutation lives in @viberevert/installers; adapters compute Plans, never apply them. Matches: ${JSON.stringify(offenders)}`,
+        ).toEqual([]);
+      }
+    }
+  });
+
+  // ===========================================================================
+  // D101.M.1b -- adapters source MUST NOT reference integrations.json
+  // ===========================================================================
+
+  it("D101.M.1b: packages/adapters/src/** MUST NOT contain any reference to 'integrations.json' (integrations-store ownership)", () => {
+    // The integrations store (.viberevert/integrations.json) is owned
+    // exclusively by @viberevert/installers. Adapters describe desired
+    // state via Plans and never decide "already installed" -- that
+    // decision happens inside the installer engine via InstallOutcome's
+    // applied / noop / refused discriminated union. Allowing adapters
+    // to read integrations.json would collapse the read-only vs.
+    // write-only layer split and let NoopPlan-style logic creep back
+    // into adapters.
+    //
+    // Source is pre-stripped via `stripTsComments` so documentation
+    // that mentions the file by name to clarify what adapters DON'T do
+    // is allowed; only code references trigger the failure.
+    const pattern = /integrations\.json/i;
+
+    const srcDirAbs = join(REPO_ROOT, ADAPTERS_SRC_DIR);
+    const files = findTsFiles(srcDirAbs);
+    expect(
+      files.length,
+      `D101.M.1b self-check: expected at least one .ts file under ${ADAPTERS_SRC_DIR}/.`,
+    ).toBeGreaterThan(0);
+
+    for (const absPath of files) {
+      const rel = relative(REPO_ROOT, absPath).replace(/\\/g, "/");
+      const source = stripTsComments(readFileSync(absPath, "utf8"));
+      const offenders = findOffenders(source, pattern);
+      expect(
+        offenders,
+        `${rel} must NOT reference "integrations.json" (D101.M.1b -- the integrations store is owned by @viberevert/installers; adapters describe desired state only). Matches: ${JSON.stringify(offenders)}`,
+      ).toEqual([]);
+    }
+  });
+
+  // ===========================================================================
+  // D101.M.2 -- adapters barrel re-exports the moved hook surface
+  // ===========================================================================
+
+  it("D101.M.2: packages/adapters/src/index.ts MUST re-export the moved hook surface (D98.M.8 amendment)", () => {
+    // M G1b Step 1 moved hook-managers.ts + hook-script.ts from
+    // packages/cli-commands/src/ into packages/adapters/src/. The
+    // cli-commands hook-install.ts and hook-uninstall.ts files depend
+    // on these symbols being re-exported through the @viberevert/adapters
+    // barrel (consumers import them as `@viberevert/adapters`, NOT via
+    // deep paths). If the barrel stops re-exporting any of these
+    // symbols, the import rewires in hook-install.ts + hook-uninstall.ts
+    // break at typecheck/build time.
+    const exported = collectBarrelExports(readSource(ADAPTERS_BARREL_REL));
+    const REQUIRED: ReadonlyArray<string> = [
+      // From hook-managers.ts (moved per D98.M.8 amendment).
+      "detectHookManagers",
+      "HookManagerIoError",
+      "MalformedPackageJsonError",
+      // From hook-script.ts (moved per D98.M.8 amendment).
+      "MANAGED_BY_MARKER",
+      "BACKUP_FILE_PREFIX",
+      "BACKUP_FILE_REGEX",
+      "HOOK_SCRIPT_TEMPLATE",
+      "formatBackupTimestamp",
+    ];
+    for (const symbol of REQUIRED) {
+      expect(
+        exported.has(symbol),
+        `@viberevert/adapters barrel must export ${symbol} (D101.M.2 -- D98.M.8 amendment requires the moved hook surface to be reachable through the barrel; consumed by cli-commands hook-install.ts + hook-uninstall.ts).`,
+      ).toBe(true);
+    }
   });
 });
 

@@ -7,6 +7,12 @@ import * as fsPromises from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 
+import {
+  HOOK_SCRIPT_TEMPLATE,
+  HookManagerIoError,
+  MANAGED_BY_MARKER,
+  MalformedPackageJsonError,
+} from "@viberevert/adapters";
 import { Cli } from "clipanion";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -21,8 +27,6 @@ import {
   UnsupportedGitHookLayoutError,
   UnsupportedGitHooksDirectoryError,
 } from "../src/commands/hook-install.js";
-import { HookManagerIoError, MalformedPackageJsonError } from "../src/hook-managers.js";
-import { HOOK_SCRIPT_TEMPLATE, MANAGED_BY_MARKER } from "../src/hook-script.js";
 import { VIBEREVERT_TEST_FIXED_NOW } from "../src/runtime-env.js";
 
 // Mock node:fs/promises with delegating defaults so tests can override

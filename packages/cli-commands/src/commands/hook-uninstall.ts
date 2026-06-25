@@ -4,10 +4,9 @@
 import type { Dirent, Stats } from "node:fs";
 import { chmod, lstat, readdir, readFile, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
+import { BACKUP_FILE_REGEX, MANAGED_BY_MARKER } from "@viberevert/adapters";
 import { RepoRootNotFoundError, resolveRepoRoot } from "@viberevert/core";
 import { Command, Option } from "clipanion";
-
-import { BACKUP_FILE_REGEX, MANAGED_BY_MARKER } from "../hook-script.js";
 
 /**
  * `viberevert hook uninstall` -- remove the viberevert-managed

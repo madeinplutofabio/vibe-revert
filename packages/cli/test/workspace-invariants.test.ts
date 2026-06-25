@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Fabio Marcello Salvadori
 //
-// Workspace-level architecture invariants. Three complementary checks
+// Workspace-level architecture invariants. Seven complementary checks
 // that together prevent "works locally, fails on CI" drift:
 //
 //   1. TSCONFIG PATHS INVARIANT -- every workspace package under
@@ -43,7 +43,50 @@
 //      surviving on stale local dist; CLI was missing the checks
 //      alias added by Phase C imports.
 //
-// All three are **test-time architecture invariants**, NOT compile-
+//   4. TEST-OWNING PACKAGE HAS VITEST CONFIG + TEST SCRIPT INVARIANT
+//      -- every package with files matching `test/**/*.test.ts` MUST
+//      have BOTH (a) a local `vitest.config.ts` AND (b) a `"test"`
+//      script in its package.json. Catches two silent-discovery bug
+//      classes:
+//        - Missing local config: vitest inherits whatever's reachable
+//          via upward traversal, which may not match the package's
+//          test layout and silently exits with zero tests found.
+//          M G1b Step 1 hit this: 3 adapter test files added without
+//          a local vitest.config.ts -> "No test files found, exiting
+//          with code 0" while the 4-gate verification claimed pass.
+//        - Missing test script: recursive `pnpm test` skips the
+//          package entirely (no script to run) so the tests are never
+//          invoked. Mirror image of the first failure mode, equally
+//          invisible in CI.
+//      Together with invariant 6 (test script -> test files) this
+//      enforces a strict biconditional: test files exist IFF a test
+//      script exists.
+//
+//   5. VITEST CONFIG INCLUDE PATTERN INVARIANT -- every local
+//      `vitest.config.ts` MUST include `"test/**/*.test.ts"` in
+//      `test.include`. Same bug-class as invariant 4: defaults that
+//      do not match the actual test layout cause silent-pass-with-
+//      zero-tests. Enforces the canonical project-wide convention.
+//
+//   6. TEST SCRIPT vs TEST FILES INVARIANT -- every package whose
+//      package.json declares a `test` script MUST have at least one
+//      file matching `test/**/*.test.ts`, unless explicitly listed in
+//      PACKAGES_ALLOWED_TO_HAVE_TEST_SCRIPT_WITHOUT_TESTS. Prevents
+//      the "test script silently passes" mode where a package wires
+//      up the script but never adds real tests (or removes them all).
+//      Mirror image of invariant 4's test-script requirement.
+//
+//   7. ADAPTERS NO-PASS-WITH-NO-TESTS INVARIANT -- adapter package's
+//      `vitest.config.ts` MUST NOT contain the token `passWithNoTests`.
+//      Adapters owns real test suites (sentinel, hook-managers, hook-
+//      script); if discovery breaks, the run MUST fail loudly, not
+//      silently exit 0. Kept adapters-specific (not generalized to
+//      all packages) because session-format and others currently use
+//      passWithNoTests: true intentionally; a global ban would drag
+//      them into a policy decision belonging in a separate hardening
+//      pass. Reference: M G1b Step 1 recovery, 2026-06-25.
+//
+// All seven are **test-time architecture invariants**, NOT compile-
 // time gates. They run in CI (via `pnpm test`) and fail with a clear
 // invariant message that names the offender(s) and prints the exact
 // fix. The CLI is the natural home: it's the "leaf consumer" of the
@@ -60,6 +103,12 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..", "..", "..");
 const PACKAGES_DIR = join(REPO_ROOT, "packages");
 const TSCONFIG_BASE = join(REPO_ROOT, "tsconfig.base.json");
+
+// Allowlist for invariant 6. Packages here may declare a "test" script
+// without having any test/**/*.test.ts files. Currently empty: all
+// test-script-owning packages in the workspace have real tests.
+// Adding an entry here is a deliberate exception; review carefully.
+const PACKAGES_ALLOWED_TO_HAVE_TEST_SCRIPT_WITHOUT_TESTS: ReadonlySet<string> = new Set<string>();
 
 // =============================================================================
 // Shared discovery helpers
@@ -155,6 +204,49 @@ function walkTsFiles(rootDir: string): string[] {
     }
   }
   return out;
+}
+
+/**
+ * Find `.test.ts` files under a package's `test/` subdirectory.
+ * Guards on existence of `test/` because `walkTsFiles` would throw
+ * on a non-existent rootDir. Used by invariants 4 and 6.
+ */
+function findTestFiles(pkgDir: string): string[] {
+  const testDir = join(pkgDir, "test");
+  if (!existsSync(testDir)) return [];
+  return walkTsFiles(testDir).filter((f) => f.endsWith(".test.ts"));
+}
+
+// Keep this as line comments: the text documents glob patterns that contain
+// block-comment delimiter-shaped bytes.
+// Return true iff `source` contains a string literal whose text equals
+// `expected`. AST-based: ignores comments, sees through both single-
+// and double-quote forms (TS normalizes literal text), and does not
+// mangle glob-shaped substrings the way a regex comment-stripper would.
+// Used by invariant 5 to check for the canonical `"test/**/*.test.ts"`
+// include glob without false positives from comments or false negatives
+// from glob bytes being mistaken for a block comment.
+function sourceContainsStringLiteral(source: string, expected: string): boolean {
+  const sourceFile = ts.createSourceFile(
+    "vitest.config.ts",
+    source,
+    ts.ScriptTarget.Latest,
+    /* setParentNodes */ false,
+    ts.ScriptKind.TS,
+  );
+
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    if (ts.isStringLiteralLike(node) && node.text === expected) {
+      found = true;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+
+  visit(sourceFile);
+  return found;
 }
 
 /**
@@ -414,5 +506,169 @@ describe("workspace vitest config alias invariant", () => {
       `dist/index.js, which is absent on fresh clones / clean CI runs.`,
     ];
     throw new Error(`\n${lines.join("\n")}`);
+  });
+});
+
+// =============================================================================
+// Invariant 4: test-owning packages have vitest.config.ts AND test script
+// =============================================================================
+
+describe("workspace test-owning packages have vitest.config.ts and test script invariant", () => {
+  it("every package with files matching test/**/*.test.ts has a local vitest.config.ts AND a package.json test script", () => {
+    const packages = discoverAllPackages();
+    const violations: string[] = [];
+
+    for (const pkg of packages) {
+      const testFiles = findTestFiles(pkg.pkgDir);
+      if (testFiles.length === 0) continue;
+
+      const missing: string[] = [];
+
+      const cfgPath = join(pkg.pkgDir, "vitest.config.ts");
+      if (!existsSync(cfgPath)) missing.push("local vitest.config.ts");
+
+      const pkgJson = JSON.parse(readFileSync(join(pkg.pkgDir, "package.json"), "utf8")) as {
+        scripts?: Record<string, string>;
+      };
+      const hasTestScript = pkgJson.scripts !== undefined && "test" in pkgJson.scripts;
+      if (!hasTestScript) missing.push('package.json "test" script');
+
+      if (missing.length > 0) {
+        violations.push(
+          `${pkg.packageName} (packages/${pkg.dirName}): has ${testFiles.length} test file(s) under test/ but is missing: ${missing.join(", ")}`,
+        );
+      }
+    }
+
+    if (violations.length === 0) return;
+
+    const lines: string[] = [
+      `Workspace test-owning packages must have BOTH a local vitest.config.ts AND a "test" script:`,
+      ...violations.map((v) => `  ${v}`),
+      ``,
+      `Without the local vitest.config.ts, vitest discovery may fall through to`,
+      `inherited config that does not match the package's test layout and silently`,
+      `exit with zero tests found.`,
+      ``,
+      `Without a "test" script in package.json, recursive \`pnpm test\` skips the`,
+      `package entirely -- the tests are never even invoked.`,
+      ``,
+      `Create packages/<name>/vitest.config.ts mirroring the shape of`,
+      `packages/checks/vitest.config.ts or packages/session-format/vitest.config.ts`,
+      `using include: ["test/**/*.test.ts"], AND add "test": "vitest run" to the`,
+      `package.json scripts block.`,
+    ];
+    throw new Error(`\n${lines.join("\n")}`);
+  });
+});
+
+// =============================================================================
+// Invariant 5: vitest.config.ts uses canonical include pattern
+// =============================================================================
+
+describe("workspace vitest config include pattern invariant", () => {
+  it('every local vitest.config.ts includes "test/**/*.test.ts" in test.include', () => {
+    const packages = discoverAllPackages();
+    const violations: string[] = [];
+
+    for (const pkg of packages) {
+      const cfgPath = join(pkg.pkgDir, "vitest.config.ts");
+      if (!existsSync(cfgPath)) continue;
+      // Use the TypeScript AST rather than stripTsComments/raw substring
+      // checks: the canonical glob contains `/*...*/`-shaped bytes, so
+      // regex comment stripping mangles it, while raw source would let
+      // comments satisfy the invariant. AST string-literal scan is
+      // immune to both: it normalizes quote form and ignores comments.
+      const cfgSource = readFileSync(cfgPath, "utf8");
+      if (!sourceContainsStringLiteral(cfgSource, "test/**/*.test.ts")) {
+        violations.push(
+          `${pkg.packageName} (packages/${pkg.dirName}): vitest.config.ts does not include the canonical glob "test/**/*.test.ts". Add it to test.include.`,
+        );
+      }
+    }
+
+    if (violations.length === 0) return;
+
+    const lines: string[] = [
+      `Vitest config include pattern invariant violated:`,
+      ...violations.map((v) => `  ${v}`),
+      ``,
+      `Each vitest.config.ts must set:`,
+      `  test: { include: ["test/**/*.test.ts"], ... }`,
+      ``,
+      `Without this, discovery may fall through to defaults or inherited config`,
+      `that does not match the package's actual test layout and tests will silently not run.`,
+    ];
+    throw new Error(`\n${lines.join("\n")}`);
+  });
+});
+
+// =============================================================================
+// Invariant 6: package.json test script implies real test files
+// =============================================================================
+
+describe("workspace test-script vs test-files invariant", () => {
+  it("every package with a test script has at least one test/**/*.test.ts file (unless allowlisted)", () => {
+    const packages = discoverAllPackages();
+    const violations: string[] = [];
+
+    for (const pkg of packages) {
+      const pkgJson = JSON.parse(readFileSync(join(pkg.pkgDir, "package.json"), "utf8")) as {
+        scripts?: Record<string, string>;
+      };
+      const hasTestScript = pkgJson.scripts !== undefined && "test" in pkgJson.scripts;
+      if (!hasTestScript) continue;
+      if (PACKAGES_ALLOWED_TO_HAVE_TEST_SCRIPT_WITHOUT_TESTS.has(pkg.packageName)) continue;
+
+      const testFiles = findTestFiles(pkg.pkgDir);
+      if (testFiles.length === 0) {
+        violations.push(
+          `${pkg.packageName} (packages/${pkg.dirName}): package.json declares a "test" script but no test/**/*.test.ts files exist. The test script silently passes with zero tests, which hides accidentally-skipped suites.`,
+        );
+      }
+    }
+
+    if (violations.length === 0) return;
+
+    const lines: string[] = [
+      `Workspace test-script vs test-files invariant violated:`,
+      ...violations.map((v) => `  ${v}`),
+      ``,
+      `Options:`,
+      `  - Remove the "test" script from the package's package.json if it does not own tests.`,
+      `  - Add real test files under test/**/*.test.ts.`,
+      `  - Add the package to PACKAGES_ALLOWED_TO_HAVE_TEST_SCRIPT_WITHOUT_TESTS (named const at top).`,
+    ];
+    throw new Error(`\n${lines.join("\n")}`);
+  });
+});
+
+// =============================================================================
+// Invariant 7: adapters vitest config strictness (no passWithNoTests)
+// =============================================================================
+
+describe("adapters vitest config strictness invariant", () => {
+  it("packages/adapters/vitest.config.ts does not contain the token passWithNoTests", () => {
+    const cfgPath = join(PACKAGES_DIR, "adapters", "vitest.config.ts");
+    if (!existsSync(cfgPath)) {
+      throw new Error(
+        `packages/adapters/vitest.config.ts must exist (enforced by invariant 4 above).`,
+      );
+    }
+    // Strip comments so a `// passWithNoTests: forbidden` comment is not a
+    // false positive. Then ban any presence of the token: the default is
+    // already false, so writing it explicitly is meaningless ceremony,
+    // and writing `passWithNoTests: true` is what we are guarding against.
+    const cfgSource = stripTsComments(readFileSync(cfgPath, "utf8"));
+    if (cfgSource.includes("passWithNoTests")) {
+      throw new Error(
+        `\npackages/adapters/vitest.config.ts contains the token "passWithNoTests".\n` +
+          `Remove it. The adapters package owns real test suites; if discovery\n` +
+          `breaks (missing include glob, wrong CWD, etc.), the run MUST fail loudly,\n` +
+          `not silently exit with code 0 and pass CI. Vitest's default is\n` +
+          `passWithNoTests: false, so simply omitting the option gives the\n` +
+          `strict behavior we want.`,
+      );
+    }
   });
 });

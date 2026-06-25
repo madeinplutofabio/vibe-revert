@@ -40,6 +40,7 @@
     "access": "public"
   },
   "dependencies": {
+    "@viberevert/adapters": "workspace:*",
     "@viberevert/checks": "workspace:*",
     "@viberevert/core": "workspace:*",
     "@viberevert/git": "workspace:*",

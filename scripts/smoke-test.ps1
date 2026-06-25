@@ -1,12 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Fabio Marcello Salvadori
 
-# VibeRevert M B + M C + M D smoke test (Phase 12a + 12b + 12c).
-# Builds + packs the 7 packable workspace packages, installs them into a
-# scratch dir under $env:TEMP, and exercises the M B command surface AND the
-# M C/D Phase 12a + 12b + 12c packed-install scenarios (basic check + report
-# flows, targeted package-boundary proofs, and the M D rollback dry-run +
-# apply + idempotency flow) against a real `git init` repo.
+# VibeRevert local tarball-closure smoke test.
+#
+# Builds + packs every workspace package whose tarball is needed to satisfy
+# the published CLI's runtime closure -- the public runtime packages, the
+# CLI entry-point, and any currently-private workspace package that a
+# publishable package depends on (M G1b Step 1b added @viberevert/adapters here).
+# Installs them into a scratch dir under $env:TEMP via `file:` references
+# + pnpm.overrides and exercises the M B + M C + M D + M E + M F command
+# surface (Phases 12a-12e) against a real `git init` repo.
+#
+# Validates the LOCAL TARBALL DEPENDENCY CLOSURE. Must not fall back to
+# npm for any @viberevert/* package -- a guard near the overrides JSON
+# enforces this (see "Verify local-tarball-closure invariant" below).
+# Public registry install is a separate post-publish flow, not this
+# script's responsibility.
 #
 # See docs/release-process.md for the workflow rationale and the two known
 # release-packaging issues (pnpm.overrides workaround; PowerShell 5.1 BOM).
@@ -273,7 +282,7 @@ try {
         Pop-Location
     }
 
-    # 2. Pack the 7 packable workspace packages into $packDir.
+    # 2. Pack every workspace package needed by the local tarball closure into $packDir.
     Write-Section "Pack publishable packages into $packDir"
     New-Item -ItemType Directory -Force $packDir | Out-Null
     Push-Location $repoRoot
@@ -283,6 +292,7 @@ try {
                --filter '@viberevert/git' `
                --filter '@viberevert/checks' `
                --filter '@viberevert/reporters' `
+               --filter '@viberevert/adapters' `
                --filter '@viberevert/cli-commands' `
                --filter '@viberevert/mcp' `
                --filter 'viberevert' `
@@ -300,6 +310,10 @@ try {
     $tgzRe = (Get-ChildItem $packDir -Filter 'viberevert-reporters-*.tgz' | Select-Object -First 1).FullName
     $tgzCc = (Get-ChildItem $packDir -Filter 'viberevert-cli-commands-*.tgz' | Select-Object -First 1).FullName
     $tgzMc = (Get-ChildItem $packDir -Filter 'viberevert-mcp-*.tgz' | Select-Object -First 1).FullName
+    # Step 1b: adapters tarball (packed but private at 0.0.0; resolved via
+    # pnpm.overrides below so cli-commands' workspace dep on it doesn't
+    # fall back to npm).
+    $tgzAd = (Get-ChildItem $packDir -Filter 'viberevert-adapters-*.tgz' | Select-Object -First 1).FullName
     # `viberevert-<version>.tgz` -- match digit-leading suffix so we don't pick
     # up viberevert-git/core/session-format/checks/reporters/cli-commands/mcp
     # tarballs (which also start with `viberevert-`). cli-commands is post-Step-1
@@ -312,7 +326,7 @@ try {
         Sort-Object Name |
         Select-Object -First 1).FullName
 
-    foreach ($tgz in @($tgzSf, $tgzCo, $tgzGi, $tgzCh, $tgzRe, $tgzCc, $tgzMc, $tgzCl)) {
+    foreach ($tgz in @($tgzSf, $tgzCo, $tgzGi, $tgzCh, $tgzRe, $tgzAd, $tgzCc, $tgzMc, $tgzCl)) {
         if (-not $tgz) {
             $listed = (Get-ChildItem $packDir).Name -join ', '
             throw "Expected tarball not found under $packDir (files: $listed)"
@@ -341,6 +355,14 @@ try {
 
         # 4. Write consumer package.json with pnpm.overrides (release-process.md
         # known issue #1) using UTF-8 no-BOM (known issue #2).
+        #
+        # Local-tarball-closure rule: if a packed @viberevert/* package depends
+        # on another workspace package, that dependency MUST be listed in the
+        # pnpm.overrides block below. Otherwise scratch install will fall
+        # back to npm and either fail (404 for unpublished packages like
+        # @viberevert/adapters pre-Step-8) or, worse, silently resolve a
+        # stale public version. The guard right after this block enforces
+        # it; keep them in sync when adding a new workspace edge.
         Write-Section 'Write consumer package.json (UTF-8 no-BOM, pnpm.overrides)'
         # Forward-slash the paths for cleaner JSON (no Windows-backslash escaping).
         $pSf = $tgzSf -replace '\\', '/'
@@ -350,6 +372,7 @@ try {
         $pRe = $tgzRe -replace '\\', '/'
         $pCc = $tgzCc -replace '\\', '/'
         $pMc = $tgzMc -replace '\\', '/'
+        $pAd = $tgzAd -replace '\\', '/'
         $pCl = $tgzCl -replace '\\', '/'
 
         $packageJson = @"
@@ -373,6 +396,7 @@ try {
       "@viberevert/git": "file:$pGi",
       "@viberevert/checks": "file:$pCh",
       "@viberevert/reporters": "file:$pRe",
+      "@viberevert/adapters": "file:$pAd",
       "@viberevert/cli-commands": "file:$pCc",
       "@viberevert/mcp": "file:$pMc"
     }
@@ -383,6 +407,33 @@ try {
         $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
         [System.IO.File]::WriteAllText((Join-Path $scratch 'package.json'), $packageJson, $utf8NoBom)
         Write-Host '[ok] package.json written (no BOM)'
+
+        # Verify local-tarball-closure invariant: every packed @viberevert/*
+        # package MUST appear as a key in pnpm.overrides. If a package is
+        # missing here, pnpm install would fall back to npm for it -- failing
+        # (404 for private packages) or, post-publish, silently resolving a
+        # stale public version. The CLI entry-point `viberevert` is
+        # deliberately NOT in overrides (installed via `dependencies`).
+        # When Step 2 adds @viberevert/installers, update both this list AND
+        # the pack/overrides blocks above.
+        $packedInternalPackages = @(
+            '@viberevert/session-format',
+            '@viberevert/core',
+            '@viberevert/git',
+            '@viberevert/checks',
+            '@viberevert/reporters',
+            '@viberevert/adapters',
+            '@viberevert/cli-commands',
+            '@viberevert/mcp'
+        )
+        $writtenPkgJson = Get-Content (Join-Path $scratch 'package.json') -Raw | ConvertFrom-Json
+        $actualOverrideKeys = @($writtenPkgJson.pnpm.overrides.PSObject.Properties.Name)
+        foreach ($pkg in $packedInternalPackages) {
+            if ($actualOverrideKeys -notcontains $pkg) {
+                throw "Local-tarball-closure invariant violated: '$pkg' is packed but not listed in pnpm.overrides. Scratch install would fall back to npm. Add an override entry above."
+            }
+        }
+        Write-Host '[ok] local-tarball-closure invariant: all packed @viberevert/* packages covered by overrides'
 
         # 5. pnpm install
         Write-Section 'pnpm install'

@@ -9,6 +9,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { HOOK_SCRIPT_TEMPLATE, MANAGED_BY_MARKER } from "@viberevert/adapters";
 import { Cli } from "clipanion";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -23,7 +24,6 @@ import {
   UnsupportedGitHookLayoutError,
   UnsupportedGitHooksDirectoryError,
 } from "../src/commands/hook-uninstall.js";
-import { HOOK_SCRIPT_TEMPLATE, MANAGED_BY_MARKER } from "../src/hook-script.js";
 import { VIBEREVERT_TEST_FIXED_NOW } from "../src/runtime-env.js";
 
 // Mock node:fs/promises with delegating defaults so tests can override specific

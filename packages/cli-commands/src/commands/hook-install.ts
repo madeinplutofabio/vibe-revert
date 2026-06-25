@@ -3,21 +3,19 @@
 
 import { chmod, lstat, mkdir, readFile, rename } from "node:fs/promises";
 import { join } from "node:path";
+import {
+  BACKUP_FILE_PREFIX,
+  detectHookManagers,
+  formatBackupTimestamp,
+  HOOK_SCRIPT_TEMPLATE,
+  HookManagerIoError,
+  MANAGED_BY_MARKER,
+  MalformedPackageJsonError,
+} from "@viberevert/adapters";
 import { RepoRootNotFoundError, resolveRepoRoot } from "@viberevert/core";
 import { Command, Option } from "clipanion";
 
 import { writeFileAtomic } from "../atomic.js";
-import {
-  detectHookManagers,
-  HookManagerIoError,
-  MalformedPackageJsonError,
-} from "../hook-managers.js";
-import {
-  BACKUP_FILE_PREFIX,
-  formatBackupTimestamp,
-  HOOK_SCRIPT_TEMPLATE,
-  MANAGED_BY_MARKER,
-} from "../hook-script.js";
 import { resolveNowForCliTimestamp } from "../runtime-env.js";
 
 /**
@@ -41,7 +39,7 @@ import { resolveNowForCliTimestamp } from "../runtime-env.js";
  *     post-mkdir per D98.X), lstat(hookPath) x1, readFile(hookPath) x1,
  *     lstat(backupPath) x1, rename(hookPath, backupPath) x1, mkdir(hooksDir)
  *     x1, writeFileAtomic(hookPath) x1, chmod(hookPath) x1. No aliasing; no
- *     other fs calls; manager detection delegated to hook-managers.ts.
+ *     other fs calls; manager detection delegated to `@viberevert/adapters`.
  *  7. EXACTLY ONE import of HOOK_SCRIPT_TEMPLATE, MANAGED_BY_MARKER, and
  *     detectHookManagers (D98.M.8); EXACTLY ONE source call site
  *     `detectHookManagers(repoRoot)` in the execute path (one import does
@@ -601,8 +599,8 @@ export class HookInstallCommand extends Command {
       return 1;
     }
     if (err instanceof HookManagerIoError) {
-      // Imported from hook-managers.ts per D98.R; surfaced through the same
-      // generic I/O refusal copy shape as HookInstallIoError.
+      // Imported from @viberevert/adapters per the D98.M.8 amendment; surfaced
+      // through the same generic I/O refusal copy shape as HookInstallIoError.
       this.context.stderr.write(`${err.message}\n`);
       return 1;
     }
