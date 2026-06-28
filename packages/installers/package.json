@@ -25,6 +25,12 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@viberevert/adapters": "workspace:*",
+    "diff": "9.0.0",
+    "zod": "4.4.3"
   }
 }

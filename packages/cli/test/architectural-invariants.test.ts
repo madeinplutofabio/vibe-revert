@@ -5017,3 +5017,290 @@ describe("Architectural invariants -- M G1a Step 5 D99.M CLI MCPCommand exposure
     ).toBe(0);
   });
 });
+
+describe("Architectural invariants -- M G1b D101.M installers boundaries", () => {
+  // D101.M.3 / .4: import discipline for @viberevert/installers.
+  // D101.M.7 / .8 / .9: I/O ownership for the lock dir, journal dir,
+  //   integrations.json, and __store__/ backup namespace.
+  // D101.M.10: the installers barrel must not re-export internal
+  //   modules or the low-level writeIntegrationsFile mutator.
+  // D101.M.11: other workspace packages may only import the
+  //   installers barrel (no static or dynamic deep subpath imports).
+  //
+  // All checks strip comments BEFORE pattern matching via
+  // stripTsComments(). This is critical for two reasons:
+  //   1. The OWNED_PATHS tests use raw String.includes() to look for
+  //      the owned path literal -- findOffenders' built-in comment
+  //      filter does not apply to that check. JSDoc / //-comment
+  //      mentions of owned paths in source files (e.g., engine-
+  //      apply.ts BOUNDARY section lists "integrations.lock") would
+  //      otherwise falsely trigger the invariant.
+  //   2. The fs-import detection in fileImportsFsOperations runs
+  //      regexes against the source. Comment mentions of fs imports
+  //      would false-positive without stripping.
+  //
+  // For findOffenders-based tests (M.3 / M.4 / M.10 module-export
+  // patterns / M.11), stripping is defense-in-depth -- findOffenders
+  // already filters line-comments and JSDoc blocks, but stripping
+  // first also covers inline comments.
+  //
+  // Diagnostic exceptions for engine-apply.ts and engine-uninstall.ts:
+  // both files reference owned path literals in RUNTIME STRINGS (not
+  // comments) -- error messages, stderr warnings, PendingIntegration-
+  // RecoveryError.journalDir construction, InstallReceipt.integrations
+  // JsonPath construction, UninstallOutcome.not-installed reason text.
+  // These survive comment-stripping. Since both files import fs APIs
+  // (for target mutation), they would naively trigger the I/O
+  // ownership invariants. The explicit exceptions allow these
+  // diagnostic mentions; both files go through the typed function
+  // APIs (writeIntegrationsFile, scanForPendingJournals, acquireLock,
+  // releaseLock, etc.) and do not perform fs operations directly
+  // against the owned paths.
+
+  const INSTALLERS_SRC_DIR = join(REPO_ROOT, "packages/installers/src");
+
+  it("D101.M.3: @viberevert/installers does not deep-import from @viberevert/cli-commands/dist/commands/", () => {
+    const files = findTsFiles(INSTALLERS_SRC_DIR);
+    const pattern = /from\s+["']@viberevert\/cli-commands\/dist\/commands\//;
+    for (const file of files) {
+      const source = stripTsComments(readFileSync(file, "utf8"));
+      const offenders = findOffenders(source, pattern);
+      expect(
+        offenders,
+        `${relative(REPO_ROOT, file).replace(/\\/g, "/")} must not deep-import from @viberevert/cli-commands/dist/commands/ (D101.M.3 -- installers sits below cli-commands in the layer order). Matches: ${JSON.stringify(offenders)}`,
+      ).toEqual([]);
+    }
+  });
+
+  it("D101.M.4: @viberevert/installers imports @viberevert/adapters only via the bare specifier (no static or dynamic subpath imports)", () => {
+    const files = findTsFiles(INSTALLERS_SRC_DIR);
+    // Forbidden: ANY subpath after the package name, in static
+    // `from "..."` OR dynamic `import("...")` form. Bare
+    // `from "@viberevert/adapters"` and `import("@viberevert/adapters")`
+    // remain allowed (the package barrel is the public surface).
+    const pattern = /(?:from\s+|import\s*\(\s*)["']@viberevert\/adapters\/[^"']+["']/;
+    for (const file of files) {
+      const source = stripTsComments(readFileSync(file, "utf8"));
+      const offenders = findOffenders(source, pattern);
+      expect(
+        offenders,
+        `${relative(REPO_ROOT, file).replace(/\\/g, "/")} must import @viberevert/adapters via bare specifier only (D101.M.4 -- barrel-only consumption; static and dynamic forms; no subpaths of any kind). Matches: ${JSON.stringify(offenders)}`,
+      ).toEqual([]);
+    }
+  });
+
+  // I/O ownership invariants (M.7 / M.8 / M.9). Pattern: for each
+  // owned path literal, only the owner module (and explicit
+  // diagnostic exceptions) may both mention the literal AND import
+  // fs API symbols. Comment stripping happens BEFORE the
+  // literal-includes check so JSDoc mentions don't false-positive.
+
+  /**
+   * Detect whether the file imports fs operations that could
+   * read / write / mutate filesystem paths. Returns true when
+   * BOTH:
+   *   (a) the file imports from node:fs/promises OR from
+   *       ./atomic.js (the local writeFileAtomic primitive), AND
+   *   (b) the file actually uses at least one fs API name
+   *       (writeFile/writeFileAtomic/mkdir/unlink/rmdir/rm/
+   *       rename/chmod/readFile/readdir/lstat/stat).
+   *
+   * Input MUST be comment-stripped source -- the import regex
+   * would otherwise false-positive on JSDoc mentions of fs
+   * imports. Reads (readFile / readdir / lstat / stat) are
+   * included alongside mutating APIs because I/O ownership is
+   * about TOTAL ownership of the path, not just write
+   * ownership (e.g., scanForPendingJournals reads the journal
+   * dir, and that read also belongs to journal.ts).
+   */
+  function fileImportsFsOperations(strippedSource: string): boolean {
+    const fsPromisesImport = /from\s+["']node:fs\/promises["']/.test(strippedSource);
+    const atomicImport = /from\s+["']\.\/atomic\.js["']/.test(strippedSource);
+    if (!fsPromisesImport && !atomicImport) return false;
+    const apiUsage =
+      /\b(writeFile|writeFileAtomic|mkdir|unlink|rmdir|rm|rename|chmod|readFile|readdir|lstat|stat)\b/;
+    return apiUsage.test(strippedSource);
+  }
+
+  interface OwnedPathInvariant {
+    readonly id: string;
+    readonly literal: string;
+    readonly owner: string;
+    readonly diagnosticExceptions: ReadonlyArray<string>;
+    readonly description: string;
+  }
+
+  const OWNED_PATHS: ReadonlyArray<OwnedPathInvariant> = [
+    {
+      // engine-apply + engine-uninstall both reference the literal
+      // "integrations.lock" in their finally-block stderr warning
+      // ("remove .viberevert/integrations.lock/ manually"). They go
+      // through acquireLock/releaseLock for actual lock I/O.
+      id: "D101.M.7",
+      literal: "integrations.lock",
+      owner: "lock.ts",
+      diagnosticExceptions: ["engine-apply.ts", "engine-uninstall.ts"],
+      description: "lock dir I/O ownership",
+    },
+    {
+      // engine-apply + engine-uninstall both reference the literal
+      // "integration-journal" via the local JOURNAL_DIR_NAME constant
+      // for PendingIntegrationRecoveryError.journalDir construction.
+      // They go through writeJournal/updateJournal/scanForPending-
+      // Journals/deleteJournal for actual journal I/O.
+      id: "D101.M.8",
+      literal: "integration-journal",
+      owner: "journal.ts",
+      diagnosticExceptions: ["engine-apply.ts", "engine-uninstall.ts"],
+      description: "journal dir I/O ownership",
+    },
+    {
+      // engine-apply references "integrations.json" via the local
+      // INTEGRATIONS_FILENAME constant for InstallReceipt.integrations
+      // JsonPath construction. engine-uninstall references it in the
+      // UninstallOutcome.not-installed reason string ("no record for
+      // ${recordKey} in .viberevert/integrations.json"). gitignore-
+      // check.ts references it in the printGitignoreWarning stderr
+      // text ("VibeRevert stores local artifacts (integrations.json,
+      // backups, journal, audit logs) under .viberevert/"). All three
+      // go through readIntegrationsFile/writeIntegrationsFile (or
+      // never touch integrations.json at all, for gitignore-check)
+      // for actual store I/O.
+      id: "D101.M.9 (integrations.json)",
+      literal: "integrations.json",
+      owner: "integrations-store.ts",
+      diagnosticExceptions: ["engine-apply.ts", "engine-uninstall.ts", "gitignore-check.ts"],
+      description: "store-file I/O ownership",
+    },
+    {
+      // __store__ namespace is internal to integrations-store.ts. No
+      // diagnostic mentions in other files (engine-apply / uninstall
+      // pass backupGroupId through writeIntegrationsFile; the
+      // __store__ subdir name is hidden inside the store module).
+      id: "D101.M.9 (__store__ namespace)",
+      literal: "__store__",
+      owner: "integrations-store.ts",
+      diagnosticExceptions: [],
+      description: "store-backup namespace ownership",
+    },
+  ];
+
+  for (const { id, literal, owner, diagnosticExceptions, description } of OWNED_PATHS) {
+    it(`${id}: only ${owner} may perform fs I/O against "${literal}" (${description})`, () => {
+      const files = findTsFiles(INSTALLERS_SRC_DIR);
+      const violations: string[] = [];
+      for (const file of files) {
+        const source = stripTsComments(readFileSync(file, "utf8"));
+        const filename = file.split(/[\\/]/).pop() ?? "";
+        if (!source.includes(literal)) continue;
+        if (filename === owner) continue;
+        if (diagnosticExceptions.includes(filename)) continue;
+        if (fileImportsFsOperations(source)) {
+          violations.push(
+            `${relative(REPO_ROOT, file).replace(/\\/g, "/")}: contains literal "${literal}" AND imports fs API symbols`,
+          );
+        }
+      }
+      expect(
+        violations,
+        `${id}: only ${owner} may perform fs I/O against "${literal}". Diagnostic exceptions (allowed even with fs imports): ${JSON.stringify(diagnosticExceptions)}. Violations: ${JSON.stringify(violations)}`,
+      ).toEqual([]);
+    });
+  }
+
+  it("D101.M.10: the installers barrel must not re-export internal modules or writeIntegrationsFile", () => {
+    const source = stripTsComments(readSource("packages/installers/src/index.ts"));
+    const forbiddenModuleSpecifiers: ReadonlyArray<string> = [
+      "./engine-classify.js",
+      "./engine-classify",
+      "./journal.js",
+      "./journal",
+      "./lock.js",
+      "./lock",
+      "./atomic.js",
+      "./atomic",
+      "./preflight-target.js",
+      "./preflight-target",
+      "./canonical-json.js",
+      "./canonical-json",
+      "./line-endings.js",
+      "./line-endings",
+      "./path-resolve.js",
+      "./path-resolve",
+      "./path-encode.js",
+      "./path-encode",
+    ];
+    for (const spec of forbiddenModuleSpecifiers) {
+      const escaped = spec.replace(/\./g, "\\.");
+      const pattern = new RegExp(
+        `export\\s+(?:\\*|\\{[^}]*\\}|type\\s+\\{[^}]*\\})\\s+from\\s+["']${escaped}["']`,
+      );
+      const offenders = findOffenders(source, pattern);
+      expect(
+        offenders,
+        `packages/installers/src/index.ts must not re-export from "${spec}" (D101.M.10 -- internal module, not part of public surface). Matches: ${JSON.stringify(offenders)}`,
+      ).toEqual([]);
+    }
+    // writeIntegrationsFile must NEVER leak through the barrel.
+    // Two bypass paths are checked here:
+    //   1. Named re-export: `export { writeIntegrationsFile } from
+    //      "./integrations-store.js"` (multi-line tolerant via
+    //      `[^}]*` which spans newlines by default).
+    //   2. Wildcard re-export: `export * from "./integrations-store.js"`
+    //      -- bypasses the named-export check by exposing the
+    //      ENTIRE store module surface, including writeIntegrationsFile.
+    const namedExportPattern =
+      /export\s+\{[^}]*\bwriteIntegrationsFile\b[^}]*\}\s+from\s+["']\.\/integrations-store\.js["']/;
+    expect(
+      namedExportPattern.test(source),
+      `packages/installers/src/index.ts must not export writeIntegrationsFile from "./integrations-store.js" via named re-export (D101.M.10 -- low-level mutator; bypasses lock + journal + outcome semantics; callers must use apply / uninstall).`,
+    ).toBe(false);
+    const wildcardExportPattern = /export\s+\*\s+from\s+["']\.\/integrations-store\.js["']/;
+    expect(
+      wildcardExportPattern.test(source),
+      `packages/installers/src/index.ts must not export * from "./integrations-store.js" (D101.M.10 -- would expose writeIntegrationsFile bypassing the named-export check). Use selective named exports only.`,
+    ).toBe(false);
+  });
+
+  it("D101.M.11: other workspace packages import @viberevert/installers only via the bare specifier (no static or dynamic subpath imports)", () => {
+    const packagesDir = join(REPO_ROOT, "packages");
+    const otherPackages = readdirSync(packagesDir)
+      .filter((name) => name !== "installers")
+      .map((name) => join(packagesDir, name))
+      .filter((p) => {
+        try {
+          return statSync(p).isDirectory();
+        } catch {
+          return false;
+        }
+      });
+    // Match BOTH static `from "@viberevert/installers/..."` AND
+    // dynamic `import("@viberevert/installers/...")` subpath
+    // imports. Bare specifiers in either form remain allowed.
+    const pattern = /(?:from\s+|import\s*\(\s*)["']@viberevert\/installers\/[^"']+["']/;
+    const offenders: string[] = [];
+    for (const pkgDir of otherPackages) {
+      for (const subdir of ["src", "test"]) {
+        const fullSubdir = join(pkgDir, subdir);
+        try {
+          if (!statSync(fullSubdir).isDirectory()) continue;
+        } catch {
+          continue;
+        }
+        for (const file of findTsFiles(fullSubdir)) {
+          const source = stripTsComments(readFileSync(file, "utf8"));
+          const fileOffenders = findOffenders(source, pattern);
+          for (const o of fileOffenders) {
+            offenders.push(
+              `${relative(REPO_ROOT, file).replace(/\\/g, "/")}:${o.lineNumber}: ${o.content}`,
+            );
+          }
+        }
+      }
+    }
+    expect(
+      offenders,
+      `Other workspace packages must import @viberevert/installers via the bare specifier only (D101.M.11 -- static or dynamic; barrel is public surface). Deep-import offenders: ${JSON.stringify(offenders)}`,
+    ).toEqual([]);
+  });
+});
