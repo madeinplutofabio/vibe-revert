@@ -13,19 +13,26 @@
 //   3. The Adapter contract types (AdapterContext, AdapterPlan,
 //      FileEditOp, RecordKey, etc.) consumed by every per-adapter
 //      implementation in src/adapters/ (Steps 3-5).
+//   4. The AdapterError base class for genuinely exceptional adapter
+//      conditions (most refusals travel as RefusedPlan values).
+//   5. Per-adapter implementations (M G1b Step 3 lands cursor +
+//      direct-hook; Steps 4 and 5 add husky/lefthook + claude/
+//      github-action).
 //
 // Two consumers:
 //   1. @viberevert/cli-commands -- imports the hook surface (Step 1
 //      import rewires hook-install.ts and hook-uninstall.ts) and the
-//      Adapter contract types (Step 6's InstallCommand /
-//      UninstallCommand consume them).
+//      Adapter contract types + per-adapter implementations (Step 6's
+//      InstallCommand / UninstallCommand consume them).
 //   2. @viberevert/installers -- imports the contract types + sentinel
-//      helpers; provides the InstallOutcome layer on top.
+//      helpers; provides the InstallOutcome layer on top. M G1b Step 3
+//      adds an end-to-end smoke test that imports cursorAdapter via
+//      this barrel.
 //
 // Per D101.A, adapters are READ-ONLY: this barrel exports only data
-// shapes, pure helpers, and error classes; no file-mutating surface.
-// D101.M.1 + D101.M.1b architectural invariants assert this at the
-// source level.
+// shapes, pure helpers, error classes, and read-only adapter
+// implementations; no file-mutating surface. D101.M.1 + D101.M.1b
+// architectural invariants assert this at the source level.
 
 // =============================================================================
 // 1. Hook-manager detection + hook-script constants (moved from
@@ -98,6 +105,15 @@ export type {
 export { AdapterError } from "./errors.js";
 
 // =============================================================================
+// 5. Per-adapter implementations. Re-exported from ./adapters/index.js
+//    so that sub-barrel is the SINGLE SOURCE OF TRUTH for the adapter
+//    implementation list. Steps 4 and 5 add new adapters to
+//    ./adapters/index.js; this root barrel stays stable.
+// =============================================================================
+
+export { cursorAdapter, directHookAdapter } from "./adapters/index.js";
+
+// =============================================================================
 // Intentionally NOT exported
 // =============================================================================
 //
@@ -106,7 +122,8 @@ export { AdapterError } from "./errors.js";
 //   findSentinelBlock / replaceOrAppendSentinelBlock so the sentinel
 //   semantics stay co-located in this package.
 //
-// - Per-adapter implementations under ./adapters/*.js (DirectHookAdapter,
-//   CursorAdapter, ClaudeAdapter, GhActionAdapter, HuskyAdapter,
-//   LefthookAdapter): added in Steps 3-5 and exported from
-//   ./adapters/index.js. The package root barrel does NOT re-export them.
+// - Per-adapter private helpers (inspectHookFile in direct-hook,
+//   lstatOrNull / isVrManagedHook / refusalReasonForHookManagers, etc.):
+//   exercised through the adapter's public detect() + plan() surface
+//   only. The per-adapter implementations themselves are exported above
+//   in section 5.
