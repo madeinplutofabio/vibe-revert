@@ -215,6 +215,7 @@ M F supports only standard `.git`-as-directory repositories. For `hook install`,
 | 9 | Existing non-viberevert pre-commit hook (no `--force`) | `ExistingNonViberevertHookError` | — |
 | 10 | `--force` backup-path collision | `BackupCollisionError` | — |
 | 11 | I/O failure (lstat/readFile/rename/mkdir/writeFileAtomic/chmod) | `HookInstallIoError` | — |
+| 12 | Existing `direct-hook` integration record (M G1b coexistence guard) | `IntegrationsRecordsHookConflictError` | — |
 
 `hook uninstall` exit-1 paths:
 
@@ -289,6 +290,55 @@ pre-commit:
 ```
 
 **Forward path:** M G1's `installers` package will introduce proper `HuskyAdapter` and `LefthookAdapter` implementations of the `{ detect, plan, apply, record, uninstall }` Installer interface. When those land, `viberevert hook install` against a husky/lefthook repo will delegate to the appropriate adapter instead of refusing.
+
+---
+
+## Coexistence with `viberevert install` (M G1b)
+
+Starting in v0.7.1-beta.0, two install paths overlap at `.git/hooks/pre-commit`:
+
+- **`viberevert hook install`** (M F) — this document's primary subject; writes the deterministic hook template directly.
+- **`viberevert install --direct`** (M G1b) — writes the same template AND tracks the installation in `.viberevert/integrations.json` for later `uninstall --direct` / drift refusal / migration.
+
+To prevent double-management (where both paths think they own `.git/hooks/pre-commit`), `viberevert hook install` refuses when `.viberevert/integrations.json` already records a `direct-hook` integration.
+
+### The `IntegrationsRecordsHookConflictError` refusal
+
+`viberevert hook install` calls a compatibility guard between `.git` validation and hook-manager detection. If a direct-hook integration record is present, the guard throws `IntegrationsRecordsHookConflictError` and hook install:
+
+- Prints a two-part stderr message (the refusal + two recovery paths).
+- Exits 1 without touching `.git/hooks/pre-commit` (no backup created either — the guard fires BEFORE the rename step).
+
+`--force` does NOT override this refusal. Per the locked `--force` scope, `--force` only overrides the existing-non-viberevert-hook refusal (#9 in the refusal table); integrations-record conflicts are outside that scope.
+
+**Recovery paths** (both listed in the error message):
+
+1. **Remove the direct-hook integration record**: `viberevert uninstall --direct` reverses the M G1b install (unlinks `.git/hooks/pre-commit`, removes the record). `viberevert hook install` then proceeds normally.
+2. **Migrate to Husky**: `viberevert install --husky --migrate-from-hook-install` moves the tracked direct hook into a Husky-managed sentinel block (see below).
+
+### Husky migration story
+
+When the user runs `viberevert install --husky --migrate-from-hook-install` against a repo that already has a direct-hook integration record, the Husky adapter emits an `ApplicablePlan` with `meta.migrateFromDirectHook` set to `"true"` on the resulting integration record. **This is a SIGNAL, not an action** — the adapter itself does not remove the direct-hook record or file. The CLI-level install orchestration observes the meta marker after the Husky apply commits and explicitly calls `uninstall("direct-hook", ctx)` to complete the migration.
+
+**Successful post-migration state:**
+
+- `.viberevert/integrations.json` has a `husky` record with `meta.migrateFromDirectHook` set to `"true"` (durable audit context; preserved indefinitely).
+- The `direct-hook` record is removed.
+- `.git/hooks/pre-commit` is removed (write-new reverse = unlink).
+- `.husky/pre-commit` contains the user's original husky boilerplate PLUS the VibeRevert sentinel block (`# viberevert:begin:viberevert-husky-pre-commit` ... `# viberevert:end:viberevert-husky-pre-commit`).
+
+### Guard placement rationale
+
+The guard runs at **Step 2.5** of `hook install`: AFTER `.git` validation (Steps 1 and 2) and BEFORE any hook-related filesystem check or mutation (Steps 3+). Placement rationale:
+
+- **Non-git repos** still surface `RepoRootNotFoundError` (Step 1) or `UnsupportedGitHookLayoutError` (Step 2) FIRST, so the existing "must be a git repo" UX is unchanged when the integrations store is corrupt.
+- The guard runs BEFORE Step 3 (hook-manager detection) and BEFORE Steps 5-7 (hook file inspection + backup rename), so a conflict aborts before any `.git/hooks/pre-commit` touch.
+
+Installer store errors surfaced by the guard's underlying `hasRepoIntegrationRecord` call, such as corrupt `integrations.json` or wrong `schemaVersion`, propagate verbatim — they are NOT caught as known `hook install` errors and surface via clipanion's default handler with non-zero exit. Rationale: a corrupt integrations store is broken internal state that should not be masked by a "known refusal" message.
+
+### Architectural invariant (D101.M.5)
+
+The compatibility guard module (`packages/cli-commands/src/commands/hook-install-integrations-guard.ts`) is grep-locked to import EXACTLY one symbol from `@viberevert/installers` — `hasRepoIntegrationRecord`. No deep imports, no `readIntegrationsFile`, no engine internals, no schema/types. All store-read + validation logic lives in `@viberevert/installers`'s `integrations-query.ts`; the guard is a pure orchestration layer over that helper. The invariant is grep-enforced by `packages/cli/test/architectural-invariants.test.ts` under the D101.M.5 describe block.
 
 ---
 
@@ -502,6 +552,15 @@ Refusing to install the hook because we cannot verify whether husky or lefthook 
 ```
 Existing backup file at <backup-path> would be overwritten by this install. Remove or rename it first, then re-run `viberevert hook install --force`.
 ```
+
+**`IntegrationsRecordsHookConflictError`** (install; M G1b coexistence guard — fires when `.viberevert/integrations.json` already records a `direct-hook` integration; see the Coexistence with `viberevert install` section):
+Refusing to run `viberevert hook install` because .viberevert/integrations.json already records a VibeRevert direct-hook integration.
+
+Choose one recovery path:
+  - Remove the recorded integration: viberevert uninstall --direct
+  - Migrate to Husky: viberevert install --husky --migrate-from-hook-install
+
+See docs/hook-contract.md for the coexistence model.
 
 **`HookNotFoundError`** (default uninstall when `.git/hooks/pre-commit` is absent):
 ```

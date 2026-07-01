@@ -980,3 +980,112 @@ describe("hook-install exports", () => {
     expect(MalformedPackageJsonError).toBeDefined();
   });
 });
+
+// =============================================================================
+// M G1b Step 4E: integrations-record guard
+// =============================================================================
+
+// Hand-written schema-valid JSON fixtures. Kept inline (not imported from
+// installers' types) since this test file lives at the CLI/integration
+// layer -- 4D's guard unit tests already type-lock the fixture shape.
+// Minimal: exactly one op per record (ops.min(1) schema rule).
+const DIRECT_HOOK_INTEGRATIONS_JSON = JSON.stringify({
+  schemaVersion: 1,
+  createdByVersion: "0.7.1-beta.0-test",
+  updatedByVersion: "0.7.1-beta.0-test",
+  records: {
+    "direct-hook": {
+      recordKey: "direct-hook",
+      adapterName: "Direct hook",
+      installedAt: "2026-07-01T12:00:00.000Z",
+      installedByVersion: "0.7.1-beta.0-test",
+      ops: [
+        {
+          kind: "write-new",
+          target: {
+            scope: "repo",
+            pathTemplate: "{repo}/.git/hooks/pre-commit",
+            pathRelative: ".git/hooks/pre-commit",
+          },
+          backup: null,
+          managedBlockSha256: null,
+          managedValueSha256: null,
+          fullFileSha256AfterWrite: "a".repeat(64),
+          blockId: null,
+          jsonKeyPath: null,
+          mode: 493,
+        },
+      ],
+      meta: {},
+    },
+  },
+  history: [],
+});
+
+const EMPTY_INTEGRATIONS_JSON = JSON.stringify({
+  schemaVersion: 1,
+  createdByVersion: "0.7.1-beta.0-test",
+  updatedByVersion: "0.7.1-beta.0-test",
+  records: {},
+  history: [],
+});
+
+describe("viberevert hook install -- integrations-record guard (M G1b Step 4E)", () => {
+  it("refuses with guard copy when a direct-hook record is present + pre-existing user hook is preserved + no backup created", async () => {
+    const repoRoot = await makeTempGitRepo();
+    // Pre-existing user hook -- guard must fire BEFORE backup/overwrite,
+    // leaving these bytes untouched.
+    const existingHookContent = "#!/bin/sh\necho user-owned hook\nexit 0\n";
+    await writeFile(repoRoot, ".git/hooks/pre-commit", existingHookContent);
+    await writeFile(repoRoot, ".viberevert/integrations.json", DIRECT_HOOK_INTEGRATIONS_JSON);
+
+    const result = await runHookInstall(repoRoot);
+    expect(result.exitCode).toBe(1);
+    // Semantic assertions on the guard message content (NOT exact-match).
+    expect(result.stderr).toContain("viberevert uninstall --direct");
+    expect(result.stderr).toContain("viberevert install --husky --migrate-from-hook-install");
+    expect(result.stderr).toContain("docs/hook-contract.md");
+    // Pre-existing hook bytes MUST be preserved -- guard fired before
+    // backup/overwrite in Step 7.
+    const afterBytes = (await readHookFile(repoRoot)).toString("utf8");
+    expect(afterBytes).toBe(existingHookContent);
+    // NO backup created -- guard fired before Step 7's rename.
+    expect(await listBackups(repoRoot)).toEqual([]);
+  });
+
+  it("proceeds normally when integrations.json exists with empty records (guard does not false-positive on presence-of-file)", async () => {
+    const repoRoot = await makeTempGitRepo();
+    await writeFile(repoRoot, ".viberevert/integrations.json", EMPTY_INTEGRATIONS_JSON);
+    const result = await runHookInstall(repoRoot);
+    expect(result.exitCode).toBe(0);
+    expect(await hookExists(repoRoot)).toBe(true);
+  });
+
+  it("propagates errors from a corrupt integrations.json (guard does not swallow installer store errors); hook is NOT written", async () => {
+    const repoRoot = await makeTempGitRepo();
+    await writeFile(repoRoot, ".viberevert/integrations.json", "{ this is not valid json }");
+    const result = await runHookInstall(repoRoot);
+    // Corrupt-JSON path throws IntegrationsCorruptedError; not caught
+    // by handleKnownError's OR chain (contract: only
+    // IntegrationsRecordsHookConflictError is), so clipanion's default
+    // handler renders and returns non-zero.
+    expect(result.exitCode).not.toBe(0);
+    expect(await hookExists(repoRoot)).toBe(false);
+  });
+
+  it("PLACEMENT LOCK: non-git repo + corrupt .viberevert/integrations.json surfaces the pre-guard git-layout error, NOT installer corruption", async () => {
+    // Locks the Step 2.5 placement decision: guard runs AFTER .git
+    // validation. A regression that moves the guard earlier (Step 1.5)
+    // would flip the failure mode from "git repo required" to
+    // "installer store corrupt", masking the M F non-git-repo UX. If
+    // the guard fired first, its own tokens would appear in stderr.
+    const repoRoot = await makeTempRepoNoGit();
+    await writeFile(repoRoot, ".viberevert/integrations.json", "{ this is not valid json }");
+    const result = await runHookInstall(repoRoot);
+    expect(result.exitCode).toBe(1);
+    // Guard-specific tokens must NOT appear -- proves guard didn't fire.
+    expect(result.stderr).not.toContain("viberevert uninstall --direct");
+    expect(result.stderr).not.toContain("integrations.json already records");
+    expect(await hookExists(repoRoot)).toBe(false);
+  });
+});

@@ -72,6 +72,9 @@ importers:
       '@viberevert/git':
         specifier: workspace:*
         version: link:../git
+      '@viberevert/installers':
+        specifier: workspace:*
+        version: link:../installers
       '@viberevert/reporters':
         specifier: workspace:*
         version: link:../reporters

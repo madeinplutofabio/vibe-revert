@@ -5304,3 +5304,99 @@ describe("Architectural invariants -- M G1b D101.M installers boundaries", () =>
     ).toEqual([]);
   });
 });
+
+describe("Architectural invariants -- D101.M.5 hook-install-integrations-guard import surface", () => {
+  // D101.M.5 (M G1b Step 4D lock): the compatibility guard between
+  // `viberevert hook install` (M F) and `viberevert install --direct`
+  // (M G1b) MUST import EXACTLY one symbol from @viberevert/installers
+  // -- `hasRepoIntegrationRecord`. No deep imports, no
+  // readIntegrationsFile, no engine internals, no schema/types.
+  //
+  // Comment handling: the guard's own JSDoc mentions
+  // `@viberevert/installers`, `import`, `readIntegrationsFile`, etc. as
+  // part of its D101.M.5 documentation. Test 1 pre-strips block +
+  // line comments before scanning to avoid false positives; tests 2
+  // and 3 use findOffenders (which strips comments itself).
+
+  const GUARD_REL = "packages/cli-commands/src/commands/hook-install-integrations-guard.ts";
+
+  it("has EXACTLY one static `from '@viberevert/installers'` import statement, importing EXACTLY `hasRepoIntegrationRecord` (D101.M.5)", () => {
+    const source = readSource(GUARD_REL);
+    // Strip comments before scanning -- the guard's own JSDoc contains
+    // literal `import` / `@viberevert/installers` / `hasRepoIntegrationRecord`
+    // / `readIntegrationsFile` tokens that would false-positive a raw
+    // regex scan. Uses the same block-comment + line-comment strip
+    // pattern as the D90 invariants' stripTsComments helper (kept
+    // inline here so the D101.M.5 block is self-contained).
+    const uncommentedSource = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+
+    // General count: `from "@viberevert/installers"` matches every
+    // static import shape (named, default, namespace, type). One `from`
+    // clause per static import statement, so this count is regression-
+    // proof against any second static import under any form -- and
+    // avoids the cross-import spanning risk of a lazy
+    // `import[\s\S]*?from` pattern (which could greedily expand past a
+    // first import's own `from` to match a second import's
+    // `from "@viberevert/installers"`).
+    const fromMatches = uncommentedSource.match(/from\s*["']@viberevert\/installers["']/g);
+    expect(
+      fromMatches?.length ?? 0,
+      "guard must have EXACTLY one static `from '@viberevert/installers'` import (D101.M.5)",
+    ).toBe(1);
+
+    // Named-import body check: must be the `import { ... } from "..."`
+    // form and the body must be exactly `hasRepoIntegrationRecord`. The
+    // `{[\s\S]*?}` capture is bounded by braces on a single import so
+    // it cannot cross imports.
+    const namedImports = [
+      ...uncommentedSource.matchAll(
+        /import\s*\{([\s\S]*?)\}\s*from\s*["']@viberevert\/installers["']/g,
+      ),
+    ];
+    expect(namedImports.length, "guard must use the named-import form { X } (D101.M.5)").toBe(1);
+    const body = namedImports[0]?.[1] ?? "";
+    const names = body
+      .split(",")
+      .map((s) => s.trim().replace(/^type\s+/, ""))
+      .filter(Boolean);
+    expect(
+      names,
+      "guard must import EXACTLY hasRepoIntegrationRecord from @viberevert/installers (D101.M.5)",
+    ).toEqual(["hasRepoIntegrationRecord"]);
+    // No `X as Y` aliasing.
+    expect(body).not.toMatch(/\bas\b/);
+  });
+
+  it("does NOT deep-import from @viberevert/installers in any form (D101.M.5)", () => {
+    const source = readSource(GUARD_REL);
+    const antipatterns: ReadonlyArray<{ name: string; pattern: RegExp }> = [
+      { name: "static ESM deep import", pattern: /from\s+["']@viberevert\/installers\// },
+      { name: "dynamic import deep", pattern: /import\s*\(\s*["']@viberevert\/installers\// },
+      {
+        name: "CJS require (bare or deep)",
+        pattern: /require\s*\(\s*["']@viberevert\/installers/,
+      },
+      {
+        name: "TS import-equals require",
+        pattern: /import\s+\w+\s*=\s*require\s*\(\s*["']@viberevert\/installers/,
+      },
+    ];
+    for (const { name, pattern } of antipatterns) {
+      const offenders = findOffenders(source, pattern);
+      expect(
+        offenders,
+        `guard must not use ${name} (D101.M.5). Matches: ${JSON.stringify(offenders)}`,
+      ).toEqual([]);
+    }
+  });
+
+  it("does NOT use dynamic import of @viberevert/installers (bare) (D101.M.5)", () => {
+    const source = readSource(GUARD_REL);
+    const pattern = /import\s*\(\s*["']@viberevert\/installers["']/;
+    const offenders = findOffenders(source, pattern);
+    expect(
+      offenders,
+      `guard must not use bare dynamic import of @viberevert/installers (D101.M.5). Matches: ${JSON.stringify(offenders)}`,
+    ).toEqual([]);
+  });
+});

@@ -18,6 +18,11 @@ import { Command, Option } from "clipanion";
 import { writeFileAtomic } from "../atomic.js";
 import { resolveNowForCliTimestamp } from "../runtime-env.js";
 
+import {
+  assertNoIntegrationsHookConflict,
+  IntegrationsRecordsHookConflictError,
+} from "./hook-install-integrations-guard.js";
+
 /**
  * `viberevert hook install` -- write .git/hooks/pre-commit per M F D98.X
  * validate-before-mutate sequence.
@@ -376,6 +381,21 @@ export class HookInstallCommand extends Command {
     }
 
     // -------------------------------------------------------------------------
+    // Step 2.5 (M G1b Step 4E): integrations-record guard. Placement
+    // rationale: AFTER .git validation so corrupt or missing repos
+    // surface the git-layout error (Step 1 / Step 2) FIRST, and BEFORE
+    // any Step 3+ hook fs surface touches. Refuses install if
+    // .viberevert/integrations.json records a direct-hook integration.
+    // Throws IntegrationsRecordsHookConflictError on conflict;
+    // propagates installer store errors (corrupt JSON, wrong
+    // schemaVersion) verbatim -- those are NOT added to
+    // handleKnownError in 4E (contract: conflict is a known CLI
+    // refusal; corrupt store is broken internal state surfaced by
+    // clipanion's default handler).
+    // -------------------------------------------------------------------------
+    await assertNoIntegrationsHookConflict(repoRoot);
+
+    // -------------------------------------------------------------------------
     // Step 3: detect hook managers (D98.W). One call site (D98.M.8).
     // -------------------------------------------------------------------------
     const detection = await detectHookManagers(repoRoot);
@@ -575,6 +595,7 @@ export class HookInstallCommand extends Command {
       return 1;
     }
     if (
+      err instanceof IntegrationsRecordsHookConflictError ||
       err instanceof UnsupportedGitHookLayoutError ||
       err instanceof UnsupportedGitHooksDirectoryError ||
       err instanceof ExistingNonViberevertHookError ||

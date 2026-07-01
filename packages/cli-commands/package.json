@@ -44,6 +44,7 @@
     "@viberevert/checks": "workspace:*",
     "@viberevert/core": "workspace:*",
     "@viberevert/git": "workspace:*",
+    "@viberevert/installers": "workspace:*",
     "@viberevert/reporters": "workspace:*",
     "@viberevert/session-format": "workspace:*",
     "clipanion": "3.2.1",

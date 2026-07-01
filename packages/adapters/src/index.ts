@@ -107,11 +107,18 @@ export { AdapterError } from "./errors.js";
 // =============================================================================
 // 5. Per-adapter implementations. Re-exported from ./adapters/index.js
 //    so that sub-barrel is the SINGLE SOURCE OF TRUTH for the adapter
-//    implementation list. Steps 4 and 5 add new adapters to
-//    ./adapters/index.js; this root barrel stays stable.
+//    implementation list. Step 3 landed cursor + direct-hook; Step 4
+//    lands husky + lefthook; Step 5 adds claude + github-action. The
+//    root barrel's re-export line grows to match the sub-barrel; the
+//    sub-barrel structure stays stable.
 // =============================================================================
 
-export { cursorAdapter, directHookAdapter } from "./adapters/index.js";
+export {
+  cursorAdapter,
+  directHookAdapter,
+  huskyAdapter,
+  lefthookAdapter,
+} from "./adapters/index.js";
 
 // =============================================================================
 // Intentionally NOT exported
