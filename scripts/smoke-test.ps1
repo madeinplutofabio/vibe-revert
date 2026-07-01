@@ -293,6 +293,7 @@ try {
                --filter '@viberevert/checks' `
                --filter '@viberevert/reporters' `
                --filter '@viberevert/adapters' `
+               --filter '@viberevert/installers' `
                --filter '@viberevert/cli-commands' `
                --filter '@viberevert/mcp' `
                --filter 'viberevert' `
@@ -314,6 +315,10 @@ try {
     # pnpm.overrides below so cli-commands' workspace dep on it doesn't
     # fall back to npm).
     $tgzAd = (Get-ChildItem $packDir -Filter 'viberevert-adapters-*.tgz' | Select-Object -First 1).FullName
+    # M G1b Step 4: installers tarball (packed but private at 0.0.0; resolved
+    # via pnpm.overrides below so cli-commands' workspace dep on it doesn't
+    # fall back to npm).
+    $tgzIn = (Get-ChildItem $packDir -Filter 'viberevert-installers-*.tgz' | Select-Object -First 1).FullName
     # `viberevert-<version>.tgz` -- match digit-leading suffix so we don't pick
     # up viberevert-git/core/session-format/checks/reporters/cli-commands/mcp
     # tarballs (which also start with `viberevert-`). cli-commands is post-Step-1
@@ -326,7 +331,7 @@ try {
         Sort-Object Name |
         Select-Object -First 1).FullName
 
-    foreach ($tgz in @($tgzSf, $tgzCo, $tgzGi, $tgzCh, $tgzRe, $tgzAd, $tgzCc, $tgzMc, $tgzCl)) {
+    foreach ($tgz in @($tgzSf, $tgzCo, $tgzGi, $tgzCh, $tgzRe, $tgzAd, $tgzIn, $tgzCc, $tgzMc, $tgzCl)) {
         if (-not $tgz) {
             $listed = (Get-ChildItem $packDir).Name -join ', '
             throw "Expected tarball not found under $packDir (files: $listed)"
@@ -373,6 +378,7 @@ try {
         $pCc = $tgzCc -replace '\\', '/'
         $pMc = $tgzMc -replace '\\', '/'
         $pAd = $tgzAd -replace '\\', '/'
+        $pIn = $tgzIn -replace '\\', '/'
         $pCl = $tgzCl -replace '\\', '/'
 
         $packageJson = @"
@@ -397,6 +403,7 @@ try {
       "@viberevert/checks": "file:$pCh",
       "@viberevert/reporters": "file:$pRe",
       "@viberevert/adapters": "file:$pAd",
+      "@viberevert/installers": "file:$pIn",
       "@viberevert/cli-commands": "file:$pCc",
       "@viberevert/mcp": "file:$pMc"
     }
@@ -414,8 +421,6 @@ try {
         # (404 for private packages) or, post-publish, silently resolving a
         # stale public version. The CLI entry-point `viberevert` is
         # deliberately NOT in overrides (installed via `dependencies`).
-        # When Step 2 adds @viberevert/installers, update both this list AND
-        # the pack/overrides blocks above.
         $packedInternalPackages = @(
             '@viberevert/session-format',
             '@viberevert/core',
@@ -423,6 +428,7 @@ try {
             '@viberevert/checks',
             '@viberevert/reporters',
             '@viberevert/adapters',
+            '@viberevert/installers',
             '@viberevert/cli-commands',
             '@viberevert/mcp'
         )
