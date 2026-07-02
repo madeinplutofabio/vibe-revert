@@ -11,11 +11,13 @@ import {
   HookInstallCommand,
   HookUninstallCommand,
   InitCommand,
+  InstallCommand,
   PromptFixCommand,
   ReportCommand,
   RollbackCommand,
   SessionsCommand,
   StartCommand,
+  UninstallCommand,
   VersionCommand,
 } from "@viberevert/cli-commands";
 import { Builtins, Cli } from "clipanion";
@@ -44,6 +46,8 @@ cli.register(PromptFixCommand);
 cli.register(RollbackCommand);
 cli.register(HookInstallCommand);
 cli.register(HookUninstallCommand);
+cli.register(InstallCommand);
+cli.register(UninstallCommand);
 cli.register(MCPCommand);
 
 await cli.runExit(process.argv.slice(2));

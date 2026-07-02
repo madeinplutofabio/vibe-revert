@@ -1616,6 +1616,117 @@ PHASE_12D_TOKEN = "TESTFIXTUREONLY_S9qX8wV7tS6rP5nM4kL3jH2gF1"
             Remove-Item -Force $p -ErrorAction SilentlyContinue
         }
 
+        # =================================================================
+        # Phase 13 (M G1b Step 6D): CLI install --direct / uninstall --direct
+        # end-to-end round-trip against a packed install. Locked scope:
+        # install -> noop rerun -> uninstall -> noop rerun. Verifies the
+        # hook file + integrations.json record are kept in sync by the
+        # installer engine. Windows chmod no-op is asserted implicitly
+        # (install exit 0 means chmod did not error on this platform;
+        # per D101.K, POSIX-mode check is skipped on Windows).
+        #
+        # Runs after Phase 12f cleanup (hook file already removed by
+        # Phase 12e teardown) and BEFORE Phase 12b-last (which deletes
+        # .viberevert.yml and leaves the repo in a destructive state).
+        # =================================================================
+        Write-Section 'M G1b 13: install --direct + noop + uninstall --direct (record + hook roundtrip; Windows chmod no-op)'
+
+        # PowerShell 5.1 doesn't reliably expose $IsWindows; probe the
+        # environment marker instead.
+        $ph13IsWindows = $env:OS -eq 'Windows_NT'
+        $ph13HookPath = '.git/hooks/pre-commit'
+        $ph13IntegrationsPath = '.viberevert/integrations.json'
+
+        # Small helper: return the array of recordKeys currently present in
+        # the integrations.json, or an empty array if the file is absent or
+        # has no records object. Handles the schema's optional-shape gracefully.
+        function Get-Ph13RecordKeys {
+            param([string]$Path)
+            if (-not (Test-Path $Path)) { return @() }
+            $obj = Get-Content -Raw $Path | ConvertFrom-Json
+            if (-not $obj.records) { return @() }
+            return @($obj.records.PSObject.Properties.Name)
+        }
+
+        # Precondition: hook absent, direct-hook record absent.
+        if (Test-Path $ph13HookPath) {
+            throw "Phase 13 precondition violated: $ph13HookPath already exists. Prior phase (Phase 12e cleanup) did not remove it."
+        }
+        $ph13PreKeys = Get-Ph13RecordKeys $ph13IntegrationsPath
+        if ($ph13PreKeys -contains 'direct-hook') {
+            throw "Phase 13 precondition violated: direct-hook already recorded in $ph13IntegrationsPath. RecordKeys: $($ph13PreKeys -join ', ')"
+        }
+
+        # Step 1: install --direct on clean repo -> [applied: Direct hook: ...]
+        Invoke-Cli -CliArgs @('install', '--direct') -ExpectedExit 0 -StepName '13-install-direct' -ExpectedOutputContains '[applied: Direct hook:'
+
+        # Step 2: hook file + direct-hook record both present.
+        if (-not (Test-Path $ph13HookPath)) {
+            throw "Phase 13 step 2: install --direct reported [applied] but $ph13HookPath is missing"
+        }
+        if (-not (Test-Path $ph13IntegrationsPath)) {
+            throw "Phase 13 step 2: install --direct reported [applied] but $ph13IntegrationsPath is missing"
+        }
+        $ph13Step2Keys = Get-Ph13RecordKeys $ph13IntegrationsPath
+        if ($ph13Step2Keys -notcontains 'direct-hook') {
+            throw "Phase 13 step 2: install --direct reported [applied] but no direct-hook record present. RecordKeys: $($ph13Step2Keys -join ', ')"
+        }
+        Write-Host '[ok] Phase 13 step 2: hook file + direct-hook record present after install --direct'
+
+        # Step 3: Windows chmod no-op assertion (D101.K). Install exit 0
+        # already implies chmod did not throw. Skip POSIX-mode check on
+        # Windows; verify on POSIX.
+        if ($ph13IsWindows) {
+            Write-Host '[skip] Phase 13 step 3 (executable bit check): Windows -- chmod is a no-op per D101.K'
+        } else {
+            $ph13Mode = (Get-Item $ph13HookPath).UnixMode
+            if ($ph13Mode -notmatch '^-rwx') {
+                throw "Phase 13 step 3: hook is not executable on POSIX. Mode: $ph13Mode"
+            }
+            Write-Host "[ok] Phase 13 step 3: hook is executable on POSIX (mode: $ph13Mode)"
+        }
+
+        # Step 4: re-run install --direct -> [noop: Direct hook: ...]; state
+        # unchanged INCLUDING the direct-hook record (a bad noop path could
+        # keep the file but drop the record).
+        Invoke-Cli -CliArgs @('install', '--direct') -ExpectedExit 0 -StepName '13-install-direct-noop' -ExpectedOutputContains '[noop: Direct hook:'
+        if (-not (Test-Path $ph13HookPath)) {
+            throw 'Phase 13 step 4: hook missing after noop re-install'
+        }
+        if (-not (Test-Path $ph13IntegrationsPath)) {
+            throw 'Phase 13 step 4: integrations.json missing after noop re-install'
+        }
+        $ph13Step4Keys = Get-Ph13RecordKeys $ph13IntegrationsPath
+        if ($ph13Step4Keys -notcontains 'direct-hook') {
+            throw "Phase 13 step 4: direct-hook record dropped after noop re-install. RecordKeys: $($ph13Step4Keys -join ', ')"
+        }
+        Write-Host '[ok] Phase 13 step 4: hook + record unchanged after noop re-install'
+
+        # Step 5: uninstall --direct -> [uninstalled: Direct hook: ...];
+        # hook file removed; direct-hook record either absent (integrations.json
+        # deleted when last record removed) OR present-but-without-direct-hook.
+        Invoke-Cli -CliArgs @('uninstall', '--direct') -ExpectedExit 0 -StepName '13-uninstall-direct' -ExpectedOutputContains '[uninstalled: Direct hook:'
+        if (Test-Path $ph13HookPath) {
+            throw 'Phase 13 step 5: uninstall --direct reported [uninstalled] but hook still exists'
+        }
+        $ph13Step5Keys = Get-Ph13RecordKeys $ph13IntegrationsPath
+        if ($ph13Step5Keys -contains 'direct-hook') {
+            throw "Phase 13 step 5: uninstall --direct reported [uninstalled] but direct-hook record still present. RecordKeys: $($ph13Step5Keys -join ', ')"
+        }
+        Write-Host '[ok] Phase 13 step 5: hook + direct-hook record removed after uninstall --direct'
+
+        # Step 6: re-run uninstall --direct -> [noop: Direct hook: ...];
+        # final state re-check (hook + record both remain absent).
+        Invoke-Cli -CliArgs @('uninstall', '--direct') -ExpectedExit 0 -StepName '13-uninstall-direct-noop' -ExpectedOutputContains '[noop: Direct hook:'
+        if (Test-Path $ph13HookPath) {
+            throw 'Phase 13 step 6: hook reappeared after noop uninstall'
+        }
+        $ph13Step6Keys = Get-Ph13RecordKeys $ph13IntegrationsPath
+        if ($ph13Step6Keys -contains 'direct-hook') {
+            throw "Phase 13 step 6: direct-hook record reappeared after noop uninstall. RecordKeys: $($ph13Step6Keys -join ', ')"
+        }
+        Write-Host '[ok] Phase 13: install/noop/uninstall/noop round-trip complete (hook + record synchronized)'
+
         Write-Section 'M C 12b: missing config (LAST scenario - corrupts state for any later steps)'
         Remove-Item -Force '.viberevert.yml'
         if (Test-Path '.viberevert.yml') {
@@ -1630,7 +1741,7 @@ PHASE_12D_TOKEN = "TESTFIXTUREONLY_S9qX8wV7tS6rP5nM4kL3jH2gF1"
     Write-Section 'Summary'
     Write-Host "CLI steps passed: $passCount"
     Write-Host "CLI steps failed: $failCount"
-    Write-Host '[ALL PASS] M B + M C + M D Phase 12a + 12b + 12c smoke test green.'
+    Write-Host '[ALL PASS] M B + M C + M D Phase 12a + 12b + 12c + M G1b Phase 13 smoke test green.'
 
 } catch {
     $aborted = $true

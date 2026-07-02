@@ -5400,3 +5400,72 @@ describe("Architectural invariants -- D101.M.5 hook-install-integrations-guard i
     ).toEqual([]);
   });
 });
+
+describe("Architectural invariants -- D101.M.6 InstallCommand + UninstallCommand registration order", () => {
+  // D101.M.6 (M G1b Step 6C lock): extends D98.M.10's registration
+  // order convention. The install/uninstall commands sit as a pair
+  // between the hook commands and MCPCommand, matching the D101.I
+  // locked order:
+  //
+  //   RollbackCommand → HookInstallCommand → HookUninstallCommand
+  //     → InstallCommand → UninstallCommand → MCPCommand
+  //
+  // The "IMMEDIATELY after" lock applies within the pair: nothing may
+  // be registered between InstallCommand and UninstallCommand. Mirror
+  // of D98.M.10's HookInstall/HookUninstall pair lock -- the two
+  // integrations commands are registered as a pair (no other command
+  // may be inserted between them).
+
+  const INDEX_REL = "packages/cli/src/index.ts";
+
+  it("D101.M.6: index.ts registration ORDER -- HookUninstall < Install < Uninstall < MCP AND Uninstall IMMEDIATELY after Install", () => {
+    const source = readSource(INDEX_REL);
+
+    const hookUninstallIdx = source.indexOf("cli.register(HookUninstallCommand);");
+    const installIdx = source.indexOf("cli.register(InstallCommand);");
+    const uninstallIdx = source.indexOf("cli.register(UninstallCommand);");
+    const mcpIdx = source.indexOf("cli.register(MCPCommand);");
+
+    expect(
+      hookUninstallIdx,
+      "HookUninstallCommand registration missing from index.ts (D101.M.6 anchor)",
+    ).toBeGreaterThanOrEqual(0);
+    expect(
+      installIdx,
+      "InstallCommand registration missing from index.ts (D101.M.6)",
+    ).toBeGreaterThanOrEqual(0);
+    expect(
+      uninstallIdx,
+      "UninstallCommand registration missing from index.ts (D101.M.6)",
+    ).toBeGreaterThanOrEqual(0);
+    expect(
+      mcpIdx,
+      "MCPCommand registration missing from index.ts (D101.M.6)",
+    ).toBeGreaterThanOrEqual(0);
+
+    expect(
+      hookUninstallIdx,
+      "InstallCommand must be registered AFTER HookUninstallCommand in index.ts (D101.M.6 / D101.I)",
+    ).toBeLessThan(installIdx);
+    expect(
+      installIdx,
+      "UninstallCommand must be registered AFTER InstallCommand in index.ts (D101.M.6 / D101.I)",
+    ).toBeLessThan(uninstallIdx);
+    expect(
+      uninstallIdx,
+      "MCPCommand must be registered AFTER UninstallCommand in index.ts (D101.M.6 / D101.I)",
+    ).toBeLessThan(mcpIdx);
+
+    // "Immediately after" lock: between the InstallCommand register
+    // line and the UninstallCommand register line, there must be NO
+    // other cli.register(...) call. Mirrors D98.M.10's HookInstall/
+    // HookUninstall pair convention.
+    const installEnd = installIdx + "cli.register(InstallCommand);".length;
+    const between = source.slice(installEnd, uninstallIdx);
+    const interlopingRegisters = findOffenders(between, /\bcli\.register\s*\(/);
+    expect(
+      interlopingRegisters,
+      `UninstallCommand must be registered IMMEDIATELY after InstallCommand with no other cli.register() between them (D101.M.6). Interloping registrations: ${JSON.stringify(interlopingRegisters)}`,
+    ).toEqual([]);
+  });
+});
