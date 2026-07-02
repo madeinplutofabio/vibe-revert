@@ -15,9 +15,9 @@
 //      implementation in src/adapters/ (Steps 3-5).
 //   4. The AdapterError base class for genuinely exceptional adapter
 //      conditions (most refusals travel as RefusedPlan values).
-//   5. Per-adapter implementations (M G1b Step 3 lands cursor +
-//      direct-hook; Steps 4 and 5 add husky/lefthook + claude/
-//      github-action).
+//   5. Per-adapter implementations (M G1b Step 3 landed cursor +
+//      direct-hook; Step 4 landed husky + lefthook; Step 5 adds
+//      claude + github-action).
 //
 // Two consumers:
 //   1. @viberevert/cli-commands -- imports the hook surface (Step 1
@@ -108,14 +108,16 @@ export { AdapterError } from "./errors.js";
 // 5. Per-adapter implementations. Re-exported from ./adapters/index.js
 //    so that sub-barrel is the SINGLE SOURCE OF TRUTH for the adapter
 //    implementation list. Step 3 landed cursor + direct-hook; Step 4
-//    lands husky + lefthook; Step 5 adds claude + github-action. The
+//    landed husky + lefthook; Step 5 adds claude + github-action. The
 //    root barrel's re-export line grows to match the sub-barrel; the
 //    sub-barrel structure stays stable.
 // =============================================================================
 
 export {
+  claudeAdapter,
   cursorAdapter,
   directHookAdapter,
+  githubActionAdapter,
   huskyAdapter,
   lefthookAdapter,
 } from "./adapters/index.js";

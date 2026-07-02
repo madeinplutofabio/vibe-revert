@@ -3,7 +3,7 @@
 
 // Per-adapter implementations -- the SINGLE SOURCE OF TRUTH for the
 // adapter implementation list. Step 3 of M G1b landed cursor +
-// direct-hook; Step 4 lands husky + lefthook; Step 5 adds claude /
+// direct-hook; Step 4 landed husky + lefthook; Step 5 adds claude +
 // github-action HERE.
 //
 // Each adapter is a const conforming to the Adapter contract defined
@@ -13,7 +13,9 @@
 // match as new adapters land here, but the sub-barrel structure stays
 // stable.
 
+export { claudeAdapter } from "./claude.js";
 export { cursorAdapter } from "./cursor.js";
 export { directHookAdapter } from "./direct-hook.js";
+export { githubActionAdapter } from "./github-action.js";
 export { huskyAdapter } from "./husky.js";
 export { lefthookAdapter } from "./lefthook.js";
