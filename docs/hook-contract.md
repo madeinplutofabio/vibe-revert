@@ -4,6 +4,8 @@ Canonical contract surface for the two `viberevert hook` subcommands. Read this 
 
 This document is the source of truth for M F's locked behavior. The CLI's `--help`, the hook script body emitted on disk, and integration code should all match what's described here. When in doubt, this file wins.
 
+For the newer records-based install/uninstall flow, including coexistence with direct hooks, Husky, Lefthook, Cursor, Claude Code, and GitHub Action, see [`docs/installers-contract.md`](installers-contract.md).
+
 ---
 
 ## Synopsis

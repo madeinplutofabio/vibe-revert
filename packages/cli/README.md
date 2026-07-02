@@ -2,11 +2,11 @@
 
 > The VibeRevert CLI.
 
-The user-facing command-line tool. Provides `init`, `checkpoint`, `check`, `report`, `prompt-fix`, `rollback`, `hook install`, `hook uninstall`, and `mcp serve`. Integration installers (`install --cursor / --claude / --github-action`) ship in v0.7.1-beta. The wrapper command (`run`) is deferred to M G2.
+The user-facing command-line tool. Provides `init`, `checkpoint`, `check`, `report`, `prompt-fix`, `rollback`, `hook install`, `hook uninstall`, `install`, `uninstall`, and `mcp serve`. The wrapper command (`run`) is deferred to M G2.
 
 Part of [VibeRevert](https://github.com/madeinplutofabio/vibe-revert) — the safety belt for vibe coding.
 
-**Status:** `v0.7.0-beta.0` published; `v0.7.1-beta` in progress (M G1b). Public API may change before v1.0.
+**Status:** `v0.7.0-beta.0` published; `v0.7.1-beta.0` in progress (M G1b). Public API may change before v1.0.
 
 ## Rollback
 
@@ -45,6 +45,34 @@ Re-installing an existing managed hook is byte-compare idempotent (D98.A11): byt
 Out of scope in v0.7.0-beta: husky / lefthook adapter integration (deferred to M G1's `installers` package — refusal-on-detection is intentional), worktree / submodule support (`.git`-as-pointer-file), git `core.hooksPath` redirect detection (install succeeds but the hook won't fire if `core.hooksPath` points elsewhere; a future `viberevert doctor` diagnostic will flag this), Windows-native git without `sh.exe` (git itself does not execute the hook on that platform — not a vibe-revert limitation), and any second severity threshold beyond what `check --staged` already enforces (`risk.block_on` is the single knob).
 
 See [`docs/hook-contract.md`](https://github.com/madeinplutofabio/vibe-revert/blob/main/docs/hook-contract.md) for the full contract: refusal copy table, exit-code policy (D98.K + D98.F translation), hook script verbatim text, `--force` scope lock, `--restore` validate-before-mutate semantics, metadata-fingerprint guard, and architectural invariants (D98.M.1-14).
+
+## Install / uninstall integrations
+
+`viberevert install` writes VibeRevert integration configuration for one or more adapters, driven through `@viberevert/installers`. Each per-adapter flag targets one integration:
+
+- `viberevert install --cursor` — merge the VibeRevert MCP server into `.cursor/mcp.json`.
+- `viberevert install --claude` — merge into `.mcp.json`.
+- `viberevert install --direct` — write `.git/hooks/pre-commit` directly.
+- `viberevert install --husky` — insert a VibeRevert block into `.husky/pre-commit`.
+- `viberevert install --lefthook` — insert a VibeRevert block into the detected Lefthook config.
+- `viberevert install --github-action` — write the pinned CI workflow at `.github/workflows/viberevert.yml`.
+- `viberevert install --all` — iterate the five safe adapters (cursor, direct-hook, husky, lefthook, claude). GitHub Action is explicit-only.
+
+`--dry-run` prints per-file diffs instead of writing. `--force-reinstall` narrowly overrides recorded-SHA drift refusals, and the GitHub Action adapter's user-authored-workflow refusal. It does not bypass locks, journals, symlink refusals, parent-escape refusals, target-shape refusals, target-size refusals, or other adapter-layer structural refusals. `--migrate-from-hook-install` orchestrates a two-step Husky migration when a VibeRevert direct hook is already present.
+
+CLI output uses a locked bracket vocabulary, one line per selected adapter:
+
+- `[applied: <adapter>: <humanSummary>]` — install succeeded.
+- `[noop: <adapter>: <reason>]` — record already matches desired state.
+- `[skipped: <adapter>: <reason>]` — adapter `detect` returned false for the selected intent.
+- `[refused: <adapter>: <code>: <message>]` — adapter or engine refusal.
+- `[applicable: <adapter>: <humanSummary>]` + indented diff — `--dry-run` only.
+
+`viberevert uninstall` mirrors the flag surface (except no `--dry-run`, and `--force` instead of `--force-reinstall`). Output uses `[uninstalled]`, `[noop]`, or `[refused]`.
+
+`viberevert install` writes the durable record at `.viberevert/integrations.json`; `viberevert uninstall` reads and removes records from that file. That file should be committed. Transient paths under `.viberevert/` — `integration-backups/`, `integration-journal/`, `integrations.lock/` — should be gitignored.
+
+See [`docs/installers-contract.md`](https://github.com/madeinplutofabio/vibe-revert/blob/main/docs/installers-contract.md) for the full contract: per-adapter conflict behavior, drift semantics, migration choreography, error taxonomy, and locked-copy reason codes.
 
 ## MCP server
 
