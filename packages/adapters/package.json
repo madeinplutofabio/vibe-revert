@@ -1,10 +1,30 @@
 {
   "name": "@viberevert/adapters",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.7.0-beta.0",
   "type": "module",
   "license": "Apache-2.0",
   "author": "Fabio Marcello Salvadori <fabio@madeinpluto.com>",
+  "description": "Read-only adapter contracts and hook-surface primitives for VibeRevert integrations (Cursor, Claude Code, Husky, Lefthook, direct hook, GitHub Action).",
+  "homepage": "https://github.com/madeinplutofabio/vibe-revert#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/madeinplutofabio/vibe-revert.git",
+    "directory": "packages/adapters"
+  },
+  "bugs": {
+    "url": "https://github.com/madeinplutofabio/vibe-revert/issues"
+  },
+  "keywords": [
+    "viberevert",
+    "adapters",
+    "installer",
+    "cursor",
+    "claude",
+    "husky",
+    "lefthook",
+    "github-action",
+    "mcp"
+  ],
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -19,7 +39,8 @@
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=22"

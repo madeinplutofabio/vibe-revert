@@ -1,10 +1,27 @@
 {
   "name": "@viberevert/installers",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.7.0-beta.0",
   "type": "module",
   "license": "Apache-2.0",
   "author": "Fabio Marcello Salvadori <fabio@madeinpluto.com>",
+  "description": "Non-destructive installer engine for VibeRevert integrations. Preview, apply, and uninstall under a per-repo lock with a pre-mutation recovery journal.",
+  "homepage": "https://github.com/madeinplutofabio/vibe-revert#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/madeinplutofabio/vibe-revert.git",
+    "directory": "packages/installers"
+  },
+  "bugs": {
+    "url": "https://github.com/madeinplutofabio/vibe-revert/issues"
+  },
+  "keywords": [
+    "viberevert",
+    "installer",
+    "adapters",
+    "integrations",
+    "atomic",
+    "safety"
+  ],
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -15,7 +32,8 @@
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=22"

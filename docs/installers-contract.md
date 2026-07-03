@@ -685,6 +685,7 @@ These are known future items — not urgent, tracked here so they are not lost.
 - **M G1b-followup-16** — Cursor `type: "stdio"` parity check with Claude Code — Cursor's emitted value does not currently carry the `type` discriminator that Claude Code's docs recommend for stdio servers.
 - **M G1b-followup-17** — Unify `HookManagerIoError` and `MalformedPackageJsonError` under the `AdapterError` base for a single-`instanceof` classifier.
 - **M G1b-followup-18** — Extract shared `ADAPTER_MATRIX` from `install.ts` and `uninstall.ts` once both commands stabilize.
+- **M G1b-followup-19** — Reconcile VibeRevert's per-milestone beta patch-line versioning (`0.7.1-beta.0`, `0.7.2-beta.0`, …) with Changesets prerelease semantics, or document a permanent manual-bump release policy.
 
 ## Maintenance note
 
