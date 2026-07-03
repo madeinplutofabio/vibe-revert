@@ -8,7 +8,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.7.1-beta.0] - 2026-07-03
+## [0.7.1-beta.1] - 2026-07-04
+
+> Note: `v0.7.1-beta.0` was a partial release. The CI publish run
+> shipped 5 of 10 packages before halting on missing npm Trusted
+> Publisher configuration for the two first-release packages. Those two
+> packages were then manually bootstrapped at `0.7.1-beta.0` so Trusted
+> Publisher could be configured. `v0.7.1-beta.1` supersedes it as the
+> canonical release of this line.
 
 ### Added
 
@@ -188,6 +195,6 @@ locks.
 - ASCII-only at byte level across MCP source (D99.M.13) and per-tool
   hook scripts (D98.M.4).
 
-[Unreleased]: https://github.com/madeinplutofabio/vibe-revert/compare/v0.7.1-beta.0...HEAD
-[0.7.1-beta.0]: https://github.com/madeinplutofabio/vibe-revert/releases/tag/v0.7.1-beta.0
+[Unreleased]: https://github.com/madeinplutofabio/vibe-revert/compare/v0.7.1-beta.1...HEAD
+[0.7.1-beta.1]: https://github.com/madeinplutofabio/vibe-revert/releases/tag/v0.7.1-beta.1
 [0.7.0-beta.0]: https://github.com/madeinplutofabio/vibe-revert/releases/tag/v0.7.0-beta.0
