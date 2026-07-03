@@ -3,10 +3,11 @@
 
 name: Release
 
-# Beta-only tag-push trigger for this milestone (v0.7.0-beta.N). When
-# stable releases ship (v0.7.0+), this workflow's regex must be widened
-# OR a separate stable workflow must be added -- the post-publish smoke,
-# release body, and --tag beta dist-tag here are all beta-specific.
+# Beta-only tag-push trigger for beta releases in the v0.7.x line
+# (v0.7.x-beta.N). When stable releases ship (v0.7.0+), this
+# workflow's regex must be widened OR a separate stable workflow
+# must be added -- the post-publish smoke, release body, and
+# --tag beta dist-tag here are all beta-specific.
 on:
   push:
     tags:
@@ -26,7 +27,7 @@ concurrency:
 
 jobs:
   publish:
-    name: Publish 8 packages to npm (Ubuntu)
+    name: Publish 10 packages to npm (Ubuntu)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -64,7 +65,7 @@ jobs:
           node-version: 22
           cache: pnpm
 
-      - name: Validate tag (beta-only) + annotated + 8 publish targets + 4 private packages
+      - name: Validate tag (beta-only) + annotated + 10 publish targets + 2 private packages
         id: validate
         shell: bash
         run: |
@@ -92,21 +93,23 @@ jobs:
           export VERSION
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-          # Validate package.json state: all 8 publish-target versions
-          # equal the tag suffix AND the 4 private packages remain
+          # Validate package.json state: all 10 publish-target versions
+          # equal the tag suffix AND the 2 private packages remain
           # private at 0.0.0. Either mismatch is a hard failure.
           node -e '
             const fs = require("fs");
             const version = process.env.VERSION;
             const publishTargets = [
-              "packages/cli/package.json",
-              "packages/cli-commands/package.json",
-              "packages/mcp/package.json",
+              "packages/session-format/package.json",
               "packages/core/package.json",
               "packages/git/package.json",
               "packages/checks/package.json",
               "packages/reporters/package.json",
-              "packages/session-format/package.json",
+              "packages/adapters/package.json",
+              "packages/installers/package.json",
+              "packages/cli-commands/package.json",
+              "packages/mcp/package.json",
+              "packages/cli/package.json",
             ];
             for (const p of publishTargets) {
               const pkg = JSON.parse(fs.readFileSync(p, "utf8"));
@@ -119,11 +122,9 @@ jobs:
                 process.exit(1);
               }
             }
-            console.log(`All 8 publish-target package versions match tag ${version}; private flags removed.`);
+            console.log(`All 10 publish-target package versions match tag ${version}; private flags removed.`);
 
             const privateStubs = [
-              "packages/adapters/package.json",
-              "packages/installers/package.json",
               "packages/policies-basic/package.json",
               "package.json",
             ];
@@ -138,7 +139,7 @@ jobs:
                 process.exit(1);
               }
             }
-            console.log("All 4 private packages remain private at 0.0.0.");
+            console.log("All 2 private packages remain private at 0.0.0.");
           '
 
       - name: Install dependencies
@@ -190,7 +191,7 @@ jobs:
       - name: Test
         run: pnpm test
 
-      - name: Pack 8 publish-target tarballs (validate pack surface before publish)
+      - name: Pack 10 publish-target tarballs (validate pack surface before publish)
         shell: bash
         run: |
           set -euo pipefail
@@ -202,6 +203,8 @@ jobs:
             "packages/git"
             "packages/checks"
             "packages/reporters"
+            "packages/adapters"
+            "packages/installers"
             "packages/cli-commands"
             "packages/mcp"
             "packages/cli"
@@ -212,6 +215,8 @@ jobs:
             "@viberevert/git"
             "@viberevert/checks"
             "@viberevert/reporters"
+            "@viberevert/adapters"
+            "@viberevert/installers"
             "@viberevert/cli-commands"
             "@viberevert/mcp"
             "viberevert"
@@ -227,19 +232,19 @@ jobs:
               exit 1
             fi
           done
-          echo "All 8 publish directories map to the locked package names in order."
+          echo "All 10 publish directories map to the locked package names in order."
 
           for dir in "${PUBLISH_DIRS[@]}"; do
             echo "==> Packing $dir"
             (cd "$dir" && pnpm pack --pack-destination "$PACK_DIR")
           done
           count="$(find "$PACK_DIR" -maxdepth 1 -name '*.tgz' | wc -l | tr -d ' ')"
-          if [ "$count" != "8" ]; then
-            echo "Expected exactly 8 packed tarballs, got $count"
+          if [ "$count" != "10" ]; then
+            echo "Expected exactly 10 packed tarballs, got $count"
             find "$PACK_DIR" -maxdepth 1 -type f -print
             exit 1
           fi
-          echo "All 8 publish-target tarballs packed into $PACK_DIR:"
+          echo "All 10 publish-target tarballs packed into $PACK_DIR:"
           find "$PACK_DIR" -maxdepth 1 -name '*.tgz' -printf '  %f\n'
 
       - name: Pre-publish guard -- assert no target version is already published (404-strict)
@@ -254,6 +259,8 @@ jobs:
             "@viberevert/git"
             "@viberevert/checks"
             "@viberevert/reporters"
+            "@viberevert/adapters"
+            "@viberevert/installers"
             "@viberevert/cli-commands"
             "@viberevert/mcp"
             "viberevert"
@@ -280,7 +287,7 @@ jobs:
             fi
           done
 
-      - name: Publish 8 packed tarballs in dependency-safe order (Trusted Publisher / OIDC)
+      - name: Publish 10 packed tarballs in dependency-safe order (Trusted Publisher / OIDC)
         env:
           VERSION: ${{ steps.validate.outputs.version }}
         shell: bash
@@ -297,6 +304,8 @@ jobs:
             "viberevert-git-${VERSION}.tgz"
             "viberevert-checks-${VERSION}.tgz"
             "viberevert-reporters-${VERSION}.tgz"
+            "viberevert-adapters-${VERSION}.tgz"
+            "viberevert-installers-${VERSION}.tgz"
             "viberevert-cli-commands-${VERSION}.tgz"
             "viberevert-mcp-${VERSION}.tgz"
             "viberevert-${VERSION}.tgz"
@@ -310,7 +319,7 @@ jobs:
               exit 1
             fi
           done
-          echo "All 8 expected tarballs present in $PACK_DIR."
+          echo "All 10 expected tarballs present in $PACK_DIR."
 
           for tgz in "${PUBLISH_TGZ[@]}"; do
             echo "==> Publishing $tgz via OIDC Trusted Publisher"
@@ -322,7 +331,7 @@ jobs:
             # a Trusted Publisher is configured for the package on npm.
             npm publish "$PACK_DIR/$tgz" --access public --tag beta --provenance
           done
-          echo "All 8 packages published at version ${VERSION} with dist-tag beta."
+          echo "All 10 packages published at version ${VERSION} with dist-tag beta."
 
   post-publish-smoke:
     name: Post-publish smoke (Windows PowerShell 5.1)
@@ -377,6 +386,8 @@ jobs:
             - `@viberevert/git`
             - `@viberevert/checks`
             - `@viberevert/reporters`
+            - `@viberevert/adapters`
+            - `@viberevert/installers`
             - `@viberevert/cli-commands`
             - `@viberevert/mcp`
             - `viberevert`
@@ -390,4 +401,4 @@ jobs:
             - MCP wire-shape locks: D99.Y protocolVersion, D99.A 8-tool order, D99.B reserved hiding, D99.O Cat 1/Cat 2, R31 reflection locks
             - MCP server exited 0 cleanly with empty stderr
 
-            CHANGELOG cutover happens in M RP Step 6 (post-publish documentation pass).
+            See CHANGELOG.md at the release tag for full notes.

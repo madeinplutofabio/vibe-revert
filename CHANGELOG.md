@@ -8,24 +8,116 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.1-beta.0] - 2026-07-03
+
+### Added
+
+- `@viberevert/adapters` (first public release) — read-only detect +
+  plan for six adapter surfaces: Cursor project-local MCP, Claude Code
+  project-local MCP, Husky pre-commit sentinel block, Lefthook config
+  sentinel block, direct git hook, GitHub Action workflow template.
+- `@viberevert/installers` (first public release) — non-destructive
+  installer engine (`preview` / `apply` / `uninstall`) with per-repo
+  cross-platform lock, pre-mutation recovery journal, per-kind
+  managed-region SHA drift detection, canonical-JSON hashing, symlink
+  refusal, 1 MiB JSON merge-target ceiling, and generated managed
+  content uses LF.
+- `viberevert install` and `viberevert uninstall` -- per-adapter flags
+  plus `--all` (five safe adapters; GitHub Action explicit-only),
+  intent-gated detection, install `--dry-run` diffs, narrow install
+  `--force-reinstall`, narrow uninstall `--force`, and
+  `--migrate-from-hook-install` for direct-hook → Husky migration.
+  Locked bracket output vocabulary: install
+  `[skipped/refused/noop/applied/applicable]`, uninstall
+  `[uninstalled/noop/refused]`. Records persisted in repo-local
+  `.viberevert/integrations.json`. See `docs/installers-contract.md`.
+- GitHub Action workflow template at
+  `.github/workflows/viberevert.yml` -- pinned exact CLI version,
+  `--since <sha>` PR/push diff ranges, `permissions: { contents: read }`,
+  no `pull_request_target`, sentinel-replace on re-install.
+- Hook manager delegation flip: M F's `viberevert hook install`
+  refusal-on-detection flips to safe delegation when Husky or
+  Lefthook adopt VibeRevert via the installers path; coexistence
+  guard prevents double-install between direct hook and hook-manager
+  adoption.
+
+### Security
+
+- GitHub Action template ships with `permissions: { contents: read }`
+  at the workflow level and explicitly does NOT use
+  `pull_request_target` (least-privilege).
+- Refusal-first design: adapters and installer engine refuse on
+  drift, on symlink targets, on non-repo paths, on oversize
+  (> 1 MiB) JSON merge targets, on missing hook manager, on
+  config-shape mismatch, and on pending recovery journal.
+  `--force-reinstall` / `--force` is scope-narrow and cannot
+  override structural refusals or the lock.
+- Publish metadata was audited before release:
+  `@viberevert/adapters/src` has no external non-node runtime
+  imports; `@viberevert/installers` declares `@viberevert/adapters`,
+  `diff`, and `zod`, with `diff` and `zod` as the only external
+  non-node runtime imports.
+
 ### Documentation
 
+- Added `docs/installers-contract.md` -- complete installer/adapter
+  contract: terminology, adapter interface, AdapterContext,
+  installer outcomes, FileEditOp variants, sentinel-block format,
+  JSON-key-merge + canonical JSON, PathSpec, per-kind managed-region
+  SHAs, backup layout, lock (D101.L), recovery journal (D101.M),
+  recordKey enum, `.gitignore` expectations, integrations.json
+  schema, GitHub Action template contract, CLI output vocabulary,
+  error taxonomy, migration choreography, per-adapter behavior
+  tables, and known follow-ups.
+- Expanded `packages/adapters/README.md`,
+  `packages/installers/README.md`, and `packages/cli/README.md` for
+  the new install/uninstall CLI surface.
+- Cross-linked `docs/hook-contract.md` to the new installers
+  contract for the records-based install/uninstall flow.
 - Removed stale capability claims about Codex / Copilot / Windsurf
   integrations, wrapper commands (`viberevert run` deferred to M G2),
   and policy packs that are not shipped yet. Affected: root
   `README.md`, `packages/cli/README.md`,
   `packages/installers/README.md`, `packages/adapters/README.md`,
   and `packages/policies-basic/README.md`.
-- Added `docs/integrations.md` with the per-adapter ship-status table:
-  cursor / claude / direct-hook / husky / lefthook / github-action
-  planned for M G1b; codex deferred pending the 90-day stability gate;
-  global installs deferred to M G1b-followup-10.
+- Added `docs/integrations.md` with the per-adapter ship-status
+  table: cursor / claude / direct-hook / husky / lefthook /
+  github-action shipped in M G1b; codex deferred pending the 90-day
+  stability gate; global installs deferred to M G1b-followup-10.
 - Updated per-package `Status:` lines to reflect the actual release
   shape: `v0.7.0-beta.0` published, first public release at
-  `v0.7.1-beta.0`, or private stub through `v0.7.1-beta`.
-- Added `plans/milestone_rp_to_g1b_reconciliation.md` to document why
-  the final M G1b scope differs from earlier drafts without rewriting
-  the archived M RP plan.
+  `v0.7.1-beta.0`, or private stub through the `v0.7.1-beta.0`
+  release line.
+- Added `plans/milestone_rp_to_g1b_reconciliation.md` to document
+  why the final M G1b scope differs from earlier drafts without
+  rewriting the archived M RP plan.
+
+### Architecture
+
+- New package layer enforced by architectural invariant tests:
+  `@viberevert/adapters` (READ-ONLY; hook surface + adapter
+  contracts; never reads `integrations.json`) →
+  `@viberevert/installers` (mutating engine, integrations store,
+  lock, journal, `hasRepoIntegrationRecord` helper) →
+  `@viberevert/cli-commands` (M F's hook-install + new
+  `InstallCommand` / `UninstallCommand`; imports from adapters AND
+  installers). Breaks the cycle that previously ran through M F's
+  hook surface.
+- Adapters return `AdapterPlan = ApplicablePlan | RefusedPlan` -- no
+  `NoopPlan` in adapters; noop is the installer's job since it
+  requires reading the integrations record + on-disk SHAs together.
+- Installers return `InstallOutcome = applied | noop | refused`.
+  Adoption of existing-matching-state is `applied` with
+  `opsApplied: 0`.
+- All installer writes go through a package-private
+  `writeFileAtomic` (temp + rename via `wx`-flag exclusive create)
+  under a per-repo lock (`.viberevert/integrations.lock/` atomic
+  mkdir). Pre-mutation recovery journal
+  (`.viberevert/integration-journal/<txn-id>.json`): a subsequent
+  install refuses with `PendingIntegrationRecoveryError` and lists
+  manual recovery steps.
+- No home-directory writes; no `--global` flag;
+  `.viberevert/integrations.json` is repo-local only (schema v1).
 
 ## [0.7.0-beta.0] - 2026-06-22
 
@@ -96,5 +188,6 @@ locks.
 - ASCII-only at byte level across MCP source (D99.M.13) and per-tool
   hook scripts (D98.M.4).
 
-[Unreleased]: https://github.com/madeinplutofabio/vibe-revert/compare/v0.7.0-beta.0...HEAD
+[Unreleased]: https://github.com/madeinplutofabio/vibe-revert/compare/v0.7.1-beta.0...HEAD
+[0.7.1-beta.0]: https://github.com/madeinplutofabio/vibe-revert/releases/tag/v0.7.1-beta.0
 [0.7.0-beta.0]: https://github.com/madeinplutofabio/vibe-revert/releases/tag/v0.7.0-beta.0
