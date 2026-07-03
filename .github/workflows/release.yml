@@ -8,10 +8,21 @@ name: Release
 # workflow's regex must be widened OR a separate stable workflow
 # must be added -- the post-publish smoke, release body, and
 # --tag beta dist-tag here are all beta-specific.
+#
+# workflow_dispatch is validation-only: it can validate, install,
+# lint, typecheck, build, test, pack, and run npm availability
+# checks, but `npm publish`, post-publish smoke, and GitHub Release
+# creation are push-tag only.
 on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      dry_run_release_tag:
+        description: 'Release tag to dry-run against (e.g. v0.7.1-beta.0). REQUIRED. This dispatch cannot publish: npm publish, post-publish smoke, and GitHub Release creation are all disabled for workflow_dispatch. Dispatch must run from the main branch.'
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -49,7 +60,9 @@ jobs:
         # metadata (tagger, message) the validate step needs to
         # distinguish annotated from lightweight tags. This explicit
         # fetch forces the annotated tag object to land in the
-        # runner's local refs/tags/<TAG>.
+        # runner's local refs/tags/<TAG>. Skipped on workflow_dispatch:
+        # the tag typically does not exist yet during pre-tag dry-run.
+        if: github.event_name == 'push'
         shell: bash
         run: |
           set -euo pipefail
@@ -67,26 +80,57 @@ jobs:
 
       - name: Validate tag (beta-only) + annotated + 10 publish targets + 2 private packages
         id: validate
+        env:
+          DRY_RUN_RELEASE_TAG: ${{ inputs.dry_run_release_tag }}
         shell: bash
         run: |
           set -euo pipefail
-          TAG_REF="${GITHUB_REF_NAME}"
+          echo "Mode: ${GITHUB_EVENT_NAME}"
 
-          # Beta-only regex for this milestone. Stable v0.7.0 ships
-          # via a separate workflow path; the dist-tag/post-publish
-          # smoke here are beta-specific.
+          # workflow_dispatch dry-run must run from main. A dry-run
+          # against a stale branch would validate the wrong tree and
+          # create false confidence before tagging.
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ "${GITHUB_REF_NAME}" != "main" ]; then
+            echo "workflow_dispatch dry-run must run from main, got ${GITHUB_REF_NAME}"
+            exit 1
+          fi
+
+          # TAG_REF source: workflow_dispatch input (via env var, not
+          # direct expression interpolation) or the pushed tag ref.
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            TAG_REF="${DRY_RUN_RELEASE_TAG}"
+          else
+            TAG_REF="${GITHUB_REF_NAME}"
+          fi
+
+          # Beta-only regex validation runs IMMEDIATELY after TAG_REF
+          # assignment and main-branch guard, BEFORE any echo of the
+          # (possibly user-controlled) TAG_REF value. Stable v0.7.0
+          # ships via a separate workflow path; the dist-tag /
+          # post-publish smoke here are beta-specific.
           if [[ ! "$TAG_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+$ ]]; then
             echo "Unexpected release tag: $TAG_REF (expected v<MAJOR>.<MINOR>.<PATCH>-beta.<N>)"
             exit 1
           fi
 
+          # Now safe to log the validated TAG_REF.
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            echo "Dry-run dispatch: TAG_REF=${TAG_REF}"
+          fi
+
           # Enforce annotated tag (M RP plan locked). Lightweight tags
           # are git-cat-file type "commit"; annotated tags are type "tag".
-          TAG_TYPE="$(git cat-file -t "refs/tags/${TAG_REF}")"
-          if [[ "$TAG_TYPE" != "tag" ]]; then
-            echo "Release tag ${TAG_REF} must be an annotated tag, not a lightweight tag (git cat-file type: ${TAG_TYPE})."
-            echo "Recreate with: git tag -a ${TAG_REF} -m \"${TAG_REF}\" && git push origin ${TAG_REF}"
-            exit 1
+          # Skipped on workflow_dispatch: the tag typically does not
+          # exist yet during pre-tag dry-run.
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            TAG_TYPE="$(git cat-file -t "refs/tags/${TAG_REF}")"
+            if [[ "$TAG_TYPE" != "tag" ]]; then
+              echo "Release tag ${TAG_REF} must be an annotated tag, not a lightweight tag (git cat-file type: ${TAG_TYPE})."
+              echo "Recreate with: git tag -a ${TAG_REF} -m \"${TAG_REF}\" && git push origin ${TAG_REF}"
+              exit 1
+            fi
+          else
+            echo "Dry-run dispatch: skipping annotated-tag check (tag not expected to exist yet)."
           fi
 
           VERSION="${TAG_REF#v}"
@@ -288,6 +332,7 @@ jobs:
           done
 
       - name: Publish 10 packed tarballs in dependency-safe order (Trusted Publisher / OIDC)
+        if: github.event_name == 'push'
         env:
           VERSION: ${{ steps.validate.outputs.version }}
         shell: bash
@@ -333,8 +378,36 @@ jobs:
           done
           echo "All 10 packages published at version ${VERSION} with dist-tag beta."
 
+      - name: Dry-run summary (workflow_dispatch only)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          DRY_RUN_RELEASE_TAG: ${{ inputs.dry_run_release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "===================================================================="
+          echo "DRY RUN ONLY: npm publish, post-publish smoke, and GitHub Release"
+          echo "creation are disabled for workflow_dispatch."
+          echo ""
+          echo "Dispatched with dry_run_release_tag: ${DRY_RUN_RELEASE_TAG}"
+          echo "This dispatch validated:"
+          echo "  - Tag format regex"
+          echo "  - Main-branch guard"
+          echo "  - Package versions match tag"
+          echo "  - Private packages remain private"
+          echo "  - Node + npm meet Trusted Publishing minimums"
+          echo "  - Lint / typecheck / build / test"
+          echo "  - Pack surface for all 10 publish targets"
+          echo "  - Pre-publish guard (npm view 404 for each target)"
+          echo ""
+          echo "To actually publish this release, push an annotated tag from main:"
+          echo "  git tag -a \"${DRY_RUN_RELEASE_TAG}\" -m \"${DRY_RUN_RELEASE_TAG}\""
+          echo "  git push origin \"${DRY_RUN_RELEASE_TAG}\""
+          echo "===================================================================="
+
   post-publish-smoke:
     name: Post-publish smoke (Windows PowerShell 5.1)
+    if: github.event_name == 'push'
     needs: publish
     runs-on: windows-latest
     timeout-minutes: 30
@@ -361,6 +434,7 @@ jobs:
 
   github-release:
     name: Create GitHub Release
+    if: github.event_name == 'push'
     needs: [publish, post-publish-smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 5
