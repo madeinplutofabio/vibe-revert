@@ -2,7 +2,7 @@
 
 > Smoke-test the packed CLI against a fresh git repo before pushing release-bearing changes.
 
-**Status:** `v0.7.0-beta` work in progress. Internal contributor doc.
+**Status:** `v0.7.1-beta.1` shipped. Internal contributor doc.
 
 This document covers the local smoke-test workflow for VibeRevert: how to build the current M B package set as tarballs, install them into a throwaway scratch directory, and exercise the CLI against a real `git init` repo. The workflow surfaces release-packaging issues that the workspace-internal `pnpm test` cannot — most importantly, cross-package `workspace:*` dependency resolution in a packed install.
 
@@ -185,21 +185,21 @@ rg -P '[^\x00-\x7F]' scripts/smoke-test.ps1
 
 ## Publishing to npm
 
-VibeRevert publishes 8 packages to npm via the GitHub Actions release workflow ([`.github/workflows/release.yml`](../.github/workflows/release.yml)), triggered by an annotated tag push. The workflow authenticates exclusively via npm **Trusted Publishers (OIDC)** -- no long-lived token is stored. Local `npm publish` is reserved for emergencies and requires its own auth path (see [Manual emergency publish](#manual-emergency-publish)).
+VibeRevert publishes 10 packages to npm via the GitHub Actions release workflow ([`.github/workflows/release.yml`](../.github/workflows/release.yml)), triggered by an annotated tag push. The workflow authenticates exclusively via npm **Trusted Publishers (OIDC)** -- no long-lived token is stored. Local `npm publish` is reserved for emergencies and requires its own auth path (see [Manual emergency publish](#manual-emergency-publish)).
 
 ### Trusted Publisher setup
 
-Each of the 8 publish-target packages on npm has a per-package Trusted Publisher configuration linking the package to this repo's `release.yml` workflow. When the workflow publishes, npm CLI 11.5.1+ exchanges a GitHub Actions OIDC token for short-lived publish credentials -- no `NPM_TOKEN` secret is required or used.
+Each of the 10 publish-target packages on npm has a per-package Trusted Publisher configuration linking the package to this repo's `release.yml` workflow. When the workflow publishes, npm CLI 11.5.1+ exchanges a GitHub Actions OIDC token for short-lived publish credentials -- no `NPM_TOKEN` secret is required or used.
 
-#### Prerequisite: 0.0.0 placeholder bootstrap
+#### Prerequisite: package bootstrap before Trusted Publisher
 
-npm's Trusted Publisher UI requires the package to exist before its access page is reachable. For each of the 8 publish-target packages, a one-time `0.0.0` placeholder must be published first via a non-OIDC auth path, such as interactive `npm login` or a granular access token, followed by `npm publish --access public`. After that single bootstrap, the package's Settings → Access page becomes available and Trusted Publisher can be configured.
+npm's Trusted Publisher UI requires the package to exist before its access page is reachable. For each publish-target package, a one-time first publish must happen before npm can attach a Trusted Publisher configuration to that package. The first publish must use a non-OIDC auth path, such as interactive `npm login` or a granular access token, with `npm publish --access public`. After that single bootstrap, the package's Settings → Access page becomes available and Trusted Publisher can be configured.
 
-This bootstrap has been done for all 8 packages (`viberevert@0.0.0` + `@viberevert/{session-format,core,git,checks,reporters,cli-commands,mcp}@0.0.0` exist on npm). Any future new package requires its own bootstrap before it can join the OIDC publish flow.
+This bootstrap has been done for all 10 packages: the original 8 (`viberevert@0.0.0` + `@viberevert/{session-format,core,git,checks,reporters,cli-commands,mcp}@0.0.0`) were bootstrapped at a `0.0.0` placeholder before `v0.7.0-beta.0`; `@viberevert/adapters` and `@viberevert/installers` were bootstrapped at `0.7.1-beta.0` (dist-tag `bootstrap`) during the v0.7.1-beta.0 partial-publish recovery. Any future new package requires its own bootstrap before it can join the OIDC publish flow -- see the new-publish-target gate in the v0.7.1-beta.1 retrospective.
 
 #### Per-package Trusted Publisher configuration
 
-For each of the 8 packages, on its npm Settings → Access page:
+For each of the 10 packages, on its npm Settings → Access page:
 
 1. Under "Trusted Publisher", select **GitHub Actions**.
 2. Configure:
@@ -209,7 +209,7 @@ For each of the 8 packages, on its npm Settings → Access page:
    - **Environment**: (leave blank)
 3. Save. The publisher policy takes effect immediately for subsequent publishes.
 
-Verification: all 8 packages must show the configured Trusted Publisher block before the release workflow can publish. The workflow has no `NPM_TOKEN` fallback; missing or mis-configured Trusted Publisher on any single package fails that package's `npm publish` step.
+Verification: all 10 packages must show the configured Trusted Publisher block before the release workflow can publish. The workflow has no `NPM_TOKEN` fallback; missing or mis-configured Trusted Publisher on any single package fails that package's `npm publish` step.
 
 #### Publishing access posture
 
@@ -223,7 +223,7 @@ The release workflow triggers ONLY on annotated tag pushes matching the beta reg
 
 End-to-end:
 
-1. **Bump versions locally.** Update all 8 publish-target `package.json` files to the new beta version.
+1. **Bump versions locally.** Update all 10 publish-target `package.json` files to the new beta version.
 2. **Commit + push to main.** CI's `build-and-test` and `release-dry-run` jobs validate the new version end-to-end.
 3. **Create the annotated tag** (must be annotated; lightweight tags are rejected):
    ```sh
@@ -239,12 +239,12 @@ The `publish` job performs (in order, fail-fast):
 
 - Tag regex validation (beta-only)
 - Annotated-tag enforcement via `git cat-file -t <tag>` (must be `"tag"`, not `"commit"`)
-- Cross-package version assertion (all 8 publish targets must equal tag suffix; 4 private packages must remain `private: true` at `0.0.0`)
+- Cross-package version assertion (all 10 publish targets must equal tag suffix; 2 private packages must remain `private: true` at `0.0.0`)
 - npm CLI + Node version verification (npm `>= 11.5.1`, Node `>= 22.14.0` -- required by npm Trusted Publishing)
 - Full 4-gate: typecheck + lint + test + build
-- Pack 8 publish-target tarballs via `pnpm pack` (asserts directory → package-name mapping; asserts count == 8)
+- Pack 10 publish-target tarballs via `pnpm pack` (asserts directory → package-name mapping; asserts count == 10)
 - Pre-publish `npm view` guard (404-strict: any non-404 error fails)
-- Publish 8 packed `.tgz` files in dependency-safe order via `npm publish <tarball> --access public --tag beta --provenance` (no auth token; OIDC token issued via `id-token: write` permission + per-package Trusted Publisher config)
+- Publish 10 packed `.tgz` files in dependency-safe order via `npm publish <tarball> --access public --tag beta --provenance` (no auth token; OIDC token issued via `id-token: write` permission + per-package Trusted Publisher config)
 
 `post-publish-smoke` runs `scripts/post-publish-smoke.ps1` on `windows-latest` with PowerShell 5.1; it installs `viberevert@beta` from npm and runs the full 7-frame Phase 12f MCP transcript against the published bytes. PowerShell 5.1 is intentional: it's the same parser that exposed Step 3's BOM-injection class, so the published path proves the same Windows surface.
 
@@ -270,7 +270,7 @@ If a published version is broken, **do NOT use `npm unpublish`** -- the 72-hour 
 
 ```sh
 npm deprecate viberevert@0.7.0-beta.N "Broken: <reason>. Use 0.7.0-beta.<N+1>."
-# Repeat for each of the 8 published packages
+# Repeat for each of the 10 published packages
 ```
 
 Then fix the issue + bump to `0.7.0-beta.<N+1>` per the partial-publish policy.
@@ -284,9 +284,9 @@ Then fix the issue + bump to `0.7.0-beta.<N+1>` per the partial-publish policy.
   # fix the issue, recreate and push the tag
   ```
 
-- **Partial-publish failure** (at least 1 of the 8 packages already landed on npm when the workflow failed): DO NOT reuse the tag or version -- npm versions are effectively immutable. Treat as a new beta iteration:
+- **Partial-publish failure** (at least 1 of the 10 packages already landed on npm when the workflow failed): DO NOT reuse the tag or version -- npm versions are effectively immutable. Treat as a new beta iteration:
   1. Deprecate the partially-published packages.
-  2. Bump all 8 publish-target versions to `0.7.0-beta.<N+1>`.
+  2. Bump all 10 publish-target versions to `0.7.0-beta.<N+1>`.
   3. Commit, tag `v0.7.0-beta.<N+1>`, push.
 
 ## Tagging convention
@@ -302,7 +302,7 @@ Examples:
 
 ### Package version equals tag suffix
 
-The version in all 8 publish-target `package.json` files MUST equal the tag suffix (sans `v` prefix). The release workflow asserts this and refuses to publish on mismatch.
+The version in all 10 publish-target `package.json` files MUST equal the tag suffix (sans `v` prefix). The release workflow asserts this and refuses to publish on mismatch.
 
 ### Annotated tags only
 
@@ -348,7 +348,7 @@ From repo root, with a clean working tree at the release commit:
 
 1. **Verify local state matches the intended release.**
    - `git status` clean.
-   - All 8 publish-target `package.json` versions equal the target version.
+   - All 10 publish-target `package.json` versions equal the target version.
    - `pnpm install --frozen-lockfile`
    - `pnpm typecheck && pnpm lint && pnpm test && pnpm build`
 
@@ -358,11 +358,11 @@ From repo root, with a clean working tree at the release commit:
    - Use a pre-existing `~/.npmrc` token: confirm `npm whoami` returns the publisher account.
    - Or run `npm login` interactively and complete 2FA.
 
-4. **Temporarily allow token publishing** on each of the 8 packages (only required if "Require two-factor authentication and disallow tokens" is currently set):
+4. **Temporarily allow token publishing** on each of the 10 packages (only required if "Require two-factor authentication and disallow tokens" is currently set):
    - For each package's npm Settings → Access → Publishing access, temporarily select a publishing-access mode that permits manual npm CLI publishing with your chosen local auth path.
-   - Update each of the 8 package settings pages.
+   - Update each of the 10 package settings pages.
 
-5. **Pre-publish guard.** For each of the 8 publish-target packages, confirm `npm view <pkg>@<version>` returns 404.
+5. **Pre-publish guard.** For each of the 10 publish-target packages, confirm `npm view <pkg>@<version>` returns 404.
 
 6. **Disable the release workflow** to prevent the manual tag push from triggering a competing CI publish run.
    - GitHub repo → Actions → Release → "..." menu → "Disable workflow".
@@ -371,11 +371,11 @@ From repo root, with a clean working tree at the release commit:
 7. **Pack + publish in dependency-safe order:**
    ```sh
    PACK_DIR=$(mktemp -d)
-   for dir in packages/session-format packages/core packages/git packages/checks packages/reporters packages/cli-commands packages/mcp packages/cli; do
+   for dir in packages/session-format packages/core packages/git packages/checks packages/reporters packages/adapters packages/installers packages/cli-commands packages/mcp packages/cli; do
      (cd "$dir" && pnpm pack --pack-destination "$PACK_DIR")
    done
 
-   for tgz in viberevert-session-format viberevert-core viberevert-git viberevert-checks viberevert-reporters viberevert-cli-commands viberevert-mcp viberevert; do
+   for tgz in viberevert-session-format viberevert-core viberevert-git viberevert-checks viberevert-reporters viberevert-adapters viberevert-installers viberevert-cli-commands viberevert-mcp viberevert; do
      npm publish "$PACK_DIR/${tgz}-<VERSION>.tgz" --access public --tag beta
    done
    ```
@@ -392,7 +392,7 @@ From repo root, with a clean working tree at the release commit:
    powershell.exe -ExecutionPolicy Bypass -File scripts/post-publish-smoke.ps1 -ExpectedVersion 0.7.0-beta.N
    ```
 
-10. **Restore the safe posture on all 8 packages:**
+10. **Restore the safe posture on all 10 packages:**
     - For each package's Settings → Access → Publishing access, switch back to "Require two-factor authentication and disallow tokens (recommended)".
     - Confirm Trusted Publisher is still configured (it should be; the OIDC config is separate from the tokens-posture toggle).
     - Routine releases must continue to flow through OIDC only.
@@ -437,6 +437,49 @@ Captured 2026-06-22, after `v0.7.0-beta.0` shipped via run [27918710334](https:/
 - **CI matrix expansion** to macOS and additional supported Node versions. Keep the release-publish job on Node 22+ because npm Trusted Publishing requires Node >=22.14.0.
 - **husky / commitlint enforcement.** Currently cultural convention only -- no enforcement at commit time.
 - **`viberevert@latest` dist-tag policy.** Currently points at the `0.0.0` placeholder from the Trusted Publisher bootstrap. The first stable `v0.7.0` (sans `-beta`) will promote to `latest` via a separate stable-release workflow path (M RP-3 if dedicated work is needed).
+
+## v0.7.1-beta.1 retrospective
+
+Captured 2026-07-04, after `v0.7.1-beta.1` shipped via run [28685789240](https://github.com/madeinplutofabio/vibe-revert/actions/runs/28685789240). This release expanded the publish set from 8 to 10 packages (`@viberevert/adapters` and `@viberevert/installers` first-released) and was the first release cut through the workflow_dispatch dry-run + tag-push flow added in M G1b Step 10.
+
+### Incident: partial publish at v0.7.1-beta.0
+
+The first tag-push release for v0.7.1-beta.0 partially published before failing at `@viberevert/adapters` because the two first-release packages lacked npm Trusted Publisher configuration. The recovery manually bootstrapped adapters/installers at 0.7.1-beta.0 from pnpm-packed tarballs, configured Trusted Publisher, then cut v0.7.1-beta.1 as the canonical release.
+
+Details:
+
+- The `v0.7.1-beta.0` run ([28683702293](https://github.com/madeinplutofabio/vibe-revert/actions/runs/28683702293)) published 5 of 10 packages (session-format, core, git, checks, reporters) before `npm publish` failed with `ENEEDAUTH` on `@viberevert/adapters`. The publish loop is fail-fast, so the remaining 5 never ran; post-publish smoke and the GitHub Release were correctly skipped.
+- Root cause: the Trusted Publisher bootstrap (see above) covered the original 8 packages. `@viberevert/adapters` and `@viberevert/installers` were flipped from private stubs in M G1b Step 8 and never received the per-package bootstrap + trust configuration. Neither the workflow-structure assertions nor the workflow_dispatch dry-run could catch this: the dry-run intentionally skips the real `npm publish` step, and npm-side publish authority is not visible to any read-only preflight.
+- Recovery: manually published the two packages at the burned `0.7.1-beta.0` from `pnpm pack` tarballs (dist-tag `bootstrap`, `--access public`; the packed installers manifest was verified to carry the concrete `@viberevert/adapters: 0.7.1-beta.0` dependency, not `workspace:*`), configured Trusted Publisher for both, bumped all 10 targets to `0.7.1-beta.1`, and released through the canonical tag-push flow. All 10 published with provenance; smoke and GitHub Release green.
+- Per the partial-publish policy, `v0.7.1-beta.0` was not completed or reused. The five CI-published and two bootstrap-published `0.7.1-beta.0` versions remain on npm as superseded artifacts.
+
+### New publish target gate
+
+Any release where a package becomes newly public MUST pass this pre-tag checklist:
+
+- Package exists on npm or has an approved bootstrap plan.
+- Maintainer can publish/create the package (org scope rights).
+- Trusted Publisher is configured for `release.yml`.
+- Package is included in the release workflow publish arrays and topo order.
+- pnpm-packed manifest has no `workspace:*` dependency leakage.
+- A workflow_dispatch dry-run passes.
+
+Tracked as M G1b-followup-20 for formal adoption into this document's publish-flow section.
+
+### What worked
+
+- The workflow_dispatch dry-run path (Step 10) validated everything it was designed to validate -- tag regex, version consistency, pack surface, and the 404-strict availability guard -- and its publish/smoke/release gating held exactly as designed in both dispatch and tag-push modes.
+- Hard-stop discipline: the partial publish was inspected before any action; nothing was unpublished or force-completed at the failed version.
+- The fail-fast publish loop plus topo order limited the blast radius: the 5 published packages are self-consistent (no package carries a dependency on an unpublished sibling at that version).
+- The pnpm-pack + tarball-inspection discipline for the manual bootstrap prevented a `workspace:*` manifest from ever reaching npm.
+
+### Open hygiene items (owners)
+
+- Decide whether to deprecate the superseded `0.7.1-beta.0` versions (7 now on npm) with a pointer to `0.7.1-beta.1` (maintainer; npm mutation).
+- `bootstrap` dist-tag on the two first-release packages, and their `latest` (currently `0.7.1-beta.0` from first publish) vs the fleet's `latest: 0.0.0` placeholder relic on the original 8 (maintainer; M G1b-followup-22).
+- `dist/*.tsbuildinfo` ships in all package tarballs (inert, ~40-60 kB each) -- M G1b-followup-21.
+- `softprops/action-gh-release@v2` emitted a Node runtime deprecation warning during the release run -- still non-blocking; `gh release create` remains the fallback.
+- Changesets was NOT the version driver for this release: the Step 8 preflight showed Changesets pre-mode projects `0.7.0-beta.1` from a `0.7.0-beta.0` baseline, so versions were hand-bumped per the D101.H fallback. Supersedes the "First changesets-driven release" pinned item above; see M G1b-followup-1 and -19.
 
 ## License
 

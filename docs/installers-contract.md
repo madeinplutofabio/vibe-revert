@@ -686,6 +686,9 @@ These are known future items — not urgent, tracked here so they are not lost.
 - **M G1b-followup-17** — Unify `HookManagerIoError` and `MalformedPackageJsonError` under the `AdapterError` base for a single-`instanceof` classifier.
 - **M G1b-followup-18** — Extract shared `ADAPTER_MATRIX` from `install.ts` and `uninstall.ts` once both commands stabilize.
 - **M G1b-followup-19** — Reconcile VibeRevert's per-milestone beta patch-line versioning (`0.7.1-beta.0`, `0.7.2-beta.0`, …) with Changesets prerelease semantics, or document a permanent manual-bump release policy.
+- **M G1b-followup-20** — Add the new-publish-target pre-tag gate to the release process doc: package exists on npm or has an approved bootstrap plan; maintainer can publish; Trusted Publisher configured for `release.yml`; package present in the publish arrays/order; pnpm-packed manifest free of `workspace:*` leakage; workflow_dispatch dry-run passes.
+- **M G1b-followup-21** — Decide whether published package surfaces should exclude `dist/*.tsbuildinfo`.
+- **M G1b-followup-22** — Decide npm dist-tag hygiene for beta packages, including the `bootstrap` tag on first-release packages and the `latest: 0.0.0` placeholder relics.
 
 ## Maintenance note
 
