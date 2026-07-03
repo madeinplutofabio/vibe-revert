@@ -217,6 +217,32 @@ Per-package "Publishing access" should be set to **"Require two-factor authentic
 
 Manual emergency publish requires temporarily relaxing this setting; see [Manual emergency publish](#manual-emergency-publish).
 
+### Version policy (beta phase)
+
+During v0.x beta patch-line releases, versions are hand-bumped to the planned
+beta target. Changesets adoption is deferred until the first stable or next
+semantically aligned release line.
+
+Rationale: Changesets pre-mode projects the next version from the
+`initialVersions` snapshot taken when pre-mode is entered. From a
+`0.7.0-beta.0` baseline it produces `0.7.0-beta.1`, never the per-milestone
+patch-line target (`0.7.1-beta.0`) this project uses during the beta phase
+(verified in the M G1b Step 8 scratch preflight). Forcing the tool to produce
+a shape it does not naturally produce is not worth the drift risk.
+
+Concretely:
+
+- All 10 publish-target `package.json` versions are edited by hand (or by a
+  reviewed mechanical edit) to the planned target before tagging.
+- The Changesets scaffolding (`.changeset/config.json`, root `changeset:*`
+  scripts, `@changesets/cli` devDependency) stays in the repo but dormant: no
+  `.changeset/*.md` entries are committed, and no `changeset version` or
+  `changeset pre` commands run against main.
+- Respins follow the partial-publish policy below: increment the beta counter
+  (`.beta.N` -> `.beta.N+1`), never reuse a version.
+- Revisit at the first stable release: enter Changesets pre-mode from a clean
+  stable baseline for the following line (M G1b-followup-1 / -19).
+
 ### Tag-driven publish flow
 
 The release workflow triggers ONLY on annotated tag pushes matching the beta regex `v<MAJOR>.<MINOR>.<PATCH>-beta.<N>`. Stable releases ship through a separate workflow path (not yet implemented).
