@@ -519,7 +519,7 @@ Adopted as step 3 of the tag-driven publish flow above (M G1b-followup-20, resol
 
 - Decide whether to deprecate the superseded `0.7.1-beta.0` versions (7 now on npm) with a pointer to `0.7.1-beta.1` (maintainer; npm mutation).
 - `bootstrap` dist-tag on the two first-release packages, and their `latest` (currently `0.7.1-beta.0` from first publish) vs the fleet's `latest: 0.0.0` placeholder relic on the original 8 (maintainer; M G1b-followup-22).
-- `dist/*.tsbuildinfo` ships in all package tarballs (inert, ~40-60 kB each) -- M G1b-followup-21.
+- `dist/*.tsbuildinfo` shipped in the adapters and installers tarballs; the other packages already kept their build info outside `dist/` -- resolved in M RH by aligning all packages to `./build.tsbuildinfo` (M G1b-followup-21).
 - `softprops/action-gh-release@v2` emitted a Node runtime deprecation warning during the release run -- still non-blocking; `gh release create` remains the fallback.
 - Changesets was NOT the version driver for this release: the Step 8 preflight showed Changesets pre-mode projects `0.7.0-beta.1` from a `0.7.0-beta.0` baseline, so versions were hand-bumped per the D101.H fallback. Supersedes the "First changesets-driven release" pinned item above; see M G1b-followup-1 and -19.
 

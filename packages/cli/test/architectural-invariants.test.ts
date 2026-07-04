@@ -5698,4 +5698,34 @@ describe("Architectural invariants -- M RH release-targets inventory drift", () 
     );
     expect(body.trim().split(/\s+/)).toEqual(inventory.publishTargets.map(tgzStemFor));
   });
+
+  // -- package surface: build info must never enter dist/ -------------------
+
+  it("package build info files stay outside dist so they cannot enter published tarballs", () => {
+    for (const entry of readdirSync(join(REPO_ROOT, "packages"))) {
+      const tsconfigPath = join("packages", entry, "tsconfig.build.json");
+
+      let raw: string;
+      try {
+        raw = readSource(tsconfigPath);
+      } catch {
+        continue;
+      }
+
+      const config = JSON.parse(raw) as {
+        compilerOptions?: {
+          tsBuildInfoFile?: string;
+        };
+      };
+
+      const value = config.compilerOptions?.tsBuildInfoFile;
+      if (!value) continue;
+
+      const normalized = value.replaceAll("\\", "/");
+      expect(
+        normalized.startsWith("./dist/") || normalized.startsWith("dist/"),
+        `${tsconfigPath} must not write tsBuildInfoFile under dist/`,
+      ).toBe(false);
+    }
+  });
 });
