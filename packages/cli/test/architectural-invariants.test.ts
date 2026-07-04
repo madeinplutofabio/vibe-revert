@@ -2500,6 +2500,14 @@ describe("Architectural invariants -- M G1a D99.M @viberevert/cli-commands bound
       // a parallel timestamp/version surface.
       "resolveProductVersionForReport",
       "resolveNowForCliTimestamp",
+      // command-guard matcher internals (M G2 Step 1, D102.C) -- pure
+      // policy evaluation consumed only by RunCommand; exporting would
+      // freeze the v1 matching semantics as public API.
+      "normalizeCommand",
+      "matchGuardEntry",
+      "evaluateCommandPolicy",
+      "CommandsPolicyConfig",
+      "CommandPolicyDecision",
     ];
     for (const symbol of FORBIDDEN_ABSENT) {
       expect(

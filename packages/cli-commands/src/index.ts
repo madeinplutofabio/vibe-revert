@@ -148,6 +148,14 @@ export { RuntimeEnvInvalidError } from "./runtime-env.js";
 //   - resolveNowForCliTimestamp            (from ./runtime-env.js)
 //     → CLI-side utilities; operations consume them internally.
 //
+//   - normalizeCommand, matchGuardEntry,
+//     evaluateCommandPolicy,
+//     CommandsPolicyConfig (type),
+//     CommandPolicyDecision (type)         (from ./command-guard.js)
+//     → M G2 Step 1 (D102.C): pure guard-matching internals consumed
+//       only by RunCommand; exporting would freeze the v1 matching
+//       semantics as public API.
+//
 //   - All file-internal helpers in operations/*.ts (readReportBytes,
 //     parseReportFile, assertSourceReportUnchanged, removeStaleFixPrompt,
 //     persistFixPrompt, formatCause, etc.)
