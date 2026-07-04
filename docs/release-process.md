@@ -251,15 +251,31 @@ End-to-end:
 
 1. **Bump versions locally.** Update all 10 publish-target `package.json` files to the new beta version.
 2. **Commit + push to main.** CI's `build-and-test` and `release-dry-run` jobs validate the new version end-to-end.
-3. **Create the annotated tag** (must be annotated; lightweight tags are rejected):
+3. **New publish-target gate** (required whenever a package becomes newly
+   public in this release; skip only when the publish set is unchanged from
+   the previous release). Every item must pass before tagging:
+   - Package exists on npm, or an approved bootstrap plan has already been
+     completed before tagging. Bootstrap publishes must use `pnpm pack`
+     tarballs, not `npm publish` from package directories, so `workspace:*`
+     dependencies are rewritten before npm receives the manifest.
+   - Maintainer can publish/create the package (org scope rights).
+   - Trusted Publisher is configured on npm for each newly public package,
+     using `release.yml` as the workflow filename.
+   - Package is included in `scripts/release-targets.json` and the release
+     workflow publish arrays/order (enforced by the release-targets drift
+     invariants in `packages/cli/test/architectural-invariants.test.ts`).
+   - pnpm-packed manifest has no `workspace:*` dependency leakage (inspect
+     the packed tarball's `package.json`).
+   - A `workflow_dispatch` dry-run passes.
+4. **Create the annotated tag** (must be annotated; lightweight tags are rejected):
    ```sh
    git tag -a v0.7.0-beta.0 -m "v0.7.0-beta.0"
    ```
-4. **Push the tag:**
+5. **Push the tag:**
    ```sh
    git push origin v0.7.0-beta.0
    ```
-5. **Workflow runs automatically.** 3 jobs in strict sequence: `publish` (Ubuntu) → `post-publish-smoke` (Windows PowerShell 5.1) → `github-release` (Ubuntu).
+6. **Workflow runs automatically.** 3 jobs in strict sequence: `publish` (Ubuntu) → `post-publish-smoke` (Windows PowerShell 5.1) → `github-release` (Ubuntu).
 
 The `publish` job performs (in order, fail-fast):
 
@@ -490,7 +506,7 @@ Any release where a package becomes newly public MUST pass this pre-tag checklis
 - pnpm-packed manifest has no `workspace:*` dependency leakage.
 - A workflow_dispatch dry-run passes.
 
-Tracked as M G1b-followup-20 for formal adoption into this document's publish-flow section.
+Adopted as step 3 of the tag-driven publish flow above (M G1b-followup-20, resolved in M RH).
 
 ### What worked
 
