@@ -304,7 +304,21 @@ All beta publishes go to dist-tag `beta`, NEVER `latest`. The workflow hardcodes
 npm install viberevert@beta
 ```
 
-`npm install viberevert` (no tag) resolves to the `latest` dist-tag, which may point at the existing `0.0.0` placeholder (pre-reserved by the publisher account) or a future stable release. **During the beta phase, always use `viberevert@beta`.** First stable `v0.7.0` ships through a separate stable workflow path and would promote to `latest`.
+**Beta-phase `latest` policy (adopted in M RH):** after a release's
+post-publish smoke passes, the maintainer manually advances `latest` to the
+new beta on all 10 publish targets:
+
+```sh
+npm dist-tag add <pkg>@<version> latest
+# repeat for each publish target in scripts/release-targets.json
+```
+
+Rationale: before M RH, unqualified `npm install viberevert` resolved the
+empty `0.0.0` Trusted-Publisher-bootstrap placeholder, which is strictly
+worse than the current verified beta. The workflow itself never touches
+`latest`; the advance is a deliberate manual post-verification action.
+`viberevert@beta` remains the documented install spec. At the first stable
+release, the stable workflow path takes ownership of `latest`.
 
 ### Rollback procedure
 
@@ -517,8 +531,8 @@ Adopted as step 3 of the tag-driven publish flow above (M G1b-followup-20, resol
 
 ### Open hygiene items (owners)
 
-- Decide whether to deprecate the superseded `0.7.1-beta.0` versions (7 now on npm) with a pointer to `0.7.1-beta.1` (maintainer; npm mutation).
-- `bootstrap` dist-tag on the two first-release packages, and their `latest` (currently `0.7.1-beta.0` from first publish) vs the fleet's `latest: 0.0.0` placeholder relic on the original 8 (maintainer; M G1b-followup-22).
+- Deprecate the superseded `0.7.1-beta.0` versions -- resolved in M RH: all 7 deprecated with per-package messages pointing at `0.7.1-beta.1`.
+- `bootstrap` dist-tag + `latest` hygiene -- resolved in M RH: `bootstrap` tags removed, and `latest` advanced to `0.7.1-beta.1` on all 10 packages under the beta-phase `latest` policy documented in the dist-tag discipline section (M G1b-followup-22).
 - `dist/*.tsbuildinfo` shipped in the adapters and installers tarballs; the other packages already kept their build info outside `dist/` -- resolved in M RH by aligning all packages to `./build.tsbuildinfo` (M G1b-followup-21).
 - `softprops/action-gh-release@v2` emitted a Node runtime deprecation warning during the release run -- still non-blocking; `gh release create` remains the fallback.
 - Changesets was NOT the version driver for this release: the Step 8 preflight showed Changesets pre-mode projects `0.7.0-beta.1` from a `0.7.0-beta.0` baseline, so versions were hand-bumped per the D101.H fallback. Supersedes the "First changesets-driven release" pinned item above; see M G1b-followup-1 and -19.
