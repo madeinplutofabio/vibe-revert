@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "publishTargets": [
+    "@viberevert/session-format",
+    "@viberevert/core",
+    "@viberevert/git",
+    "@viberevert/checks",
+    "@viberevert/reporters",
+    "@viberevert/adapters",
+    "@viberevert/installers",
+    "@viberevert/cli-commands",
+    "@viberevert/mcp",
+    "viberevert"
+  ],
+  "privatePackages": ["@viberevert/policies-basic", "viberevert-monorepo"]
+}

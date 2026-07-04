@@ -3,10 +3,9 @@
 
 # VibeRevert local tarball-closure smoke test.
 #
-# Builds + packs every workspace package whose tarball is needed to satisfy
-# the published CLI's runtime closure -- the public runtime packages, the
-# CLI entry-point, and any currently-private workspace package that a
-# publishable package depends on (M G1b Step 1b added @viberevert/adapters here).
+# Builds + packs every publish-target workspace package (the 10-package set
+# locked in scripts/release-targets.json, in topo order) so the scratch
+# install exercises the same tarball closure the release workflow publishes.
 # Installs them into a scratch dir under $env:TEMP via `file:` references
 # + pnpm.overrides and exercises the M B + M C + M D + M E + M F command
 # surface (Phases 12a-12e) against a real `git init` repo.
@@ -311,13 +310,13 @@ try {
     $tgzRe = (Get-ChildItem $packDir -Filter 'viberevert-reporters-*.tgz' | Select-Object -First 1).FullName
     $tgzCc = (Get-ChildItem $packDir -Filter 'viberevert-cli-commands-*.tgz' | Select-Object -First 1).FullName
     $tgzMc = (Get-ChildItem $packDir -Filter 'viberevert-mcp-*.tgz' | Select-Object -First 1).FullName
-    # Step 1b: adapters tarball (packed but private at 0.0.0; resolved via
-    # pnpm.overrides below so cli-commands' workspace dep on it doesn't
-    # fall back to npm).
+    # Adapters tarball (publish target since M G1b Step 8; resolved via
+    # pnpm.overrides below so cli-commands' workspace dep uses the local
+    # tarball instead of the npm registry).
     $tgzAd = (Get-ChildItem $packDir -Filter 'viberevert-adapters-*.tgz' | Select-Object -First 1).FullName
-    # M G1b Step 4: installers tarball (packed but private at 0.0.0; resolved
-    # via pnpm.overrides below so cli-commands' workspace dep on it doesn't
-    # fall back to npm).
+    # Installers tarball (publish target since M G1b Step 8; resolved via
+    # pnpm.overrides below so cli-commands' workspace dep uses the local
+    # tarball instead of the npm registry).
     $tgzIn = (Get-ChildItem $packDir -Filter 'viberevert-installers-*.tgz' | Select-Object -First 1).FullName
     # `viberevert-<version>.tgz` -- match digit-leading suffix so we don't pick
     # up viberevert-git/core/session-format/checks/reporters/cli-commands/mcp

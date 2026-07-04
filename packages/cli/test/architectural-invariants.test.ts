@@ -5469,3 +5469,233 @@ describe("Architectural invariants -- D101.M.6 InstallCommand + UninstallCommand
     ).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// M RH -- release-targets inventory drift invariants
+// ---------------------------------------------------------------------------
+//
+// scripts/release-targets.json is the single source of truth for the npm
+// publish set (locked topo order) and the private-package set. Release-
+// critical copies of that list exist in executable or copy-paste-executable
+// surfaces that cannot read the JSON at run time (.github/workflows/
+// release.yml is static YAML; docs/release-process.md's emergency-publish
+// loops are copy-paste shell). These invariants fail the build when any of
+// those copies drifts from the inventory.
+//
+// Calibration lock (M RH): strict, order-sensitive assertions ONLY for
+// surfaces someone might execute (workflow arrays, smoke-test pack list,
+// emergency-publish loops). Ordinary prose, sentence counts, and historical
+// retrospective text are intentionally NOT tested.
+
+describe("Architectural invariants -- M RH release-targets inventory drift", () => {
+  interface ReleaseTargets {
+    readonly schemaVersion: number;
+    readonly publishTargets: readonly string[];
+    readonly privatePackages: readonly string[];
+  }
+
+  const inventory = JSON.parse(readSource("scripts/release-targets.json")) as ReleaseTargets;
+
+  // The unscoped CLI package lives in packages/cli; every scoped package
+  // lives in packages/<name-without-scope>. This is the ONE irregular
+  // name-to-directory mapping, kept here so the JSON stays derivation-free.
+  function dirFor(name: string): string {
+    if (name === "viberevert") return "packages/cli";
+    return `packages/${name.replace("@viberevert/", "")}`;
+  }
+
+  // Packed tarball filename stem (no version): scoped packages become
+  // viberevert-<suffix>; the unscoped CLI is bare viberevert.
+  function tgzStemFor(name: string): string {
+    if (name === "viberevert") return "viberevert";
+    return `viberevert-${name.replace("@viberevert/", "")}`;
+  }
+
+  // The workspace root manifest lives at the repo root, not under packages/.
+  function packageJsonPathFor(name: string): string {
+    if (name === "viberevert-monorepo") return "package.json";
+    return `${dirFor(name)}/package.json`;
+  }
+
+  // Assert a regex matched AND its first capture group exists, then return
+  // the group. Keeps the executable-surface extractions honest under
+  // noUncheckedIndexedAccess without non-null assertions.
+  function requireGroup(m: RegExpMatchArray | null, label: string): string {
+    expect(m, `${label} not found`).not.toBeNull();
+    const group = (m as RegExpMatchArray)[1];
+    expect(group, `${label}: capture group empty`).toBeDefined();
+    return group as string;
+  }
+
+  it("inventory shape: exactly schemaVersion=1 + publishTargets + privatePackages, no dups, no overlap", () => {
+    expect(Object.keys(inventory).sort()).toEqual([
+      "privatePackages",
+      "publishTargets",
+      "schemaVersion",
+    ]);
+    expect(inventory.schemaVersion).toBe(1);
+    expect(new Set(inventory.publishTargets).size).toBe(inventory.publishTargets.length);
+    expect(new Set(inventory.privatePackages).size).toBe(inventory.privatePackages.length);
+    const overlap = inventory.publishTargets.filter((p) => inventory.privatePackages.includes(p));
+    expect(overlap).toEqual([]);
+  });
+
+  it("every publish target maps to an existing, correctly named, non-private package.json", () => {
+    for (const name of inventory.publishTargets) {
+      const pkg = JSON.parse(readSource(join(dirFor(name), "package.json")));
+      expect(pkg.name, `${dirFor(name)}/package.json name`).toBe(name);
+      expect(pkg.private, `${name} must not be private`).not.toBe(true);
+    }
+  });
+
+  it("all publish-target versions are equal", () => {
+    const versions = inventory.publishTargets.map(
+      (name) => JSON.parse(readSource(join(dirFor(name), "package.json"))).version as string,
+    );
+    expect(
+      new Set(versions).size,
+      `distinct publish-target versions: ${[...new Set(versions)].join(", ")}`,
+    ).toBe(1);
+  });
+
+  it("publishTargets order is dependency-safe for internal runtime dependencies", () => {
+    const index = new Map(inventory.publishTargets.map((name, i) => [name, i]));
+
+    for (const name of inventory.publishTargets) {
+      const pkg = JSON.parse(readSource(join(dirFor(name), "package.json")));
+      const deps = {
+        ...(pkg.dependencies ?? {}),
+        ...(pkg.optionalDependencies ?? {}),
+      };
+
+      for (const depName of Object.keys(deps)) {
+        if (!index.has(depName)) continue;
+
+        expect(
+          index.get(depName),
+          `${name} depends on ${depName}, so ${depName} must appear earlier in scripts/release-targets.json`,
+        ).toBeLessThan(index.get(name) as number);
+      }
+    }
+  });
+
+  it("private set is exactly policies-basic + the workspace root, both private at 0.0.0", () => {
+    expect([...inventory.privatePackages].sort()).toEqual([
+      "@viberevert/policies-basic",
+      "viberevert-monorepo",
+    ]);
+    const pb = JSON.parse(readSource("packages/policies-basic/package.json"));
+    expect(pb.name).toBe("@viberevert/policies-basic");
+    expect(pb.private).toBe(true);
+    expect(pb.version).toBe("0.0.0");
+    const root = JSON.parse(readSource("package.json"));
+    expect(root.name).toBe("viberevert-monorepo");
+    expect(root.private).toBe(true);
+    expect(root.version).toBe("0.0.0");
+  });
+
+  it("every directory under packages/ is accounted for as publish target or private", () => {
+    const accounted = new Set<string>([
+      ...inventory.publishTargets.map(dirFor),
+      ...inventory.privatePackages.filter((n) => n !== "viberevert-monorepo").map(dirFor),
+    ]);
+    for (const entry of readdirSync(join(REPO_ROOT, "packages"))) {
+      let hasPkg = true;
+      try {
+        statSync(join(REPO_ROOT, "packages", entry, "package.json"));
+      } catch {
+        hasPkg = false;
+      }
+      if (!hasPkg) continue;
+      expect(
+        accounted.has(`packages/${entry}`),
+        `packages/${entry} is neither a publish target nor a known private package -- add it to scripts/release-targets.json`,
+      ).toBe(true);
+    }
+  });
+
+  // -- executable surface: .github/workflows/release.yml --------------------
+
+  const releaseYml = readSource(".github/workflows/release.yml");
+
+  function extractArray(re: RegExp, label: string): string[] {
+    const body = requireGroup(releaseYml.match(re), `release.yml: ${label} array`);
+    return (body.match(/["'][^"']+["']/g) ?? []).map((s) => s.slice(1, -1));
+  }
+
+  it("release.yml publishTargets (validate step) matches inventory package.json paths in topo order", () => {
+    expect(extractArray(/const publishTargets = \[([\s\S]*?)\];/, "publishTargets")).toEqual(
+      inventory.publishTargets.map((n) => `${dirFor(n)}/package.json`),
+    );
+  });
+
+  it("release.yml privateStubs matches inventory-derived private manifest paths", () => {
+    expect(extractArray(/const privateStubs = \[([\s\S]*?)\];/, "privateStubs")).toEqual(
+      inventory.privatePackages.map(packageJsonPathFor),
+    );
+  });
+
+  it("release.yml PUBLISH_DIRS + EXPECTED_NAMES + PUBLISH_TARGETS match inventory in topo order", () => {
+    expect(extractArray(/PUBLISH_DIRS=\(([\s\S]*?)\)/, "PUBLISH_DIRS")).toEqual(
+      inventory.publishTargets.map(dirFor),
+    );
+    expect(extractArray(/EXPECTED_NAMES=\(([\s\S]*?)\)/, "EXPECTED_NAMES")).toEqual([
+      ...inventory.publishTargets,
+    ]);
+    expect(extractArray(/PUBLISH_TARGETS=\(([\s\S]*?)\)/, "PUBLISH_TARGETS")).toEqual([
+      ...inventory.publishTargets,
+    ]);
+  });
+
+  it("release.yml PUBLISH_TGZ matches inventory tarball names in topo order", () => {
+    expect(extractArray(/PUBLISH_TGZ=\(([\s\S]*?)\)/, "PUBLISH_TGZ")).toEqual(
+      inventory.publishTargets.map((n) => `${tgzStemFor(n)}-\${VERSION}.tgz`),
+    );
+  });
+
+  // -- executable surface: scripts/smoke-test.ps1 ---------------------------
+
+  it("smoke-test.ps1 pack --filter list matches inventory names in topo order", () => {
+    const ps1 = readSource("scripts/smoke-test.ps1");
+    const body = requireGroup(
+      ps1.match(/& pnpm ((?:--filter '[^']+' `\r?\n\s*)+)pack --pack-destination/),
+      "smoke-test.ps1: pack --filter block",
+    );
+    const filters = [...body.matchAll(/--filter '([^']+)'/g)].map((x) => x[1] ?? "");
+    expect(filters).toEqual([...inventory.publishTargets]);
+    expect(new Set(filters).size).toBe(filters.length);
+  });
+
+  // -- copy-paste-executable surface: release-process.md emergency loops ----
+
+  // The Manual emergency publish section is an h2; slice from its heading to
+  // the next h2 so the loop regexes cannot match unrelated future loops
+  // elsewhere in the document.
+  function manualEmergencySection(): string {
+    const doc = readSource("docs/release-process.md");
+    const start = doc.indexOf("## Manual emergency publish");
+    expect(
+      start,
+      "docs/release-process.md: Manual emergency publish section not found",
+    ).toBeGreaterThanOrEqual(0);
+    const rest = doc.slice(start);
+    const next = rest.slice(1).search(/\n## /);
+    return next === -1 ? rest : rest.slice(0, next + 1);
+  }
+
+  it("release-process.md emergency dir loop matches inventory dirs in topo order", () => {
+    const body = requireGroup(
+      manualEmergencySection().match(/for dir in ((?:packages\/[a-z-]+ ?)+); do/),
+      "release-process.md: emergency dir loop",
+    );
+    expect(body.trim().split(/\s+/)).toEqual(inventory.publishTargets.map(dirFor));
+  });
+
+  it("release-process.md emergency tgz loop matches inventory tarball stems in topo order", () => {
+    const body = requireGroup(
+      manualEmergencySection().match(/for tgz in ((?:viberevert[a-z-]* ?)+); do/),
+      "release-process.md: emergency tgz loop",
+    );
+    expect(body.trim().split(/\s+/)).toEqual(inventory.publishTargets.map(tgzStemFor));
+  });
+});

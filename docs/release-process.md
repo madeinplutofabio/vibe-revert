@@ -30,7 +30,7 @@ pwsh -File scripts/smoke-test.ps1
 The script:
 
 1. Builds the workspace (`pnpm build`) before packing so the smoke test never exercises stale `dist/` output.
-2. Packs all 8 publish-target packages (`@viberevert/session-format`, `@viberevert/core`, `@viberevert/git`, `@viberevert/checks`, `@viberevert/reporters`, `@viberevert/cli-commands`, `@viberevert/mcp`, `viberevert`) into a temp dir.
+2. Packs all 10 publish-target packages (`@viberevert/session-format`, `@viberevert/core`, `@viberevert/git`, `@viberevert/checks`, `@viberevert/reporters`, `@viberevert/adapters`, `@viberevert/installers`, `@viberevert/cli-commands`, `@viberevert/mcp`, `viberevert`) into a temp dir.
 3. Sets up a throwaway scratch directory with a real `git init` and committed initial state.
 4. Installs the packed tarballs (with the `pnpm.overrides` workaround — see Known Issues below).
 5. Exercises the full CLI command surface (`init`, `doctor`, `--version`, `start`/`end`, `checkpoint`/`checkpoints`/`sessions`, `check`, `report`, `prompt-fix`, `rollback`, `hook install`/`uninstall`, `mcp serve`) across 38 phases including Phase 12f's MCP stdio probe (driven by `scripts/mcp-stdio-probe.mjs`).
