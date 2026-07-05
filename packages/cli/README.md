@@ -2,11 +2,23 @@
 
 > The VibeRevert CLI.
 
-The user-facing command-line tool. Provides `init`, `checkpoint`, `check`, `report`, `prompt-fix`, `rollback`, `hook install`, `hook uninstall`, `install`, `uninstall`, and `mcp serve`. The wrapper command (`run`) is deferred to M G2.
+The user-facing command-line tool. Provides `init`, `checkpoint`, `run`, `check`, `report`, `prompt-fix`, `rollback`, `hook install`, `hook uninstall`, `install`, `uninstall`, and `mcp serve`.
 
 Part of [VibeRevert](https://github.com/madeinplutofabio/vibe-revert) — the safety belt for vibe coding.
 
-**Status:** `v0.7.0-beta.0` published; `v0.7.1-beta.0` in progress (M G1b). Public API may change before v1.0.
+**Status:** `v0.7.1-beta.1` published; M G2 in progress (unreleased). Public API may change before v1.0.
+
+## Run
+
+`viberevert run <command> [args...]` runs a single command inside a VibeRevert session: it takes a checkpoint, starts a session, spawns the command with `stdio: "inherit"` (no shell, no PTY), ends the session when the command exits, and prints a two-line summary pointing you at `viberevert check --since <session>`. Use `--task "..."` to label the session.
+
+It is deliberately boring -- not a shell, not a terminal emulator, not an agent runtime. `shell: false` is locked, so there is no shell interpretation or injection surface; guarding applies to the top-level invocation only (commands the wrapped program runs internally are never intercepted); and sessions capture FILE changes, not terminal output.
+
+`commands.guard` and `commands.require_confirm` in `.viberevert.yml` gate the top-level command: a guarded match refuses (exit 2) before any session is created; a confirm-required match prompts for the exact phrase `run anyway` on a TTY (and refuses on a non-TTY). Guard wins when both match. The framework init profiles ship live, framework-tailored defaults; the generic profile ships a commented example. These rules take effect only under `run`.
+
+The child's exit code is propagated verbatim (127 for not-found, 126 for not-executable, 128+N for POSIX signal death). All wrapper text goes to stderr; the child owns stdout. Each run appends one JSONL audit line to the session's `commands.log` -- recorded verbatim, with no secret redaction, so do not pass secrets as command-line arguments.
+
+See [`docs/run-contract.md`](https://github.com/madeinplutofabio/vibe-revert/blob/main/docs/run-contract.md) for the full contract: argument-boundary rules, guard-matching semantics with worked examples, the exit-code table, confirmation flow, stderr stream lock, signal/cleanup story, Windows `.bat`/`.cmd` note, and the commands.log privacy boundary (D102.A-J).
 
 ## Rollback
 

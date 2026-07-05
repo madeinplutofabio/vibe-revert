@@ -10,3 +10,9 @@ risk:
 checks:
   secrets: true
   dependencies: true
+
+# commands:
+#   guard:
+#     - "rm -rf /"
+#   require_confirm:
+#     - "terraform destroy"

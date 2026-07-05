@@ -40,6 +40,13 @@ export function yamlScalar(value: string): string {
  *
  * The output is intentionally sparse: only secrets and dependencies checks
  * are enabled by default. Users extend it for their stack.
+ *
+ * The trailing `commands:` block is COMMENTED OUT: the generic profile is the
+ * neutral starting point, so it ships an example (not live guards) that the
+ * user uncomments to opt in. The framework profiles (nextjs, laravel, rails,
+ * python, lovable) instead ship LIVE, framework-tailored guard / require_confirm
+ * defaults. Either way these rules take effect only under `viberevert run`
+ * (M G2, D102) -- see docs/run-contract.md.
  */
 export function generateGenericProfile(opts: GenericProfileOptions): string {
   return `version: 1
@@ -54,5 +61,11 @@ risk:
 checks:
   secrets: true
   dependencies: true
+
+# commands:
+#   guard:
+#     - "rm -rf /"
+#   require_confirm:
+#     - "terraform destroy"
 `;
 }

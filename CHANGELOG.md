@@ -8,6 +8,23 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `viberevert run [--task "..."] <command> [args...]` -- runs a single
+  command inside a VibeRevert session: checkpoint, start session, spawn the
+  child (`stdio: "inherit"`, `shell: false` -- no shell, no PTY), end the
+  session, and print a `viberevert check --since <session>` hint. Guarding
+  via `.viberevert.yml` `commands.guard` (refuse, exit 2) and
+  `commands.require_confirm` (interactive `run anyway` on a TTY; refuse on a
+  non-TTY) applies to the top-level invocation only; guard wins when both
+  match. Child exits propagate verbatim; wrapper spawn failures map to 127
+  not-found / 126 not-executable, and POSIX signal death maps to 128+N.
+  One JSONL audit line per run appended to the session's `commands.log`
+  (argv recorded verbatim -- no secret redaction). The init framework
+  profiles (nextjs, laravel, rails, python, lovable) ship live guard/confirm
+  defaults; the generic profile ships a commented example. See
+  `docs/run-contract.md`.
+
 ## [0.7.1-beta.1] - 2026-07-04
 
 > Note: `v0.7.1-beta.0` was a partial release. The CI publish run
