@@ -49,10 +49,15 @@
  * (internal to RunCommand; see the D99.M.19 not-exported list).
  */
 
-/** Structural shape of the config's `commands` section (schema-validated upstream). */
+/**
+ * Structural shape of the config's `commands` section (schema-validated
+ * upstream). Properties admit explicit `undefined` so the schema-derived
+ * config type stays assignable under exactOptionalPropertyTypes; the
+ * evaluator reads them through `?? []` either way.
+ */
 export interface CommandsPolicyConfig {
-  readonly guard?: readonly string[];
-  readonly require_confirm?: readonly string[];
+  readonly guard?: readonly string[] | undefined;
+  readonly require_confirm?: readonly string[] | undefined;
 }
 
 export type CommandPolicyDecision =

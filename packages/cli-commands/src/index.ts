@@ -5,11 +5,13 @@
 //
 // Two consumers:
 //   1. `viberevert` CLI binary (packages/cli/src/index.ts) — imports
-//      the 16 Command classes for register(). The binary is a thin
+//      the 17 Command classes for register(). The binary is a thin
 //      wrapper that does `new Cli + register + runExit`.
 //   2. @viberevert/mcp (M G1a Step 3+) — imports:
-//        - 3 operation functions for the typed-operation backend
-//        - 9 operation-public typed-error classes for MCP_ERROR_CODE_MAP
+//        - 4 operation functions for the typed-operation backend surface
+//          (endSessionOperation is exported now; MCP end_session is future)
+//        - 10 operation-public typed-error classes
+//          (EndSessionRaceError is reserved for a future MCP end_session handler)
 //        - 5 package-local passthrough error classes (3 resolver +
 //          runtime-env + concurrent-operation) for the same map
 //        - runCommandInProcess for the command-harness backend
@@ -37,6 +39,7 @@ export { InstallCommand } from "./commands/install.js";
 export { PromptFixCommand } from "./commands/prompt-fix.js";
 export { ReportCommand } from "./commands/report.js";
 export { RollbackCommand } from "./commands/rollback.js";
+export { RunCommand } from "./commands/run.js";
 export { SessionsCommand } from "./commands/sessions.js";
 export { StartCommand } from "./commands/start.js";
 export { UninstallCommand } from "./commands/uninstall.js";
@@ -166,6 +169,13 @@ export { RuntimeEnvInvalidError } from "./runtime-env.js";
 //     → M G2 Step 1 (D102.C): pure guard-matching internals consumed
 //       only by RunCommand; exporting would freeze the v1 matching
 //       semantics as public API.
+//
+//   - mapChildExitToCode,
+//     ChildExitStatus (type)               (from ./commands/run.js)
+//     → M G2 Step 4 (D102.E): command-internal test surfaces for the
+//       exit-code mapper; deep-imported by unit tests only. Exporting
+//       them from the package barrel would freeze run's exit-mapping
+//       helper as public API.
 //
 //   - All file-internal helpers in operations/*.ts (readReportBytes,
 //     parseReportFile, assertSourceReportUnchanged, removeStaleFixPrompt,

@@ -255,19 +255,23 @@ describe("Architectural invariants -- git invocation single-owner (D17c)", () =>
     }
   });
 
-  it("packages/cli-commands/src/**/*.ts (excluding doctor.ts) does NOT import child_process", () => {
+  it("packages/cli-commands/src/**/*.ts (excluding doctor.ts and run.ts) does NOT import child_process", () => {
     // doctor.ts is the locked carve-out for diagnostic binary probing.
-    // No other CLI source file may import child_process -- the rest of
-    // the CLI is forbidden to spawn subprocesses, and any subprocess
-    // need (git or otherwise) goes through the appropriate package's
-    // public API. Regex matches both the modern `node:child_process`
-    // form and the legacy bare `child_process` form (the project's
-    // verbatimModuleSyntax setting nudges toward `node:` but doesn't
-    // enforce it, so both are valid Node import specifiers).
+    // run.ts is the D102.M.1 carve-out (M G2): `viberevert run`'s whole
+    // purpose is spawning exactly ONE wrapped child (D102.A); its spawn
+    // shape is separately locked by D102.M.3. No other CLI source file
+    // may import child_process -- the rest of the CLI is forbidden to
+    // spawn subprocesses, and any subprocess need (git or otherwise)
+    // goes through the appropriate package's public API. Regex matches
+    // both the modern `node:child_process` form and the legacy bare
+    // `child_process` form (the project's verbatimModuleSyntax setting
+    // nudges toward `node:` but doesn't enforce it, so both are valid
+    // Node import specifiers).
     const cliSrcDir = join(REPO_ROOT, "packages/cli-commands/src");
     const allTs = findTsFiles(cliSrcDir);
+    const CARVE_OUTS = new Set(["commands/doctor.ts", "commands/run.ts"]);
     const targets = allTs.filter(
-      (p) => relative(cliSrcDir, p).replace(/\\/g, "/") !== "commands/doctor.ts",
+      (p) => !CARVE_OUTS.has(relative(cliSrcDir, p).replace(/\\/g, "/")),
     );
     const childProcessImport = /from\s+["'](?:node:)?child_process["']/;
     for (const file of targets) {
@@ -275,7 +279,7 @@ describe("Architectural invariants -- git invocation single-owner (D17c)", () =>
       const offenders = findOffenders(source, childProcessImport);
       expect(
         offenders,
-        `${relative(REPO_ROOT, file).replace(/\\/g, "/")} must not import child_process -- only doctor.ts is allowed (D17c carve-out). Matches: ${JSON.stringify(offenders)}`,
+        `${relative(REPO_ROOT, file).replace(/\\/g, "/")} must not import child_process -- only doctor.ts (D17c) and run.ts (D102.M.1) are allowed. Matches: ${JSON.stringify(offenders)}`,
       ).toEqual([]);
     }
   });
@@ -2357,7 +2361,7 @@ describe("Architectural invariants -- M G1b D101.M @viberevert/adapters boundari
 //     in-process Clipanion harness (D99.W) can capture into bounded
 //     memory sinks instead of corrupting the MCP server's stdio framing
 //     (D99.X).
-//   - D99.M.21 -- Operation contract: the 3 typed operations exist as
+//   - D99.M.21 -- Operation contract: the 4 typed operations exist as
 //     standalone files exporting their named function AND obey a STRICTER
 //     hygiene rule than Commands do (no process.cwd, no Clipanion
 //     context, no Clipanion imports, no stream imports, no streams,
@@ -2385,6 +2389,7 @@ describe("Architectural invariants -- M G1a D99.M @viberevert/cli-commands bound
   const CLI_COMMANDS_OPERATIONS_DIR = "packages/cli-commands/src/operations";
 
   const START_OPERATION_REL = "packages/cli-commands/src/operations/start-session.ts";
+  const END_OPERATION_REL = "packages/cli-commands/src/operations/end-session.ts";
   const CREATE_CHECKPOINT_OPERATION_REL =
     "packages/cli-commands/src/operations/create-checkpoint.ts";
   const GENERATE_FIX_PROMPT_OPERATION_REL =
@@ -2408,7 +2413,11 @@ describe("Architectural invariants -- M G1a D99.M @viberevert/cli-commands bound
     const exported = collectBarrelExports(readSource(CLI_COMMANDS_BARREL_REL));
 
     const REQUIRED_PRESENT: ReadonlyArray<string> = [
-      // ----- 14 Command classes -- consumed by the `viberevert` CLI binary.
+      // ----- 17 Command classes -- consumed by the `viberevert` CLI binary.
+      //       Count rule: this list must match the actual public command
+      //       exports in packages/cli-commands/src/index.ts. (M G2 Step 4
+      //       backfilled InstallCommand + UninstallCommand, which M G1b
+      //       added to the barrel without widening this list.)
       "CheckCommand",
       "CheckpointCommand",
       "CheckpointsCommand",
@@ -2417,11 +2426,14 @@ describe("Architectural invariants -- M G1a D99.M @viberevert/cli-commands bound
       "HookInstallCommand",
       "HookUninstallCommand",
       "InitCommand",
+      "InstallCommand",
       "PromptFixCommand",
       "ReportCommand",
       "RollbackCommand",
+      "RunCommand",
       "SessionsCommand",
       "StartCommand",
+      "UninstallCommand",
       "VersionCommand",
       // ----- 4 typed operation functions + their Opts/Result types
       //       (paired by file). D99.E typed-operation backend.
@@ -2514,6 +2526,11 @@ describe("Architectural invariants -- M G1a D99.M @viberevert/cli-commands bound
       "evaluateCommandPolicy",
       "CommandsPolicyConfig",
       "CommandPolicyDecision",
+      // run.ts exit-mapper test surfaces (M G2 Step 4, D102.E) --
+      // deep-imported by unit tests only; barrel-exporting them would
+      // freeze run's exit-mapping helper as public API.
+      "mapChildExitToCode",
+      "ChildExitStatus",
     ];
     for (const symbol of FORBIDDEN_ABSENT) {
       expect(
@@ -2576,7 +2593,7 @@ describe("Architectural invariants -- M G1a D99.M @viberevert/cli-commands bound
   // D99.M.21 -- Operation contract
   // ===========================================================================
 
-  it("D99.M.21a: the 3 typed operations exist as standalone files exporting their named operation function", () => {
+  it("D99.M.21a: the 4 typed operations exist as standalone files exporting their named operation function", () => {
     // Each operation file MUST export its operation function via a
     // top-level `export ... <name>(` or `export { <name> ... }`
     // form. Covers both `export async function foo(` and
@@ -2585,6 +2602,7 @@ describe("Architectural invariants -- M G1a D99.M @viberevert/cli-commands bound
     // satisfy the invariant.
     const OPERATIONS: ReadonlyArray<{ rel: string; fnName: string }> = [
       { rel: START_OPERATION_REL, fnName: "startSessionOperation" },
+      { rel: END_OPERATION_REL, fnName: "endSessionOperation" },
       { rel: CREATE_CHECKPOINT_OPERATION_REL, fnName: "createCheckpointOperation" },
       { rel: GENERATE_FIX_PROMPT_OPERATION_REL, fnName: "generateFixPromptOperation" },
     ];
@@ -2641,8 +2659,8 @@ describe("Architectural invariants -- M G1a D99.M @viberevert/cli-commands bound
     const files = findTsFiles(operationsDirAbs);
     expect(
       files.length,
-      `D99.M.21b self-check: expected at least 3 .ts files under ${CLI_COMMANDS_OPERATIONS_DIR}/.`,
-    ).toBeGreaterThanOrEqual(3);
+      `D99.M.21b self-check: expected at least 4 .ts files under ${CLI_COMMANDS_OPERATIONS_DIR}/.`,
+    ).toBeGreaterThanOrEqual(4);
 
     for (const absPath of files) {
       const rel = relative(REPO_ROOT, absPath).replace(/\\/g, "/");
@@ -5739,6 +5757,107 @@ describe("Architectural invariants -- M RH release-targets inventory drift", () 
       expect(
         normalized.startsWith("./dist/") || normalized.startsWith("dist/"),
         `${tsconfigPath} must not write tsBuildInfoFile under dist/`,
+      ).toBe(false);
+    }
+  });
+});
+
+// =============================================================================
+// M G2 (D102) -- `viberevert run` wrapper invariants
+// =============================================================================
+//
+// D102.M.1 lives above as an amendment to the cli-commands child_process
+// ban (doctor.ts + run.ts carve-outs). D102.M.2 (registration order) is
+// added in M G2 Step 5. This block owns the run-specific source locks:
+//
+//   - D102.M.3 -- run.ts spawn shape: stdio "inherit" + shell false,
+//     and no PTY implementation references (PTY bridging is G3 scope).
+//   - D102.M.4 -- core's appendCommandsLogEntry is the SINGLE
+//     commands.log writer: no other src file across ALL packages may
+//     import appendFile from node:fs/promises, and session.ts has
+//     exactly ONE appendFile call site (the JSONL append; startSession
+//     creates the empty file through the atomic-write path, not append).
+//   - D102.M.5 -- run.ts never imports check/report machinery,
+//     permanently enforcing the no-auto-check contract (D102.G)
+//     against scope creep.
+
+describe("Architectural invariants -- M G2 viberevert run wrapper (D102.M)", () => {
+  const RUN_COMMAND_REL = "packages/cli-commands/src/commands/run.ts";
+
+  it("D102.M.3: run.ts spawns pipe-less and shell-less (stdio inherit + shell false) and never references a PTY implementation", () => {
+    const stripped = stripTsComments(readSource(RUN_COMMAND_REL));
+    expect(
+      stripped.includes('stdio: "inherit"'),
+      `${RUN_COMMAND_REL} must spawn with stdio: "inherit" (D102.A pipe-less contract).`,
+    ).toBe(true);
+    expect(
+      stripped.includes("shell: false"),
+      `${RUN_COMMAND_REL} must spawn with shell: false (D102.A no-shell-interpretation lock).`,
+    ).toBe(true);
+    for (const banned of ["node-pty", "openpty", "conpty"]) {
+      expect(
+        stripped.includes(banned),
+        `${RUN_COMMAND_REL} must not reference "${banned}" -- PTY bridging is G3 scope (D102.M.3).`,
+      ).toBe(false);
+    }
+  });
+
+  it("D102.M.4: appendFile from node:fs/promises is imported ONLY by core/src/session.ts (single commands.log writer), which has exactly ONE appendFile call site", () => {
+    // The bare `appendFile` import is the append-mode write primitive;
+    // commands.log is the only append-mode file in the system. MCP's
+    // audit writer uses the FileHandle .appendFile METHOD on its own
+    // audit log -- a different primitive, separately locked by D99.M.7
+    // -- and deliberately does not trip this import-form check.
+    const allowedRel = "packages/core/src/session.ts";
+    const namedAppendFileImport =
+      /import\s*(?:type\s*)?\{[^}]*\bappendFile\b[^}]*\}\s*from\s*["']node:fs\/promises["']/;
+    for (const pkg of readdirSync(join(REPO_ROOT, "packages"))) {
+      let files: string[];
+      try {
+        files = findTsFiles(join(REPO_ROOT, "packages", pkg, "src"));
+      } catch {
+        continue; // package without a src/ directory
+      }
+      for (const file of files) {
+        const rel = relative(REPO_ROOT, file).replace(/\\/g, "/");
+        if (rel === allowedRel) continue;
+        const stripped = stripTsComments(readFileSync(file, "utf8"));
+        expect(
+          namedAppendFileImport.test(stripped),
+          `${rel} must not import appendFile from node:fs/promises -- core's appendCommandsLogEntry is the single commands.log writer (D102.M.4).`,
+        ).toBe(false);
+      }
+    }
+    const sessionStripped = stripTsComments(readSource(allowedRel));
+    const callSites = (sessionStripped.match(/\bappendFile\s*\(/g) ?? []).length;
+    expect(
+      callSites,
+      `${allowedRel} must contain exactly ONE appendFile call site (the appendCommandsLogEntry JSONL append). Found ${callSites}.`,
+    ).toBe(1);
+  });
+
+  it("D102.M.5: run.ts imports no check/report machinery (no-auto-check contract, D102.G)", () => {
+    // run's summary HINTS at `viberevert check` in a string literal
+    // (which survives comment-stripping) -- none of the banned tokens
+    // below can appear in that legitimate copy. Tokens cover the
+    // command classes, the orchestration/resolution modules, and the
+    // checks/reporters workspace packages.
+    const stripped = stripTsComments(readSource(RUN_COMMAND_REL));
+    const banned = [
+      "CheckCommand",
+      "ReportCommand",
+      "runCheck",
+      "check-session",
+      "check-orchestration",
+      "check-since-resolution",
+      "report-paths",
+      "@viberevert/checks",
+      "@viberevert/reporters",
+    ];
+    for (const token of banned) {
+      expect(
+        stripped.includes(token),
+        `${RUN_COMMAND_REL} must not reference "${token}" -- run never auto-checks (D102.G / D102.M.5).`,
       ).toBe(false);
     }
   });
