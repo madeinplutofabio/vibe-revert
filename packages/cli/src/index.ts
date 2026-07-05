@@ -15,6 +15,7 @@ import {
   PromptFixCommand,
   ReportCommand,
   RollbackCommand,
+  RunCommand,
   SessionsCommand,
   StartCommand,
   UninstallCommand,
@@ -40,6 +41,7 @@ cli.register(EndCommand);
 cli.register(SessionsCommand);
 cli.register(CheckpointCommand);
 cli.register(StartCommand);
+cli.register(RunCommand);
 cli.register(CheckCommand);
 cli.register(ReportCommand);
 cli.register(PromptFixCommand);

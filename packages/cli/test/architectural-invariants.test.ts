@@ -1274,7 +1274,7 @@ describe("Architectural invariants -- M E D90 prompt-fix module boundaries", () 
     // assertion would pass incorrectly.
     const source = readSource(CLI_INDEX_REL);
 
-    // M G1a Step 1 substep 9: the CLI binary now imports its 14
+    // M G1a Step 1 substep 9: the CLI binary now imports its 17
     // Command classes from the @viberevert/cli-commands barrel
     // (not from local ./commands/*.js paths). Find that multi-line
     // import block and assert PromptFixCommand appears in it
@@ -5767,9 +5767,14 @@ describe("Architectural invariants -- M RH release-targets inventory drift", () 
 // =============================================================================
 //
 // D102.M.1 lives above as an amendment to the cli-commands child_process
-// ban (doctor.ts + run.ts carve-outs). D102.M.2 (registration order) is
-// added in M G2 Step 5. This block owns the run-specific source locks:
+// ban (doctor.ts + run.ts carve-outs). This block owns the run-specific
+// source + registration locks:
 //
+//   - D102.M.2 -- index.ts registration ORDER: RunCommand registers
+//     STRICTLY AFTER StartCommand and STRICTLY BEFORE CheckCommand,
+//     with RunCommand IMMEDIATELY after StartCommand (no other
+//     cli.register() between them). Workflow grouping: start -> run ->
+//     check. Mirrors D98.M.10 / D101.M.6's pair-lock style.
 //   - D102.M.3 -- run.ts spawn shape: stdio "inherit" + shell false,
 //     and no PTY implementation references (PTY bridging is G3 scope).
 //   - D102.M.4 -- core's appendCommandsLogEntry is the SINGLE
@@ -5783,6 +5788,58 @@ describe("Architectural invariants -- M RH release-targets inventory drift", () 
 
 describe("Architectural invariants -- M G2 viberevert run wrapper (D102.M)", () => {
   const RUN_COMMAND_REL = "packages/cli-commands/src/commands/run.ts";
+  const CLI_INDEX_REL = "packages/cli/src/index.ts";
+
+  it("D102.M.2: index.ts registration ORDER -- StartCommand < RunCommand < CheckCommand AND RunCommand IMMEDIATELY after StartCommand", () => {
+    // D102.I workflow grouping: run sits between start and check
+    // (start a session -> run a guarded command inside it -> check the
+    // result). The "immediately after" lock pins RunCommand directly
+    // behind StartCommand so a future maintainer cannot slip an
+    // unrelated command into the start/run pairing. Mirrors D98.M.10's
+    // HookInstall/HookUninstall pair convention.
+    //
+    // Defensive: assert each anchor exists before comparing indices --
+    // indexOf returning -1 would silently satisfy `-1 < n` when `n`
+    // is also non-negative.
+    const source = readSource(CLI_INDEX_REL);
+
+    const startIdx = source.indexOf("cli.register(StartCommand);");
+    const runIdx = source.indexOf("cli.register(RunCommand);");
+    const checkIdx = source.indexOf("cli.register(CheckCommand);");
+
+    expect(
+      startIdx,
+      "StartCommand registration missing from index.ts (D102.M.2 anchor)",
+    ).toBeGreaterThanOrEqual(0);
+    expect(
+      runIdx,
+      "RunCommand registration missing from index.ts (D102.M.2)",
+    ).toBeGreaterThanOrEqual(0);
+    expect(
+      checkIdx,
+      "CheckCommand registration missing from index.ts (D102.M.2 anchor)",
+    ).toBeGreaterThanOrEqual(0);
+
+    expect(
+      startIdx,
+      "RunCommand must be registered AFTER StartCommand in index.ts (D102.M.2 -- start -> run -> check workflow order)",
+    ).toBeLessThan(runIdx);
+    expect(
+      runIdx,
+      "RunCommand must be registered BEFORE CheckCommand in index.ts (D102.M.2 -- start -> run -> check workflow order)",
+    ).toBeLessThan(checkIdx);
+
+    // "Immediately after" lock: between the StartCommand register line
+    // and the RunCommand register line, there must be NO other
+    // cli.register(...) call.
+    const startEnd = startIdx + "cli.register(StartCommand);".length;
+    const between = source.slice(startEnd, runIdx);
+    const interlopingRegisters = findOffenders(between, /\bcli\.register\s*\(/);
+    expect(
+      interlopingRegisters,
+      `RunCommand must be registered IMMEDIATELY after StartCommand with no other cli.register() between them (D102.M.2). Interloping registrations: ${JSON.stringify(interlopingRegisters)}`,
+    ).toEqual([]);
+  });
 
   it("D102.M.3: run.ts spawns pipe-less and shell-less (stdio inherit + shell false) and never references a PTY implementation", () => {
     const stripped = stripTsComments(readSource(RUN_COMMAND_REL));
