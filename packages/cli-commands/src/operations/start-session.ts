@@ -87,6 +87,13 @@ export type StartSessionOperationOpts = {
   /** Optional human-readable task description. Caller MUST pre-validate
    *  (non-empty, non-whitespace) — operation does not re-validate. */
   task?: string;
+  /** Optional agent command for M G2 wrapper mode (`viberevert run`):
+   *  the normalized joined child command. Threads into core's
+   *  `StartSessionOpts.agentCommand` and persists as
+   *  `session.agent_command`. Caller MUST pre-validate non-blank
+   *  (SessionStateSchema: nonBlankString) — operation does not
+   *  re-validate. */
+  agentCommand?: string;
   /** Optional D22 lock-metadata label identifying who holds the lock.
    *  Defaults to the existing CLI literal (`"viberevert start"` or
    *  `"viberevert start --task <json>"`) so CLI behavior is unchanged
@@ -177,6 +184,7 @@ export async function startSessionOperation(
         startedAt,
         beforeStatusText,
         ...(opts.task !== undefined ? { task: opts.task } : {}),
+        ...(opts.agentCommand !== undefined ? { agentCommand: opts.agentCommand } : {}),
       });
     } catch (err) {
       // Best-effort cleanup of tmpSessionDir. If the failure happened

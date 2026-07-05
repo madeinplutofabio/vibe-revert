@@ -117,6 +117,7 @@ export {
 // Redaction (stub for v0.7.0-beta; reserved for future cloud-sync seam).
 export { redact, SECRET_PATTERN_COUNT } from "./redact.js";
 export type {
+  AppendCommandsLogEntryOpts,
   EndSessionOpts,
   ListSessionsResult,
   ListSessionsWarning,
@@ -124,6 +125,7 @@ export type {
   StartSessionOpts,
 } from "./session.js";
 export {
+  appendCommandsLogEntry,
   endSession,
   listSessions,
   loadActiveSessionLock,

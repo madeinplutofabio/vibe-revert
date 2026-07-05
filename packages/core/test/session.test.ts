@@ -80,7 +80,7 @@
 // session from the listing and causing tests to pass for the wrong
 // reason or fail with misleading assertions.
 
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -93,6 +93,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
+  appendCommandsLogEntry,
   endSession,
   listSessions,
   loadActiveSessionLock,
@@ -643,5 +644,204 @@ describe("loadActiveSessionLock", () => {
   it("throws on invalid JSON in active-session.json", async () => {
     await writeFile(join(repoRoot, ".viberevert", "active-session.json"), "this is not json");
     await expect(loadActiveSessionLock(repoRoot)).rejects.toThrow(/not valid JSON/);
+  });
+});
+
+// =============================================================================
+// appendCommandsLogEntry (M G2, D102.F)
+// =============================================================================
+
+describe("appendCommandsLogEntry", () => {
+  const AT = ENDED_TS; // "2026-05-04T11:00:00Z" -- valid UTC second-precision
+
+  /** Start a REAL session via startSession so commands.log exists (empty). */
+  async function startRealSession(sessionId: string): Promise<void> {
+    const tmpDir = await makeTmpSessionDir(sessionId);
+    await startSession({
+      repoRoot,
+      tmpSessionDir: tmpDir,
+      sessionId,
+      checkpointId: CHECKPOINT_ID,
+      startedAt: NEWER_TS,
+      beforeStatusText: " M src/foo.ts\n?? src/bar.ts\n",
+    });
+  }
+
+  function logPathAbs(sessionId: string): string {
+    return join(repoRoot, ".viberevert", "sessions", sessionId, "commands.log");
+  }
+
+  it("happy path: appends exactly one byte-exact JSONL line to the empty log", async () => {
+    await startRealSession(NEWER_ID);
+    await appendCommandsLogEntry({
+      repoRoot,
+      sessionId: NEWER_ID,
+      at: AT,
+      cwd: ".",
+      argv: ["claude", "--flag"],
+    });
+    const content = await readFile(logPathAbs(NEWER_ID), "utf8");
+    expect(content).toBe('{"at":"2026-05-04T11:00:00Z","cwd":".","argv":["claude","--flag"]}\n');
+  });
+
+  it("append semantics: a second entry accumulates; subdir cwd and empty LATER argv entries are valid", async () => {
+    await startRealSession(NEWER_ID);
+    await appendCommandsLogEntry({ repoRoot, sessionId: NEWER_ID, at: AT, cwd: ".", argv: ["a"] });
+    await appendCommandsLogEntry({
+      repoRoot,
+      sessionId: NEWER_ID,
+      at: AT,
+      cwd: "packages/foo",
+      argv: ["node", "-e", ""],
+    });
+    const content = await readFile(logPathAbs(NEWER_ID), "utf8");
+    expect(content).toBe(
+      '{"at":"2026-05-04T11:00:00Z","cwd":".","argv":["a"]}\n' +
+        '{"at":"2026-05-04T11:00:00Z","cwd":"packages/foo","argv":["node","-e",""]}\n',
+    );
+  });
+
+  it("rejects a malformed session id before touching the filesystem", async () => {
+    await expect(
+      appendCommandsLogEntry({
+        repoRoot,
+        sessionId: "sess_not-a-ulid",
+        at: AT,
+        cwd: ".",
+        argv: ["x"],
+      }),
+    ).rejects.toThrow(TypeError);
+  });
+
+  it("throws SessionNotFoundError for a well-formed id with no session on disk", async () => {
+    await expect(
+      appendCommandsLogEntry({ repoRoot, sessionId: OLDER_ID, at: AT, cwd: ".", argv: ["x"] }),
+    ).rejects.toThrow(SessionNotFoundError);
+  });
+
+  it("rejects non-UTC, non-second-precision, and impossible-calendar timestamps", async () => {
+    await startRealSession(NEWER_ID);
+    const badTimestamps = [
+      "2026-05-04T11:00:00+02:00", // offset form -- UTC Z only
+      "2026-05-04T11:00:00.123Z", // millisecond precision
+      "2026-05-04 11:00:00Z", // missing T
+      "2026-02-31T10:00:00Z", // impossible calendar date (Date.parse would normalize)
+      "not-a-date",
+    ];
+    for (const at of badTimestamps) {
+      await expect(
+        appendCommandsLogEntry({ repoRoot, sessionId: NEWER_ID, at, cwd: ".", argv: ["x"] }),
+        at,
+      ).rejects.toThrow(TypeError);
+    }
+  });
+
+  it("rejects non-normalized or non-repo-relative cwd values", async () => {
+    await startRealSession(NEWER_ID);
+    const badCwds = [
+      "",
+      "/abs",
+      "C:/x",
+      "a\\b",
+      "foo//bar",
+      "./foo",
+      "foo/",
+      "foo/./bar",
+      "foo/../bar",
+      "..",
+    ];
+    for (const cwd of badCwds) {
+      await expect(
+        appendCommandsLogEntry({ repoRoot, sessionId: NEWER_ID, at: AT, cwd, argv: ["x"] }),
+        JSON.stringify(cwd),
+      ).rejects.toThrow(TypeError);
+    }
+  });
+
+  it("rejects empty argv, non-string entries, and an empty command name", async () => {
+    await startRealSession(NEWER_ID);
+    const badArgvs: readonly (readonly unknown[])[] = [[], ["", "x"], ["ok", 42]];
+    for (const argv of badArgvs) {
+      await expect(
+        appendCommandsLogEntry({
+          repoRoot,
+          sessionId: NEWER_ID,
+          at: AT,
+          cwd: ".",
+          argv: argv as readonly string[],
+        }),
+        JSON.stringify(argv),
+      ).rejects.toThrow(TypeError);
+    }
+  });
+
+  it("rejects argv when it is not an array", async () => {
+    await startRealSession(NEWER_ID);
+    await expect(
+      appendCommandsLogEntry({
+        repoRoot,
+        sessionId: NEWER_ID,
+        at: AT,
+        cwd: ".",
+        argv: "not-an-array" as unknown as readonly string[],
+      }),
+    ).rejects.toThrow(TypeError);
+  });
+
+  it("refuses when commands.log is missing (deletion after startSession is corruption)", async () => {
+    await startRealSession(NEWER_ID);
+    await rm(logPathAbs(NEWER_ID));
+    await expect(
+      appendCommandsLogEntry({ repoRoot, sessionId: NEWER_ID, at: AT, cwd: ".", argv: ["x"] }),
+    ).rejects.toThrow(); // lstat ENOENT propagates
+  });
+
+  it("refuses when commands.log is not a regular file (directory in its place)", async () => {
+    await startRealSession(NEWER_ID);
+    await rm(logPathAbs(NEWER_ID));
+    await mkdir(logPathAbs(NEWER_ID));
+    await expect(
+      appendCommandsLogEntry({ repoRoot, sessionId: NEWER_ID, at: AT, cwd: ".", argv: ["x"] }),
+    ).rejects.toThrow(/existing regular file/);
+  });
+
+  it.runIf(process.platform !== "win32")("refuses when commands.log is a symlink", async () => {
+    // THE lstat-vs-stat proof: with stat, a symlink to a regular file
+    // would pass isFile() and be silently followed. lstat sees the link.
+    await startRealSession(NEWER_ID);
+    await rm(logPathAbs(NEWER_ID));
+
+    const target = join(repoRoot, "outside-commands.log");
+    await writeFile(target, "", "utf8");
+    await symlink(target, logPathAbs(NEWER_ID));
+
+    await expect(
+      appendCommandsLogEntry({ repoRoot, sessionId: NEWER_ID, at: AT, cwd: ".", argv: ["x"] }),
+    ).rejects.toThrow(/existing regular file/);
+  });
+});
+
+// =============================================================================
+// agentCommand threading (M G2)
+// =============================================================================
+
+describe("startSession agent_command persistence (M G2 threading target)", () => {
+  it("persists agent_command in session.json when agentCommand is provided", async () => {
+    const tmpDir = await makeTmpSessionDir(NEWER_ID);
+    await startSession({
+      repoRoot,
+      tmpSessionDir: tmpDir,
+      sessionId: NEWER_ID,
+      checkpointId: CHECKPOINT_ID,
+      startedAt: NEWER_TS,
+      beforeStatusText: " M src/foo.ts\n",
+      agentCommand: "claude --dangerously-skip-permissions",
+    });
+    const raw = await readFile(
+      join(repoRoot, ".viberevert", "sessions", NEWER_ID, "session.json"),
+      "utf8",
+    );
+    const session = SessionStateSchema.parse(JSON.parse(raw));
+    expect(session.agent_command).toBe("claude --dangerously-skip-permissions");
   });
 });

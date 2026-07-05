@@ -75,7 +75,7 @@
 //    `session_id` and writes the result back) could silently endorse the
 //    inconsistency.
 
-import { chmod, mkdir, readdir, readFile, rm } from "node:fs/promises";
+import { appendFile, chmod, lstat, mkdir, readdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import {
   type ActiveSessionLock,
@@ -717,4 +717,159 @@ export async function loadActiveSessionLock(repoRoot: string): Promise<ActiveSes
   }
 
   return ActiveSessionLockSchema.parse(parsed);
+}
+
+// =============================================================================
+// appendCommandsLogEntry (M G2, D102.F)
+// =============================================================================
+
+/** Matches the locked commands.log timestamp form: ISO-8601 UTC, second precision. */
+const COMMANDS_LOG_AT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
+
+/**
+ * True iff `at` is a REAL ISO-8601 UTC second-precision timestamp:
+ * shape-matched, calendar-valid, and round-trip equivalent to the
+ * input. `Date.parse` alone would accept normalized impossible dates
+ * (e.g. Feb 31 -> Mar 2/3); the round-trip comparison rejects them
+ * because normalization shifts the value. `new Date` is used here for
+ * VALIDATION ONLY -- core never generates timestamps; callers supply
+ * them.
+ */
+function isCommandsLogAtTimestamp(at: string): boolean {
+  if (!COMMANDS_LOG_AT_RE.test(at)) {
+    return false;
+  }
+  const parsed = new Date(at);
+  if (Number.isNaN(parsed.getTime())) {
+    return false;
+  }
+  return parsed.toISOString() === `${at.slice(0, 19)}.000Z`;
+}
+
+/**
+ * True iff `cwd` is a NORMALIZED repo-relative POSIX path: exactly
+ * `"."` for the repo root, or slash-separated segments that are all
+ * non-empty and neither `"."` nor `".."`. Rejects backslashes,
+ * absolute paths, drive prefixes, `foo//bar`, `./foo`, `foo/`, and
+ * `foo/./bar`.
+ */
+function isRepoRelativePosixCwd(cwd: string): boolean {
+  if (cwd === ".") {
+    return true;
+  }
+  if (cwd.length === 0 || cwd.includes("\\") || cwd.startsWith("/") || /^[A-Za-z]:/.test(cwd)) {
+    return false;
+  }
+  return cwd.split("/").every((segment) => segment !== "" && segment !== "." && segment !== "..");
+}
+
+/**
+ * Input to `appendCommandsLogEntry` (M G2 wrapper mode, D102.F).
+ */
+export interface AppendCommandsLogEntryOpts {
+  readonly repoRoot: string;
+  /** `sess_<ULID>` id of an EXISTING session. Shape-validated here;
+   *  existence-validated via `loadSession` (SessionNotFoundError
+   *  propagates). */
+  readonly sessionId: string;
+  /**
+   * ISO-8601 UTC second-precision timestamp (`YYYY-MM-DDTHH:mm:ssZ`),
+   * calendar-valid. Caller-supplied -- core never generates
+   * timestamps (lock #2); `new Date` appears in validation only.
+   */
+  readonly at: string;
+  /**
+   * Working directory of the wrapped invocation, REPO-RELATIVE and
+   * POSIX-NORMALIZED; exactly `"."` for the repo root. Absolute
+   * paths, `..`/`.` segments, empty segments, and trailing slashes
+   * are rejected -- commands.log never contains absolute paths
+   * (D102.F).
+   */
+  readonly cwd: string;
+  /**
+   * Exact argv of the wrapped top-level command: non-empty array of
+   * strings with a non-empty command name (`argv[0]`). LATER entries
+   * may be empty strings -- `node -e ""` is a valid child invocation.
+   */
+  readonly argv: readonly string[];
+}
+
+/**
+ * Append ONE JSONL entry to an existing session's `commands.log`
+ * (M G2 wrapper mode, D102.F):
+ *
+ *   {"at":"<ISO-8601 UTC seconds>","cwd":".","argv":["claude","--flag"]}\n
+ *
+ * Contract (LOCKED):
+ *   - Core owns session-dir mutations: the target path comes from the
+ *     session state's `commands_log_path` -- callers can NEVER supply
+ *     a file path.
+ *   - The log file must ALREADY exist as a regular file (created by
+ *     `startSession`). Missing file, directory, or symlink fails
+ *     BEFORE appending (`lstat`, so symlinks are not followed) -- a
+ *     corrupted or tampered session dir cannot cause this helper to
+ *     create or append to the wrong thing.
+ *   - Plain append, NOT atomic temp+rename: append semantics, single
+ *     writer (`viberevert run` writes exactly one entry per session).
+ *     A crash mid-append is tolerated; no parser consumes commands.log
+ *     in v1.
+ *   - argv is recorded exactly as invoked. Shell quoting is not
+ *     reconstructable (D102.C normalization note) and secrets in
+ *     arguments are NOT redacted -- documented privacy boundary.
+ *
+ * Validation (TypeError on violation; SessionNotFoundError et al.
+ * propagate from `loadSession`; `lstat`'s ENOENT propagates when the
+ * log file is missing):
+ *   - sessionId must match `sess_<ULID>`.
+ *   - at must match `YYYY-MM-DDTHH:mm:ssZ`, be calendar-valid, and
+ *     round-trip exactly.
+ *   - cwd must be normalized repo-relative POSIX (see
+ *     `isRepoRelativePosixCwd`).
+ *   - argv must be a non-empty array of strings with non-empty
+ *     argv[0].
+ */
+export async function appendCommandsLogEntry(opts: AppendCommandsLogEntryOpts): Promise<void> {
+  if (!SESSION_DIR_NAME_RE.test(opts.sessionId)) {
+    throw new TypeError(
+      `appendCommandsLogEntry: sessionId must match sess_<ULID>; got ${JSON.stringify(opts.sessionId)}`,
+    );
+  }
+  if (!isCommandsLogAtTimestamp(opts.at)) {
+    throw new TypeError(
+      `appendCommandsLogEntry: at must be a calendar-valid ISO-8601 UTC second-precision timestamp (YYYY-MM-DDTHH:mm:ssZ); got ${JSON.stringify(opts.at)}`,
+    );
+  }
+  if (!isRepoRelativePosixCwd(opts.cwd)) {
+    throw new TypeError(
+      `appendCommandsLogEntry: cwd must be normalized repo-relative POSIX ("." for repo root); got ${JSON.stringify(opts.cwd)}`,
+    );
+  }
+  if (
+    !Array.isArray(opts.argv) ||
+    opts.argv.length === 0 ||
+    opts.argv.some((token) => typeof token !== "string") ||
+    opts.argv[0] === ""
+  ) {
+    throw new TypeError(
+      "appendCommandsLogEntry: argv must be a non-empty array of strings with a non-empty command name",
+    );
+  }
+
+  // Existence + schema validation; the log path comes from session
+  // state, never from the caller.
+  const state = await loadSession(opts.sessionId, opts.repoRoot);
+  const logAbs = join(opts.repoRoot, ...state.commands_log_path.split("/"));
+
+  // The log must already exist as a regular file (startSession created
+  // it). lstat, not stat: a symlinked commands.log is refused, not
+  // followed. ENOENT propagates when missing.
+  const logStat = await lstat(logAbs);
+  if (!logStat.isFile() || logStat.isSymbolicLink()) {
+    throw new TypeError(
+      "appendCommandsLogEntry: commands_log_path must point to an existing regular file",
+    );
+  }
+
+  const line = `${JSON.stringify({ at: opts.at, cwd: opts.cwd, argv: opts.argv })}\n`;
+  await appendFile(logAbs, line, "utf8");
 }
