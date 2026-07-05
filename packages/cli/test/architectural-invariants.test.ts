@@ -2423,19 +2423,25 @@ describe("Architectural invariants -- M G1a D99.M @viberevert/cli-commands bound
       "SessionsCommand",
       "StartCommand",
       "VersionCommand",
-      // ----- 3 typed operation functions + their Opts/Result types
+      // ----- 4 typed operation functions + their Opts/Result types
       //       (paired by file). D99.E typed-operation backend.
       "startSessionOperation",
       "StartSessionOperationOpts",
       "StartSessionOperationResult",
+      "endSessionOperation",
+      "EndSessionOperationOpts",
+      "EndSessionOperationResult",
       "createCheckpointOperation",
       "CreateCheckpointOperationOpts",
       "CreateCheckpointOperationResult",
       "generateFixPromptOperation",
       "GenerateFixPromptOperationOpts",
       "GenerateFixPromptOperationResult",
-      // ----- 9 operation-public typed errors -- consumed by MCP_ERROR_CODE_MAP.
+      // ----- 10 operation-public typed errors -- consumed by
+      //       MCP_ERROR_CODE_MAP (EndSessionRaceError: reserved for a
+      //       future MCP end_session handler; not yet mapped).
       "CheckpointNameCollisionError",
+      "EndSessionRaceError",
       "CreateCheckpointListLoadError",
       "PromptFixTargetResolutionError",
       "PromptFixReadFailureError",

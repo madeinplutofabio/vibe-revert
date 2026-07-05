@@ -55,6 +55,17 @@ export {
   type CreateCheckpointOperationResult,
   createCheckpointOperation,
 } from "./operations/create-checkpoint.js";
+// endSessionOperation defines ONE operation error: EndSessionRaceError,
+// wrapping core's NoActiveSessionError when a concurrent end wins the
+// race between the operation's pre-check and core's re-check. Everything
+// else it throws is passthrough (RepoRootNotFoundError,
+// NoActiveSessionError from the pre-check, RuntimeEnvInvalidError).
+export {
+  type EndSessionOperationOpts,
+  type EndSessionOperationResult,
+  EndSessionRaceError,
+  endSessionOperation,
+} from "./operations/end-session.js";
 export {
   type GenerateFixPromptOperationOpts,
   type GenerateFixPromptOperationResult,
