@@ -2531,6 +2531,11 @@ describe("Architectural invariants -- M G1a D99.M @viberevert/cli-commands bound
       // freeze run's exit-mapping helper as public API.
       "mapChildExitToCode",
       "ChildExitStatus",
+      // shell tokenizer internals (M G3 Step 1, D103.D) -- pure v1 line
+      // tokenizer consumed only by ShellCommand; barrel-exporting would
+      // freeze the v1 tokenizing semantics as public API.
+      "tokenizeShellLine",
+      "TokenizeResult",
     ];
     for (const symbol of FORBIDDEN_ABSENT) {
       expect(

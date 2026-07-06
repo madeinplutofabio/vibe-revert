@@ -177,6 +177,12 @@ export { RuntimeEnvInvalidError } from "./runtime-env.js";
 //       them from the package barrel would freeze run's exit-mapping
 //       helper as public API.
 //
+//   - tokenizeShellLine,
+//     TokenizeResult (type)                (from ./commands/shell-tokenize.js)
+//     → M G3 Step 1 (D103.D): pure v1 shell line tokenizer consumed only
+//       by ShellCommand; exporting would freeze the v1 tokenizing
+//       semantics as public API.
+//
 //   - All file-internal helpers in operations/*.ts (readReportBytes,
 //     parseReportFile, assertSourceReportUnchanged, removeStaleFixPrompt,
 //     persistFixPrompt, formatCause, etc.)
