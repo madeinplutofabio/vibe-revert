@@ -5940,10 +5940,11 @@ describe("Architectural invariants -- M G2 viberevert run wrapper (D102.M)", () 
 //
 //   - D103.M.2 -- index.ts registration ORDER: ShellCommand registers
 //     STRICTLY AFTER RunCommand and STRICTLY BEFORE CheckCommand, with
-//     ShellCommand IMMEDIATELY after RunCommand. Lands in M G3 Step 3
-//     (registration); intentionally NOT in this Step 2 block. Until then
-//     the D103.M.Step2 guard below asserts the binary does NOT register
-//     ShellCommand yet.
+//     ShellCommand IMMEDIATELY after RunCommand (no other cli.register()
+//     between them). Workflow grouping: run -> shell -> check. Mirrors
+//     D102.M.2's Start/Run pair-lock style. D102.M.2 is unaffected -- it
+//     locks Start -> Run adjacency and Run < Check (non-adjacent), so
+//     inserting Shell between Run and Check keeps it green.
 //   - D103.M.3 -- shell.ts spawn shape: stdio "inherit" + shell false,
 //     and no terminal-bridge implementation references (case-insensitive
 //     node-pty/openpty/conpty; the transparent terminal bridge is
@@ -5965,12 +5966,61 @@ describe("Architectural invariants -- M G2 viberevert run wrapper (D102.M)", () 
 //     Locks the Node-24 buffered-line fix so it cannot be silently undone.
 //   - D103.M.8 -- shell.ts writes commands.log through core's
 //     appendCommandsLogEntry (positive pair to D103.M.5's appendFile ban).
-//   - D103.M.Step2 (TEMPORARY, this step only) -- the CLI binary does not
-//     register ShellCommand yet; DELETE this and add the real D103.M.2
-//     registration-order invariant in M G3 Step 3.
 
 describe("Architectural invariants -- M G3 viberevert shell guarded REPL (D103.M)", () => {
   const SHELL_COMMAND_REL = "packages/cli-commands/src/commands/shell.ts";
+  const CLI_INDEX_REL = "packages/cli/src/index.ts";
+
+  it("D103.M.2: index.ts registration ORDER -- RunCommand < ShellCommand < CheckCommand AND ShellCommand IMMEDIATELY after RunCommand", () => {
+    // Workflow grouping: shell sits between run and check (run a guarded
+    // command, or open a guarded shell of them, then check the result).
+    // The "immediately after" lock pins ShellCommand directly behind
+    // RunCommand so a future maintainer cannot slip an unrelated command
+    // into the run/shell pairing. Mirrors D102.M.2's Start/Run pair
+    // convention. D102.M.2 is unaffected: it locks Start -> Run adjacency
+    // and Run < Check (non-adjacent), both still true with Shell inserted.
+    //
+    // Defensive: assert each anchor exists before comparing indices --
+    // indexOf returning -1 would silently satisfy `-1 < n`.
+    const source = readSource(CLI_INDEX_REL);
+
+    const runIdx = source.indexOf("cli.register(RunCommand);");
+    const shellIdx = source.indexOf("cli.register(ShellCommand);");
+    const checkIdx = source.indexOf("cli.register(CheckCommand);");
+
+    expect(
+      runIdx,
+      "RunCommand registration missing from index.ts (D103.M.2 anchor)",
+    ).toBeGreaterThanOrEqual(0);
+    expect(
+      shellIdx,
+      "ShellCommand registration missing from index.ts (D103.M.2)",
+    ).toBeGreaterThanOrEqual(0);
+    expect(
+      checkIdx,
+      "CheckCommand registration missing from index.ts (D103.M.2 anchor)",
+    ).toBeGreaterThanOrEqual(0);
+
+    expect(
+      runIdx,
+      "ShellCommand must be registered AFTER RunCommand in index.ts (D103.M.2 -- run -> shell -> check workflow order)",
+    ).toBeLessThan(shellIdx);
+    expect(
+      shellIdx,
+      "ShellCommand must be registered BEFORE CheckCommand in index.ts (D103.M.2 -- run -> shell -> check workflow order)",
+    ).toBeLessThan(checkIdx);
+
+    // "Immediately after" lock: between the RunCommand register line and
+    // the ShellCommand register line, there must be NO other
+    // cli.register(...) call.
+    const runEnd = runIdx + "cli.register(RunCommand);".length;
+    const between = source.slice(runEnd, shellIdx);
+    const interlopingRegisters = findOffenders(between, /\bcli\.register\s*\(/);
+    expect(
+      interlopingRegisters,
+      `ShellCommand must be registered IMMEDIATELY after RunCommand with no other cli.register() between them (D103.M.2). Interloping registrations: ${JSON.stringify(interlopingRegisters)}`,
+    ).toEqual([]);
+  });
 
   it("D103.M.3: shell.ts spawns pipe-less and shell-less (stdio inherit + shell false) and never references a terminal-bridge implementation", () => {
     const stripped = stripTsComments(readSource(SHELL_COMMAND_REL));
@@ -6098,17 +6148,5 @@ describe("Architectural invariants -- M G3 viberevert shell guarded REPL (D103.M
       stripped.includes("appendCommandsLogEntry"),
       `${SHELL_COMMAND_REL} must append commands.log through core's appendCommandsLogEntry (D103.M.8).`,
     ).toBe(true);
-  });
-
-  it("D103.M.Step2: the CLI binary does not register ShellCommand before M G3 Step 3", () => {
-    // TEMPORARY (Step 2 boundary): Step 2 exports ShellCommand from the
-    // @viberevert/cli-commands barrel but must NOT register it in the CLI
-    // binary yet. DELETE this test in M G3 Step 3 and replace it with the
-    // real D103.M.2 registration-order invariant.
-    const cliIndex = readSource("packages/cli/src/index.ts");
-    expect(
-      cliIndex.includes("ShellCommand"),
-      "packages/cli/src/index.ts must not reference ShellCommand until M G3 Step 3 (D103.M.Step2 boundary).",
-    ).toBe(false);
   });
 });
