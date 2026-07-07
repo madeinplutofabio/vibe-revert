@@ -24,6 +24,24 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   profiles (nextjs, laravel, rails, python, lovable) ship live guard/confirm
   defaults; the generic profile ships a commented example. See
   `docs/run-contract.md`.
+- `viberevert shell [--task "..."]` -- opens a guarded command loop (REPL)
+  inside a single VibeRevert session: takes a checkpoint, starts one session,
+  then prompts `viberevert> ` for one command at a time, guard-checks each
+  command before running it, and -- on `exit` / EOF -- ends the session and
+  prints the `viberevert check --since <session>` hint. The interactive
+  companion to `viberevert run`. Each line is tokenized by a v1 parser with NO
+  shell expansion (globs/vars/operators are literal; use `sh -c` / `cmd /c` for
+  shell features); each accepted command spawns with `stdio: "inherit"`,
+  `shell: false` at the fixed launch cwd (no `cd`). Guard/confirm matching is
+  shared with `run`, but a refusal or declined confirmation SKIPS that command
+  and CONTINUES the loop (a non-TTY confirm is refused without consuming a
+  line). One JSONL `commands.log` entry per accepted command, appended BEFORE
+  the spawn (so ENOENT / failed-spawn commands are still logged); per-command
+  child exits are displayed (`[exit: N]` / `[signal: SIG]`) and swallowed,
+  never propagated to the shell's own exit code. Scoped teardown: the shell
+  never ends a session it does not own. No `node-pty` / native dependency --
+  the transparent terminal bridge is deferred to G4. See
+  `docs/shell-contract.md`.
 
 ## [0.7.1-beta.1] - 2026-07-04
 

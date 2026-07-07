@@ -2,11 +2,11 @@
 
 > The VibeRevert CLI.
 
-The user-facing command-line tool. Provides `init`, `checkpoint`, `run`, `check`, `report`, `prompt-fix`, `rollback`, `hook install`, `hook uninstall`, `install`, `uninstall`, and `mcp serve`.
+The user-facing command-line tool. Provides `init`, `checkpoint`, `run`, `shell`, `check`, `report`, `prompt-fix`, `rollback`, `hook install`, `hook uninstall`, `install`, `uninstall`, and `mcp serve`.
 
 Part of [VibeRevert](https://github.com/madeinplutofabio/vibe-revert) — the safety belt for vibe coding.
 
-**Status:** `v0.7.1-beta.1` published; M G2 in progress (unreleased). Public API may change before v1.0.
+**Status:** `v0.7.1-beta.1` published; M G3 implemented on `main` but unreleased. Public API may change before v1.0.
 
 ## Run
 
@@ -14,11 +14,21 @@ Part of [VibeRevert](https://github.com/madeinplutofabio/vibe-revert) — the sa
 
 It is deliberately boring -- not a shell, not a terminal emulator, not an agent runtime. `shell: false` is locked, so there is no shell interpretation or injection surface; guarding applies to the top-level invocation only (commands the wrapped program runs internally are never intercepted); and sessions capture FILE changes, not terminal output.
 
-`commands.guard` and `commands.require_confirm` in `.viberevert.yml` gate the top-level command: a guarded match refuses (exit 2) before any session is created; a confirm-required match prompts for the exact phrase `run anyway` on a TTY (and refuses on a non-TTY). Guard wins when both match. The framework init profiles ship live, framework-tailored defaults; the generic profile ships a commented example. These rules take effect only under `run`.
+`commands.guard` and `commands.require_confirm` in `.viberevert.yml` gate the top-level command: a guarded match refuses (exit 2) before any session is created; a confirm-required match prompts for the exact phrase `run anyway` on a TTY (and refuses on a non-TTY). Guard wins when both match. The framework init profiles ship live, framework-tailored defaults; the generic profile ships a commented example. These rules take effect under both `run` and `shell`: `run` applies them once to the wrapped command and exits on refusal/decline, while `shell` applies the same matching per submitted line and then continues the loop after a refusal or declined confirmation.
 
 The child's exit code is propagated verbatim (127 for not-found, 126 for not-executable, 128+N for POSIX signal death). All wrapper text goes to stderr; the child owns stdout. Each run appends one JSONL audit line to the session's `commands.log` -- recorded verbatim, with no secret redaction, so do not pass secrets as command-line arguments.
 
 See [`docs/run-contract.md`](https://github.com/madeinplutofabio/vibe-revert/blob/main/docs/run-contract.md) for the full contract: argument-boundary rules, guard-matching semantics with worked examples, the exit-code table, confirmation flow, stderr stream lock, signal/cleanup story, Windows `.bat`/`.cmd` note, and the commands.log privacy boundary (D102.A-J).
+
+## Shell
+
+`viberevert shell [--task "..."]` opens a guarded command loop inside a single VibeRevert session: it takes a checkpoint, starts one session, then prompts (`viberevert> `) for one command at a time, guard-checks each command against `.viberevert.yml` before running it, and -- when you type `exit` or press Ctrl+D -- ends the session and prints the two-line `viberevert check --since <session>` summary. It is the interactive companion to `viberevert run`.
+
+It is a guarded command loop, not a transparent shell. Each line is tokenized by a small v1 parser that does no shell expansion (globs, variables, pipes, and redirection are literal), and each accepted command spawns with `stdio: "inherit"`, `shell: false` at the directory where you launched the shell (there is no `cd`). Use `sh -c "..."` / `cmd /c "..."` for shell features; the guard then sees that literal command. There is no `node-pty` and no native dependency -- the transparent terminal bridge is deferred to G4.
+
+Guard/confirm matching is shared with `run`, but a refusal or declined confirmation SKIPS that one command and CONTINUES the loop (a non-TTY confirm is refused without consuming a line). Each accepted command appends one JSONL entry to the session's `commands.log` BEFORE the spawn -- so an ENOENT / failed-spawn command is still logged -- while per-command child exit codes are displayed (`[exit: N]` / `[signal: SIG]`) and swallowed, never propagated to the shell's own exit code. If a command ends or replaces the active session, the shell stops and never touches a session it does not own (scoped teardown).
+
+See [`docs/shell-contract.md`](https://github.com/madeinplutofabio/vibe-revert/blob/main/docs/shell-contract.md) for the full contract: the Node-24 readline note (why the interface is not paused around children), tokenizing rules, per-command guard/confirm loop behavior, the commands.log audit + privacy boundary, active-session integrity + scoped teardown, the exit-code table, signals, and the G4 deferrals (D103.A-G, D103.M).
 
 ## Rollback
 
