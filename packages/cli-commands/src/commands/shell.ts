@@ -27,14 +27,19 @@
 //   confirm sub-read both consume from `lines` via lines.next(). It
 //   preserves every buffered shell command line in order on Node 24
 //   (rl.question drops lines buffered between calls; probe-verified).
-//   EOF is lines.next() -> {done:true}. Child stdin is best-effort only:
-//   the REPL owns stdin, and readline is paused around spawned children
-//   to reduce interference, NOT to promise full transparent stdin
-//   behavior. On a TTY, a SIGINT at an idle command prompt clears the
-//   partial line and reprints the prompt but does NOT settle the pending
-//   lines.next(); it is suppressed during a child and during a confirm
-//   read (Ctrl+C mid-confirmation is not a v1 contract). All wrapper text
-//   goes to stderr; children own stdout via stdio "inherit".
+//   EOF is lines.next() -> {done:true}. The async iterator reads ONLY
+//   during `await lines.next()`, so a spawned child (which runs BETWEEN
+//   reads) is never competing with an active read -- the interface is
+//   deliberately NOT paused around the child, because rl.pause()/resume()
+//   around a spawn closes the async iterator (the next lines.next() then
+//   throws "readline was closed", probe-verified on Node 24). Child stdin
+//   is therefore best-effort only; fully transparent stdin hand-off to an
+//   interactive child is a G4 concern. On a TTY, a SIGINT at an idle
+//   command prompt clears the partial line and reprints the prompt but
+//   does NOT settle the pending lines.next(); it is suppressed during a
+//   child and during a confirm read (Ctrl+C mid-confirmation is not a v1
+//   contract). All wrapper text goes to stderr; children own stdout via
+//   stdio "inherit".
 //
 // D103.D -- the v1 tokenizer (shell-tokenize.ts) does NO expansion:
 //   globs/vars/operators are literal. Shell semantics require an
@@ -373,7 +378,7 @@ export class ShellCommand extends Command {
 
     let hadUnexpectedError = false;
     try {
-      await this.runLoop(rl, lines, stderr, {
+      await this.runLoop(lines, stderr, {
         repoRoot,
         sessionId,
         invocationCwd,
@@ -404,7 +409,6 @@ export class ShellCommand extends Command {
    * after each child).
    */
   private async runLoop(
-    rl: Interface,
     lines: NodeJS.AsyncIterator<string>,
     stderr: Writable,
     ctx: ShellLoopContext,
@@ -517,9 +521,11 @@ export class ShellCommand extends Command {
         continue;
       }
 
-      // Spawn + wait (D103.A + D103.C). rl.pause()/resume() around the
-      // inherited-stdio child so the interface doesn't steal its input.
-      const outcome = await this.spawnAndWait(rl, command, argv.slice(1), ctx.invocationCwd);
+      // Spawn + wait (D103.A + D103.C). The readline async iterator is
+      // NOT paused around the child (see the D103.B/C header): reading
+      // only happens during lines.next(), and pausing would close the
+      // iterator.
+      const outcome = await this.spawnAndWait(command, argv.slice(1), ctx.invocationCwd);
 
       // Per-command display (D103.E): shell DISPLAYS and SWALLOWS child
       // status -- it never propagates a child code to its own exit code.
@@ -586,19 +592,16 @@ export class ShellCommand extends Command {
   }
 
   /**
-   * Spawn one accepted command and await its exit (D103.A + D103.C).
-   * Pauses the readline interface around the inherited-stdio child
-   * (best-effort child stdin; see the D103.B/C header). Record-only
-   * SIGINT/SIGTERM handlers keep the shell alive so the loop can continue
-   * after Ctrl+C.
+   * Spawn one accepted command and await its exit (D103.A + D103.C). The
+   * readline interface is deliberately NOT paused around the child: the
+   * async iterator reads only during lines.next() (a child runs BETWEEN
+   * reads), and rl.pause()/resume() around a spawn closes the iterator so
+   * the next lines.next() throws "readline was closed" (probe-verified on
+   * Node 24). Record-only SIGINT/SIGTERM handlers keep the shell alive so
+   * the loop can continue after Ctrl+C; childRunning suppresses the TTY
+   * SIGINT re-prompt while the child owns the terminal.
    */
-  private async spawnAndWait(
-    rl: Interface,
-    command: string,
-    args: string[],
-    cwd: string,
-  ): Promise<SpawnOutcome> {
-    rl.pause();
+  private async spawnAndWait(command: string, args: string[], cwd: string): Promise<SpawnOutcome> {
     this.childRunning = true;
     try {
       const child = spawn(command, args, { stdio: "inherit", shell: false, cwd });
@@ -630,7 +633,6 @@ export class ShellCommand extends Command {
       return { kind: "spawn-error", err: err as NodeJS.ErrnoException };
     } finally {
       this.childRunning = false;
-      rl.resume();
     }
   }
 

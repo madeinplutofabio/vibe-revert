@@ -6130,11 +6130,13 @@ describe("Architectural invariants -- M G3 viberevert shell guarded REPL (D103.M
       "readline/promises",
       "process.stdin",
       "process.stdout",
+      "rl.pause(",
+      "rl.resume(",
     ];
     for (const token of banned) {
       expect(
         stripped.includes(token),
-        `${SHELL_COMMAND_REL} must not reference "${token}" -- shell input/output must use one readline async iterator over this.context.stdin/stderr (D103.C).`,
+        `${SHELL_COMMAND_REL} must not reference "${token}" -- shell input/control must use one readline async iterator; do not pause/resume the interface around children because that closes the iterator on Node 24 (D103.C).`,
       ).toBe(false);
     }
   });
