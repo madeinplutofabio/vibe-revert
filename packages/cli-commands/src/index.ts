@@ -5,7 +5,7 @@
 //
 // Two consumers:
 //   1. `viberevert` CLI binary (packages/cli/src/index.ts) — imports
-//      the 17 Command classes for register(). The binary is a thin
+//      the 18 Command classes for register(). The binary is a thin
 //      wrapper that does `new Cli + register + runExit`.
 //   2. @viberevert/mcp (M G1a Step 3+) — imports:
 //        - 4 operation functions for the typed-operation backend surface
@@ -41,6 +41,7 @@ export { ReportCommand } from "./commands/report.js";
 export { RollbackCommand } from "./commands/rollback.js";
 export { RunCommand } from "./commands/run.js";
 export { SessionsCommand } from "./commands/sessions.js";
+export { ShellCommand } from "./commands/shell.js";
 export { StartCommand } from "./commands/start.js";
 export { UninstallCommand } from "./commands/uninstall.js";
 export { VersionCommand } from "./commands/version.js";

@@ -255,21 +255,24 @@ describe("Architectural invariants -- git invocation single-owner (D17c)", () =>
     }
   });
 
-  it("packages/cli-commands/src/**/*.ts (excluding doctor.ts and run.ts) does NOT import child_process", () => {
+  it("packages/cli-commands/src/**/*.ts (excluding doctor.ts, run.ts, and shell.ts) does NOT import child_process", () => {
     // doctor.ts is the locked carve-out for diagnostic binary probing.
     // run.ts is the D102.M.1 carve-out (M G2): `viberevert run`'s whole
     // purpose is spawning exactly ONE wrapped child (D102.A); its spawn
-    // shape is separately locked by D102.M.3. No other CLI source file
-    // may import child_process -- the rest of the CLI is forbidden to
-    // spawn subprocesses, and any subprocess need (git or otherwise)
-    // goes through the appropriate package's public API. Regex matches
-    // both the modern `node:child_process` form and the legacy bare
+    // shape is separately locked by D102.M.3. shell.ts is the D103.M.1
+    // carve-out (M G3): `viberevert shell`'s guarded REPL spawns each
+    // accepted command as one child; its spawn shape is separately
+    // locked by D103.M.3. No other CLI source file may import
+    // child_process -- the rest of the CLI is forbidden to spawn
+    // subprocesses, and any subprocess need (git or otherwise) goes
+    // through the appropriate package's public API. Regex matches both
+    // the modern `node:child_process` form and the legacy bare
     // `child_process` form (the project's verbatimModuleSyntax setting
     // nudges toward `node:` but doesn't enforce it, so both are valid
     // Node import specifiers).
     const cliSrcDir = join(REPO_ROOT, "packages/cli-commands/src");
     const allTs = findTsFiles(cliSrcDir);
-    const CARVE_OUTS = new Set(["commands/doctor.ts", "commands/run.ts"]);
+    const CARVE_OUTS = new Set(["commands/doctor.ts", "commands/run.ts", "commands/shell.ts"]);
     const targets = allTs.filter(
       (p) => !CARVE_OUTS.has(relative(cliSrcDir, p).replace(/\\/g, "/")),
     );
@@ -279,7 +282,7 @@ describe("Architectural invariants -- git invocation single-owner (D17c)", () =>
       const offenders = findOffenders(source, childProcessImport);
       expect(
         offenders,
-        `${relative(REPO_ROOT, file).replace(/\\/g, "/")} must not import child_process -- only doctor.ts (D17c) and run.ts (D102.M.1) are allowed. Matches: ${JSON.stringify(offenders)}`,
+        `${relative(REPO_ROOT, file).replace(/\\/g, "/")} must not import child_process -- only doctor.ts (D17c), run.ts (D102.M.1), and shell.ts (D103.M.1) are allowed. Matches: ${JSON.stringify(offenders)}`,
       ).toEqual([]);
     }
   });
@@ -2413,11 +2416,12 @@ describe("Architectural invariants -- M G1a D99.M @viberevert/cli-commands bound
     const exported = collectBarrelExports(readSource(CLI_COMMANDS_BARREL_REL));
 
     const REQUIRED_PRESENT: ReadonlyArray<string> = [
-      // ----- 17 Command classes -- consumed by the `viberevert` CLI binary.
+      // ----- 18 Command classes -- consumed by the `viberevert` CLI binary.
       //       Count rule: this list must match the actual public command
       //       exports in packages/cli-commands/src/index.ts. (M G2 Step 4
       //       backfilled InstallCommand + UninstallCommand, which M G1b
-      //       added to the barrel without widening this list.)
+      //       added to the barrel without widening this list. M G3 Step 2
+      //       added ShellCommand.)
       "CheckCommand",
       "CheckpointCommand",
       "CheckpointsCommand",
@@ -2432,6 +2436,7 @@ describe("Architectural invariants -- M G1a D99.M @viberevert/cli-commands bound
       "RollbackCommand",
       "RunCommand",
       "SessionsCommand",
+      "ShellCommand",
       "StartCommand",
       "UninstallCommand",
       "VersionCommand",
@@ -5922,5 +5927,188 @@ describe("Architectural invariants -- M G2 viberevert run wrapper (D102.M)", () 
         `${RUN_COMMAND_REL} must not reference "${token}" -- run never auto-checks (D102.G / D102.M.5).`,
       ).toBe(false);
     }
+  });
+});
+
+// =============================================================================
+// Architectural invariants -- M G3 viberevert shell guarded REPL (D103.M)
+// =============================================================================
+//
+// D103.M.1 lives above as an amendment to the cli-commands child_process
+// ban (doctor.ts + run.ts + shell.ts carve-outs). This block owns the
+// shell-specific source locks:
+//
+//   - D103.M.2 -- index.ts registration ORDER: ShellCommand registers
+//     STRICTLY AFTER RunCommand and STRICTLY BEFORE CheckCommand, with
+//     ShellCommand IMMEDIATELY after RunCommand. Lands in M G3 Step 3
+//     (registration); intentionally NOT in this Step 2 block. Until then
+//     the D103.M.Step2 guard below asserts the binary does NOT register
+//     ShellCommand yet.
+//   - D103.M.3 -- shell.ts spawn shape: stdio "inherit" + shell false,
+//     and no terminal-bridge implementation references (case-insensitive
+//     node-pty/openpty/conpty; the transparent terminal bridge is
+//     deferred to G4).
+//   - D103.M.4 -- shell.ts never imports check/report machinery,
+//     permanently enforcing the no-auto-check contract against scope
+//     creep (mirrors D102.M.5 for run).
+//   - D103.M.5 -- shell.ts does not import appendFile from
+//     node:fs/promises: core's appendCommandsLogEntry stays the single
+//     commands.log writer (defense-in-depth with D102.M.4, which already
+//     bans that import workspace-wide).
+//   - D103.M.6 -- no native terminal-bridge dependency: no package
+//     manifest nor pnpm-lock.yaml may contain `node-pty` (pins the
+//     "no native dependency" decision; the full terminal bridge is
+//     deferred to G4).
+//   - D103.M.7 -- shell.ts uses exactly one readline interface and the
+//     async iterator line source; no rl.question, AbortController,
+//     readline/promises, line-event queue, or raw process stdin/stdout.
+//     Locks the Node-24 buffered-line fix so it cannot be silently undone.
+//   - D103.M.8 -- shell.ts writes commands.log through core's
+//     appendCommandsLogEntry (positive pair to D103.M.5's appendFile ban).
+//   - D103.M.Step2 (TEMPORARY, this step only) -- the CLI binary does not
+//     register ShellCommand yet; DELETE this and add the real D103.M.2
+//     registration-order invariant in M G3 Step 3.
+
+describe("Architectural invariants -- M G3 viberevert shell guarded REPL (D103.M)", () => {
+  const SHELL_COMMAND_REL = "packages/cli-commands/src/commands/shell.ts";
+
+  it("D103.M.3: shell.ts spawns pipe-less and shell-less (stdio inherit + shell false) and never references a terminal-bridge implementation", () => {
+    const stripped = stripTsComments(readSource(SHELL_COMMAND_REL));
+    expect(
+      stripped.includes('stdio: "inherit"'),
+      `${SHELL_COMMAND_REL} must spawn with stdio: "inherit" (D103.A pipe-less contract).`,
+    ).toBe(true);
+    expect(
+      stripped.includes("shell: false"),
+      `${SHELL_COMMAND_REL} must spawn with shell: false (D103.A no-shell-interpretation lock).`,
+    ).toBe(true);
+    // Case-insensitive so `ConPTY` / `OpenPTY` cannot slip through.
+    const lowered = stripped.toLowerCase();
+    for (const banned of ["node-pty", "openpty", "conpty"]) {
+      expect(
+        lowered.includes(banned),
+        `${SHELL_COMMAND_REL} must not reference "${banned}" -- the transparent terminal bridge is deferred to G4 (D103.M.3).`,
+      ).toBe(false);
+    }
+  });
+
+  it("D103.M.4: shell.ts imports no check/report machinery (no-auto-check contract)", () => {
+    // shell's summary HINTS at `viberevert check` in a string literal
+    // (which survives comment-stripping) -- none of the banned tokens
+    // below can appear in that legitimate copy. Same token set as
+    // D102.M.5 for run.
+    const stripped = stripTsComments(readSource(SHELL_COMMAND_REL));
+    const banned = [
+      "CheckCommand",
+      "ReportCommand",
+      "runCheck",
+      "check-session",
+      "check-orchestration",
+      "check-since-resolution",
+      "report-paths",
+      "@viberevert/checks",
+      "@viberevert/reporters",
+    ];
+    for (const token of banned) {
+      expect(
+        stripped.includes(token),
+        `${SHELL_COMMAND_REL} must not reference "${token}" -- shell never auto-checks (D103.M.4).`,
+      ).toBe(false);
+    }
+  });
+
+  it("D103.M.5: shell.ts does not import appendFile from node:fs/promises (core's appendCommandsLogEntry is the single commands.log writer)", () => {
+    // Defense-in-depth with D102.M.4 (which bans the import across ALL
+    // packages): shell appends commands.log entries ONLY through core's
+    // appendCommandsLogEntry, never the raw append primitive.
+    const stripped = stripTsComments(readSource(SHELL_COMMAND_REL));
+    const namedAppendFileImport =
+      /import\s*(?:type\s*)?\{[^}]*\bappendFile\b[^}]*\}\s*from\s*["']node:fs\/promises["']/;
+    expect(
+      namedAppendFileImport.test(stripped),
+      `${SHELL_COMMAND_REL} must not import appendFile from node:fs/promises (D103.M.5).`,
+    ).toBe(false);
+  });
+
+  it("D103.M.6: no native terminal-bridge dependency -- no package manifest or pnpm-lock.yaml contains node-pty", () => {
+    // Pins the "no native dependency" G3 decision. The full transparent
+    // terminal bridge (node-pty / ConPTY) is deferred to G4; until then
+    // node-pty must not appear in any manifest or the lockfile.
+    const manifestRels = ["package.json", "pnpm-lock.yaml"];
+    for (const pkg of readdirSync(join(REPO_ROOT, "packages"))) {
+      manifestRels.push(`packages/${pkg}/package.json`);
+    }
+    for (const rel of manifestRels) {
+      let raw: string;
+      try {
+        raw = readFileSync(join(REPO_ROOT, rel), "utf8");
+      } catch {
+        continue; // file absent (e.g. a directory entry without package.json)
+      }
+      expect(
+        raw.includes("node-pty"),
+        `${rel} must not contain "node-pty" -- no native terminal-bridge dependency in G3 (D103.M.6).`,
+      ).toBe(false);
+    }
+  });
+
+  it("D103.M.7: shell.ts uses one readline interface plus async iterator, never rl.question/AbortController/nested readline/line-event queue/raw process stdio", () => {
+    const stripped = stripTsComments(readSource(SHELL_COMMAND_REL));
+
+    const createInterfaceCalls = stripped.match(/\bcreateInterface\s*\(/g) ?? [];
+    expect(
+      createInterfaceCalls,
+      `${SHELL_COMMAND_REL} must create exactly one readline interface (D103.C one-interface lock).`,
+    ).toHaveLength(1);
+
+    expect(
+      stripped.includes("[Symbol.asyncIterator]()"),
+      `${SHELL_COMMAND_REL} must consume command/control input through readline's async iterator (D103.C Node-24 buffered-line fix).`,
+    ).toBe(true);
+
+    // No line-event queue (a second line source) via on/once("line") in
+    // either quote style -- the async iterator is the single line source.
+    const lineEvent = /\.(?:on|once)\s*\(\s*["']line["']/;
+    expect(
+      lineEvent.test(stripped),
+      `${SHELL_COMMAND_REL} must not consume readline "line" events -- the async iterator is the single line source (D103.C).`,
+    ).toBe(false);
+
+    const banned = [
+      "question(",
+      "AbortController",
+      "readline/promises",
+      "process.stdin",
+      "process.stdout",
+    ];
+    for (const token of banned) {
+      expect(
+        stripped.includes(token),
+        `${SHELL_COMMAND_REL} must not reference "${token}" -- shell input/output must use one readline async iterator over this.context.stdin/stderr (D103.C).`,
+      ).toBe(false);
+    }
+  });
+
+  it("D103.M.8: shell.ts writes commands.log only through appendCommandsLogEntry", () => {
+    // Positive pair to D103.M.5's appendFile ban: the intended writer
+    // must be present, so the ban can't be satisfied by simply dropping
+    // the commands.log append entirely.
+    const stripped = stripTsComments(readSource(SHELL_COMMAND_REL));
+    expect(
+      stripped.includes("appendCommandsLogEntry"),
+      `${SHELL_COMMAND_REL} must append commands.log through core's appendCommandsLogEntry (D103.M.8).`,
+    ).toBe(true);
+  });
+
+  it("D103.M.Step2: the CLI binary does not register ShellCommand before M G3 Step 3", () => {
+    // TEMPORARY (Step 2 boundary): Step 2 exports ShellCommand from the
+    // @viberevert/cli-commands barrel but must NOT register it in the CLI
+    // binary yet. DELETE this test in M G3 Step 3 and replace it with the
+    // real D103.M.2 registration-order invariant.
+    const cliIndex = readSource("packages/cli/src/index.ts");
+    expect(
+      cliIndex.includes("ShellCommand"),
+      "packages/cli/src/index.ts must not reference ShellCommand until M G3 Step 3 (D103.M.Step2 boundary).",
+    ).toBe(false);
   });
 });
