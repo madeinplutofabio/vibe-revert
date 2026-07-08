@@ -2,9 +2,23 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PTY engine for `viberevert shell --pty` (M G4 Step 3c, D104.C/N).
+ * PTY engine for `viberevert shell --pty` (M G4 Step 3c, D104.C/N/G).
  *
- * PIECE (i) -- host shell resolution. Bridges the pure shell resolver
+ * Built incrementally across 3c pieces: host shell RESOLUTION
+ * (`resolveHostInteractiveShell`) and the pre-spawn PRECONDITION gate
+ * (`evaluatePtyPreconditions`) live here; the PTY lifecycle (spawn / raw
+ * passthrough / resize / D104.I teardown) and `runPtyShell` follow. Until the
+ * engine is wired behind the guarded `--pty` path (Step 3d/4) this file is
+ * reachable only by tests.
+ *
+ * Boundaries (enforced by invariants): this file reaches the native PTY module
+ * ONLY via pty-loader's `loadPtyModule` (never the package name directly),
+ * routes all I/O through `this.context` (no `process.std*` / `exit` /
+ * `console`), and has no env-flag escape hatch.
+ *
+ * --- Host shell resolution ---
+ *
+ * `resolveHostInteractiveShell` bridges the pure shell resolver
  * (`shell-resolver.ts` -- WHICH interactive shell) and the executable path
  * resolver (`executable-probe.ts` -- WHERE it is) into the concrete
  * `{ path, args, kind }` the engine spawns.
@@ -18,18 +32,24 @@
  * before returning; if it no longer resolves to itself (removed/changed) it
  * refuses rather than fall through to a different PATH candidate. This preserves
  * the Step-3b guarantee: the engine spawns the resolved exact path, never a bare
- * name the OS/runtime might re-resolve differently (CWD / PATHEXT).
+ * name the OS/runtime might re-resolve differently (CWD / PATHEXT). Deps are
+ * ALL-OR-NONE injectable so it is deterministically unit-tested.
  *
- * This is the impure host seam (reads `process.platform` / `process.env`,
- * resolves via fs); deps are ALL-OR-NONE injectable so it is deterministically
- * unit-tested. Later 3c pieces add the PTY engine proper (`runPtyShell`) to this
- * file; per the locked boundaries it will reference node-pty ONLY via
- * `pty-loader`'s `loadPtyModule`, route all I/O through `this.context`, and
- * expose no env-flag escape hatch. Until the engine is wired (Step 4) this file
- * is reachable only by tests.
+ * --- Pre-spawn preconditions ---
+ *
+ * `evaluatePtyPreconditions` is the fail-fast gate the engine runs before any
+ * PTY: a real interactive TTY (checked FIRST, so the native PTY module is never
+ * loaded off a non-TTY -- which also excludes the MCP harness / piped stdin),
+ * then the PTY module loads (a thrown loader is treated as unavailable --
+ * fail-closed), then a suitable shell resolves. It returns a `refuse` (a
+ * machine-stable `reason` + human message + exit code) or `proceed` (carrying
+ * the loaded PTY module + resolved shell). Session-level refusals (session
+ * already active, repo/config) come later from the reused G3 session machinery,
+ * not this gate.
  */
 
 import { createHostExecutablePathResolver } from "./executable-probe.js";
+import type { PtyModule } from "./pty-loader.js";
 import {
   resolveInteractiveShell,
   type ShellKind,
@@ -126,4 +146,82 @@ export function resolveHostInteractiveShell(
   }
 
   return { path: approvedPath, args: selected.args, kind: selected.kind };
+}
+
+/** Why the PTY preconditions refused (machine-stable, alongside the message). */
+export type PtyPreconditionRefusalReason = "not_tty" | "pty_unavailable" | "no_shell";
+
+/** Outcome of the pre-spawn preconditions: refuse (reason/message/exit) or proceed. */
+export type PtyPreconditionResult =
+  | {
+      readonly kind: "refuse";
+      readonly reason: PtyPreconditionRefusalReason;
+      readonly message: string;
+      readonly exitCode: number;
+    }
+  | {
+      readonly kind: "proceed";
+      readonly pty: PtyModule;
+      readonly shell: ResolvedInteractiveShell;
+    };
+
+/** Injected facts for the precondition gate (all-or-none per call). */
+export interface PtyPreconditionDeps {
+  /**
+   * True only when both stdin and stdout are real TTYs. stdin is needed for raw
+   * input; stdout is needed for PTY output/resize. stderr is not part of the PTY
+   * bridge.
+   */
+  readonly hasInteractiveTty: () => boolean;
+  /** Load the optional native PTY module (the sole seam), or null if absent. */
+  readonly loadPtyModule: () => Promise<PtyModule | null>;
+  /** Resolve the host interactive shell to an exact spawnable, or null. */
+  readonly resolveHostShell: () => ResolvedInteractiveShell | null;
+}
+
+const NOT_A_TTY_MESSAGE =
+  "viberevert shell --pty requires an interactive terminal (a real TTY). Run `viberevert shell` for the guarded REPL instead.";
+const PTY_UNAVAILABLE_MESSAGE =
+  "viberevert shell --pty is unavailable here: the optional native PTY dependency is not installed or failed to load. Run `viberevert shell` for the guarded REPL instead.";
+const NO_SHELL_MESSAGE =
+  "viberevert shell --pty could not find a suitable interactive shell on this system. Run `viberevert shell` for the guarded REPL instead.";
+
+/** Build a refusal result (all pre-spawn refusals exit non-zero, code 1). */
+function refuse(reason: PtyPreconditionRefusalReason, message: string): PtyPreconditionResult {
+  return { kind: "refuse", reason, message, exitCode: 1 };
+}
+
+/**
+ * Pre-spawn precondition gate for the PTY engine (D104.G). Returns a refusal
+ * (reason + message + exit code) or `proceed` with the loaded PTY module +
+ * resolved shell. Deterministic given `deps`; runs no PTY.
+ *
+ * Order (fail-fast, short-circuiting): (1) a real interactive TTY -- checked
+ * first so the native PTY module is never loaded off a non-TTY; (2) the PTY
+ * module loads -- a thrown loader is treated as unavailable (fail-closed);
+ * (3) a suitable shell resolves.
+ */
+export async function evaluatePtyPreconditions(
+  deps: PtyPreconditionDeps,
+): Promise<PtyPreconditionResult> {
+  if (!deps.hasInteractiveTty()) {
+    return refuse("not_tty", NOT_A_TTY_MESSAGE);
+  }
+
+  let pty: PtyModule | null;
+  try {
+    pty = await deps.loadPtyModule();
+  } catch {
+    return refuse("pty_unavailable", PTY_UNAVAILABLE_MESSAGE);
+  }
+  if (pty === null) {
+    return refuse("pty_unavailable", PTY_UNAVAILABLE_MESSAGE);
+  }
+
+  const shell = deps.resolveHostShell();
+  if (shell === null) {
+    return refuse("no_shell", NO_SHELL_MESSAGE);
+  }
+
+  return { kind: "proceed", pty, shell };
 }

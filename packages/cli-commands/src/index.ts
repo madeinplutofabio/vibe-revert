@@ -212,10 +212,15 @@ export { RuntimeEnvInvalidError } from "./runtime-env.js";
 //
 //   - resolveHostInteractiveShell,
 //     ResolvedInteractiveShell (type),
-//     HostShellResolutionDeps (type)        (from ./commands/shell-pty.js)
-//     → M G4 Step 3c (D104.C): the PTY engine's host shell resolution (piece
-//       i). Internal until the engine is wired behind the guarded `--pty` path
-//       (Step 3d/4); exporting would surface engine internals as public API.
+//     HostShellResolutionDeps (type),
+//     evaluatePtyPreconditions,
+//     PtyPreconditionResult (type),
+//     PtyPreconditionDeps (type),
+//     PtyPreconditionRefusalReason (type)   (from ./commands/shell-pty.js)
+//     → M G4 Step 3c (D104.C/G): the PTY engine's host shell resolution +
+//       pre-spawn precondition gate. Internal until the engine is wired behind
+//       the guarded `--pty` path (Step 3d/4); exporting would surface engine
+//       internals as public API.
 //
 //   - All file-internal helpers in operations/*.ts (readReportBytes,
 //     parseReportFile, assertSourceReportUnchanged, removeStaleFixPrompt,

@@ -1,16 +1,22 @@
 // SPDX-FileCopyrightText: 2026 Fabio Marcello Salvadori
 // SPDX-License-Identifier: Apache-2.0
 
-// Unit tests for the PTY engine's host shell resolution (M G4 Step 3c piece i).
+// Unit tests for the PTY engine host wiring + precondition gate (M G4 Step 3c).
 //
 // resolveHostInteractiveShell bridges the pure resolver and the executable path
 // resolver through ONE injected `resolveExecutablePath`, cached so the approved
 // path equals the one availability accepted, then re-verified as an exact path.
-// Tests inject all deps (all-or-none) -- deterministic, no node-pty/TTY/fs.
+// evaluatePtyPreconditions is the fail-fast pre-spawn gate. Both take injected
+// deps (all-or-none) -- deterministic, no node-pty/TTY/fs.
 
 import { describe, expect, it } from "vitest";
 
-import { resolveHostInteractiveShell } from "../src/commands/shell-pty.js";
+import type { PtyDisposable, PtyModule, PtyProcess } from "../src/commands/pty-loader.js";
+import {
+  evaluatePtyPreconditions,
+  type ResolvedInteractiveShell,
+  resolveHostInteractiveShell,
+} from "../src/commands/shell-pty.js";
 
 /**
  * Build a fake `resolveExecutablePath` that models the real one: each
@@ -31,6 +37,17 @@ function resolverFromEntries(
     return exactPaths.has(file) ? file : null;
   };
 }
+
+const noopDisposable: PtyDisposable = { dispose: () => undefined };
+const fakePtyProcess: PtyProcess = {
+  write: () => undefined,
+  resize: () => undefined,
+  kill: () => undefined,
+  onData: () => noopDisposable,
+  onExit: () => noopDisposable,
+};
+const fakePty: PtyModule = { spawn: () => fakePtyProcess };
+const fakeShell: ResolvedInteractiveShell = { path: "/bin/bash", args: ["-i"], kind: "bash" };
 
 describe("resolveHostInteractiveShell -- resolver + path resolver via one seam", () => {
   it("resolves a POSIX bash to its exact path", () => {
@@ -117,5 +134,105 @@ describe("resolveHostInteractiveShell -- resolver + path resolver via one seam",
       },
     });
     expect(result).toBeNull();
+  });
+});
+
+describe("evaluatePtyPreconditions -- pre-spawn gate", () => {
+  it("refuses not_tty first, before loading the PTY module or resolving a shell", async () => {
+    let loadCalls = 0;
+    let shellCalls = 0;
+
+    const result = await evaluatePtyPreconditions({
+      hasInteractiveTty: () => false,
+      loadPtyModule: async () => {
+        loadCalls += 1;
+        return fakePty;
+      },
+      resolveHostShell: () => {
+        shellCalls += 1;
+        return fakeShell;
+      },
+    });
+
+    expect(result.kind).toBe("refuse");
+    if (result.kind === "refuse") {
+      expect(result.reason).toBe("not_tty");
+      expect(result.exitCode).toBe(1);
+    }
+    expect(loadCalls).toBe(0);
+    expect(shellCalls).toBe(0);
+  });
+
+  it("refuses pty_unavailable when the PTY module is absent", async () => {
+    const result = await evaluatePtyPreconditions({
+      hasInteractiveTty: () => true,
+      loadPtyModule: async () => null,
+      resolveHostShell: () => fakeShell,
+    });
+    expect(result.kind).toBe("refuse");
+    if (result.kind === "refuse") {
+      expect(result.reason).toBe("pty_unavailable");
+      expect(result.exitCode).toBe(1);
+    }
+  });
+
+  it("refuses pty_unavailable (fail-closed) when the loader throws", async () => {
+    const result = await evaluatePtyPreconditions({
+      hasInteractiveTty: () => true,
+      loadPtyModule: async () => {
+        throw new Error("native binding blew up");
+      },
+      resolveHostShell: () => fakeShell,
+    });
+    expect(result.kind).toBe("refuse");
+    if (result.kind === "refuse") {
+      expect(result.reason).toBe("pty_unavailable");
+      expect(result.exitCode).toBe(1);
+    }
+  });
+
+  it("refuses no_shell when no suitable shell resolves", async () => {
+    const result = await evaluatePtyPreconditions({
+      hasInteractiveTty: () => true,
+      loadPtyModule: async () => fakePty,
+      resolveHostShell: () => null,
+    });
+    expect(result.kind).toBe("refuse");
+    if (result.kind === "refuse") {
+      expect(result.reason).toBe("no_shell");
+      expect(result.exitCode).toBe(1);
+    }
+  });
+
+  it("checks the PTY module before the shell (pty_unavailable short-circuits no_shell)", async () => {
+    let shellCalls = 0;
+
+    const result = await evaluatePtyPreconditions({
+      hasInteractiveTty: () => true,
+      loadPtyModule: async () => null,
+      resolveHostShell: () => {
+        shellCalls += 1;
+        return null;
+      },
+    });
+
+    expect(result.kind).toBe("refuse");
+    if (result.kind === "refuse") {
+      expect(result.reason).toBe("pty_unavailable");
+    }
+    expect(shellCalls).toBe(0);
+  });
+
+  it("proceeds with the loaded PTY module and resolved shell when all checks pass", async () => {
+    const result = await evaluatePtyPreconditions({
+      hasInteractiveTty: () => true,
+      loadPtyModule: async () => fakePty,
+      resolveHostShell: () => fakeShell,
+    });
+    expect(result.kind).toBe("proceed");
+    if (result.kind === "proceed") {
+      expect(result.pty).toBe(fakePty);
+      expect(result.shell).toEqual(fakeShell);
+    }
   });
 });

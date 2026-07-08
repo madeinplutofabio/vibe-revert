@@ -2567,12 +2567,16 @@ describe("Architectural invariants -- M G1a D99.M @viberevert/cli-commands bound
       "createHostExecutablePathResolver",
       "createHostExecutableProbe",
       "ExecutableProbeDeps",
-      // PTY engine internals (M G4 Step 3c, D104.C) -- the engine's host shell
-      // resolution + types, consumed only within the engine; internal until the
-      // guarded `--pty` path is wired (Step 3d/4).
+      // PTY engine internals (M G4 Step 3c, D104.C/G) -- the engine's host shell
+      // resolution + pre-spawn precondition gate + types, consumed only within
+      // the engine; internal until the guarded `--pty` path is wired (Step 3d/4).
       "resolveHostInteractiveShell",
       "ResolvedInteractiveShell",
       "HostShellResolutionDeps",
+      "evaluatePtyPreconditions",
+      "PtyPreconditionResult",
+      "PtyPreconditionDeps",
+      "PtyPreconditionRefusalReason",
     ];
     for (const symbol of FORBIDDEN_ABSENT) {
       expect(
