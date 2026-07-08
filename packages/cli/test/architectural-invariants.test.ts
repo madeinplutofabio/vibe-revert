@@ -2551,6 +2551,14 @@ describe("Architectural invariants -- M G1a D99.M @viberevert/cli-commands bound
       "PtySpawnOptions",
       "PtyDisposable",
       "PtyImporter",
+      // interactive-shell resolver internals (M G4 Step 3a, D104.N) -- the
+      // pure shell-selection contract consumed only by the PTY engine
+      // (shell-pty.ts, Step 3); internal until it owns the public path.
+      "resolveInteractiveShell",
+      "ShellKind",
+      "ResolvedShell",
+      "ShellResolverEnv",
+      "ShellResolverInput",
     ];
     for (const symbol of FORBIDDEN_ABSENT) {
       expect(
@@ -6291,6 +6299,46 @@ describe("Architectural invariants -- M G4 viberevert shell --pty PTY bridge (D1
     expect(
       workspaceYaml.includes("onlyBuiltDependencies"),
       "pnpm-workspace.yaml must NOT set onlyBuiltDependencies -- node-pty build scripts stay unapproved (D104.M.6).",
+    ).toBe(false);
+  });
+});
+
+describe("Architectural invariant -- M G4 shell resolver purity (D104.N)", () => {
+  const RESOLVER_REL = "packages/cli-commands/src/commands/shell-resolver.ts";
+
+  it("D104.N: shell-resolver.ts is pure -- no node-pty, child_process, fs, process.*, or spawning", () => {
+    const stripped = stripTsComments(readSource(RESOLVER_REL));
+
+    // No native-dep import (also covered globally by D104.M.1; reasserted here).
+    expect(
+      stripped.includes("node-pty"),
+      `${RESOLVER_REL} must not reference node-pty -- the resolver is pure (D104.N).`,
+    ).toBe(false);
+
+    // No process-spawning or filesystem imports.
+    const childProcessImport = /["'](?:node:)?child_process["']/;
+    expect(
+      childProcessImport.test(stripped),
+      `${RESOLVER_REL} must not import child_process -- the resolver never spawns (D104.N).`,
+    ).toBe(false);
+    const fsImport = /["'](?:node:)?fs(?:\/promises)?["']/;
+    expect(
+      fsImport.test(stripped),
+      `${RESOLVER_REL} must not import fs -- the resolver does no filesystem access (D104.N).`,
+    ).toBe(false);
+
+    // No ambient host reads of ANY process.* -- platform/env arrive injected.
+    const ambientProcessRead = /\bprocess\./;
+    expect(
+      ambientProcessRead.test(stripped),
+      `${RESOLVER_REL} must not read process.* -- host facts are injected (D104.N).`,
+    ).toBe(false);
+
+    // No process spawning of any form.
+    const spawnLike = /\b(?:spawnSync|spawn|execFileSync|execFile|execSync|exec|fork)\s*\(/;
+    expect(
+      spawnLike.test(stripped),
+      `${RESOLVER_REL} must not spawn a process -- resolution is pure decision logic (D104.N).`,
     ).toBe(false);
   });
 });

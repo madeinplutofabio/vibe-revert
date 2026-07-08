@@ -193,6 +193,15 @@ export { RuntimeEnvInvalidError } from "./runtime-env.js";
 //       Exporting any of it would create a public API surface around an
 //       optional native dependency.
 //
+//   - resolveInteractiveShell,
+//     ShellKind (type), ResolvedShell (type),
+//     ShellResolverEnv (type),
+//     ShellResolverInput (type)             (from ./commands/shell-resolver.js)
+//     → M G4 Step 3a (D104.N): pure interactive-shell resolver. Intentionally
+//       internal until the PTY engine (shell-pty.ts, Step 3) owns the public
+//       `shell --pty` path; exporting would freeze the shell-selection
+//       contract as public API before it is used.
+//
 //   - All file-internal helpers in operations/*.ts (readReportBytes,
 //     parseReportFile, assertSourceReportUnchanged, removeStaleFixPrompt,
 //     persistFixPrompt, formatCause, etc.)
