@@ -2559,6 +2559,14 @@ describe("Architectural invariants -- M G1a D99.M @viberevert/cli-commands bound
       "ResolvedShell",
       "ShellResolverEnv",
       "ShellResolverInput",
+      // executable path resolver / probe internals (M G4 Step 3b, D104.N) --
+      // the fs/PATH host seam consumed only by the PTY engine (shell-pty.ts,
+      // Step 3); internal until it owns the public path.
+      "createExecutablePathResolver",
+      "createExecutableProbe",
+      "createHostExecutablePathResolver",
+      "createHostExecutableProbe",
+      "ExecutableProbeDeps",
     ];
     for (const symbol of FORBIDDEN_ABSENT) {
       expect(
@@ -6339,6 +6347,26 @@ describe("Architectural invariant -- M G4 shell resolver purity (D104.N)", () =>
     expect(
       spawnLike.test(stripped),
       `${RESOLVER_REL} must not spawn a process -- resolution is pure decision logic (D104.N).`,
+    ).toBe(false);
+  });
+});
+
+describe("Architectural invariant -- M G4 executable probe never spawns", () => {
+  const PROBE_REL = "packages/cli-commands/src/commands/executable-probe.ts";
+
+  it("executable-probe.ts resolves via PATH only -- no child_process / spawn / which / where", () => {
+    const stripped = stripTsComments(readSource(PROBE_REL));
+
+    const childProcessImport = /["'](?:node:)?child_process["']/;
+    expect(
+      childProcessImport.test(stripped),
+      `${PROBE_REL} must not import child_process -- the probe never spawns (M G4 Step 3b).`,
+    ).toBe(false);
+
+    const spawnLike = /\b(?:spawnSync|spawn|execFileSync|execFile|execSync|exec|fork)\s*\(/;
+    expect(
+      spawnLike.test(stripped),
+      `${PROBE_REL} must not spawn a process -- availability is a PATH scan, not a child process (M G4 Step 3b).`,
     ).toBe(false);
   });
 });

@@ -202,6 +202,14 @@ export { RuntimeEnvInvalidError } from "./runtime-env.js";
 //       `shell --pty` path; exporting would freeze the shell-selection
 //       contract as public API before it is used.
 //
+//   - createExecutablePathResolver, createExecutableProbe,
+//     createHostExecutablePathResolver, createHostExecutableProbe,
+//     ExecutableProbeDeps (type)            (from ./commands/executable-probe.js)
+//     → M G4 Step 3b (D104.N): the fs/PATH host seam for shell resolution
+//       (path resolver + boolean probe). Internal until the PTY engine
+//       (shell-pty.ts, Step 3) owns the public path; exporting would freeze
+//       the executable-resolution contract as public API before it is used.
+//
 //   - All file-internal helpers in operations/*.ts (readReportBytes,
 //     parseReportFile, assertSourceReportUnchanged, removeStaleFixPrompt,
 //     persistFixPrompt, formatCause, etc.)
