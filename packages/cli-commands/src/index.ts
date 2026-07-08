@@ -210,6 +210,13 @@ export { RuntimeEnvInvalidError } from "./runtime-env.js";
 //       (shell-pty.ts, Step 3) owns the public path; exporting would freeze
 //       the executable-resolution contract as public API before it is used.
 //
+//   - resolveHostInteractiveShell,
+//     ResolvedInteractiveShell (type),
+//     HostShellResolutionDeps (type)        (from ./commands/shell-pty.js)
+//     → M G4 Step 3c (D104.C): the PTY engine's host shell resolution (piece
+//       i). Internal until the engine is wired behind the guarded `--pty` path
+//       (Step 3d/4); exporting would surface engine internals as public API.
+//
 //   - All file-internal helpers in operations/*.ts (readReportBytes,
 //     parseReportFile, assertSourceReportUnchanged, removeStaleFixPrompt,
 //     persistFixPrompt, formatCause, etc.)

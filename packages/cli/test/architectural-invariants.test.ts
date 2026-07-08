@@ -2567,6 +2567,12 @@ describe("Architectural invariants -- M G1a D99.M @viberevert/cli-commands bound
       "createHostExecutablePathResolver",
       "createHostExecutableProbe",
       "ExecutableProbeDeps",
+      // PTY engine internals (M G4 Step 3c, D104.C) -- the engine's host shell
+      // resolution + types, consumed only within the engine; internal until the
+      // guarded `--pty` path is wired (Step 3d/4).
+      "resolveHostInteractiveShell",
+      "ResolvedInteractiveShell",
+      "HostShellResolutionDeps",
     ];
     for (const symbol of FORBIDDEN_ABSENT) {
       expect(
@@ -6367,6 +6373,65 @@ describe("Architectural invariant -- M G4 executable probe never spawns", () => 
     expect(
       spawnLike.test(stripped),
       `${PROBE_REL} must not spawn a process -- availability is a PATH scan, not a child process (M G4 Step 3b).`,
+    ).toBe(false);
+  });
+});
+
+describe("Architectural invariants -- M G4 PTY engine boundaries (shell-pty.ts)", () => {
+  const SHELL_PTY_REL = "packages/cli-commands/src/commands/shell-pty.ts";
+  const SHELL_REL = "packages/cli-commands/src/commands/shell.ts";
+
+  it("shell.ts does not import or reference shell-pty.ts (engine unwired in 3c)", () => {
+    const stripped = stripTsComments(readSource(SHELL_REL));
+    expect(
+      stripped.includes("shell-pty"),
+      `${SHELL_REL} must not reference shell-pty.ts -- the PTY engine stays unwired until interception lands (M G4 Step 3c).`,
+    ).toBe(false);
+  });
+
+  it("shell.ts has no --pty flag yet (no public PTY path before interception)", () => {
+    const stripped = stripTsComments(readSource(SHELL_REL));
+    expect(
+      stripped.includes("--pty"),
+      `${SHELL_REL} must not declare a --pty flag yet -- public --pty (refusing) lands in Step 3d/4, not 3c (M G4 Step 3c).`,
+    ).toBe(false);
+  });
+
+  it("shell-pty.ts references node-pty only via pty-loader, never directly", () => {
+    const stripped = stripTsComments(readSource(SHELL_PTY_REL));
+    expect(
+      stripped.includes("node-pty"),
+      `${SHELL_PTY_REL} must not reference node-pty directly -- it may reach node-pty ONLY via pty-loader's loadPtyModule (D104.M.1 / M G4 Step 3c).`,
+    ).toBe(false);
+  });
+
+  it("shell-pty.ts writes no process std stream / exit / console (routes via this.context, D104.M.4)", () => {
+    const stripped = stripTsComments(readSource(SHELL_PTY_REL));
+    for (const token of [
+      "process.stdout",
+      "process.stderr",
+      "process.stdin",
+      "process.exit",
+      "console.",
+    ]) {
+      expect(
+        stripped.includes(token),
+        `${SHELL_PTY_REL} must not use "${token}" -- the engine routes all I/O through this.context (D104.M.4 / M G4 Step 3c). process.platform/process.env reads are allowed.`,
+      ).toBe(false);
+    }
+  });
+
+  it("shell-pty.ts has no env-flag escape hatch to enable the engine", () => {
+    const stripped = stripTsComments(readSource(SHELL_PTY_REL));
+    // No env var that would toggle/bypass the engine's gating (e.g. an
+    // ENABLE_PTY / ALLOW_UNGUARDED_PTY style flag). The engine is reachable only
+    // via a real code dispatch, never a runtime env toggle. (Belt-and-suspenders
+    // with the two shell.ts invariants above, which already make it unreachable.)
+    const enablePtyFlag =
+      /(?:ENABLE|ALLOW|FORCE|BYPASS)[A-Z0-9_]*PTY|PTY[A-Z0-9_]*(?:ENABLE|ALLOW)/i;
+    expect(
+      enablePtyFlag.test(stripped),
+      `${SHELL_PTY_REL} must have no env-flag escape hatch to enable the PTY engine (M G4 Step 3c).`,
     ).toBe(false);
   });
 });
