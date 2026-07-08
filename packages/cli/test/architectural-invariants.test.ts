@@ -2541,6 +2541,16 @@ describe("Architectural invariants -- M G1a D99.M @viberevert/cli-commands bound
       // freeze the v1 tokenizing semantics as public API.
       "tokenizeShellLine",
       "TokenizeResult",
+      // node-pty loader seam internals (M G4 Step 2, D104.D / D104.M.1) --
+      // the OPTIONAL native-dep loader consumed only by the PTY engine
+      // (shell-pty.ts, Step 3); barrel-exporting any of it would create a
+      // public API surface around an optional native dependency.
+      "loadPtyModule",
+      "PtyModule",
+      "PtyProcess",
+      "PtySpawnOptions",
+      "PtyDisposable",
+      "PtyImporter",
     ];
     for (const symbol of FORBIDDEN_ABSENT) {
       expect(
@@ -5956,10 +5966,11 @@ describe("Architectural invariants -- M G2 viberevert run wrapper (D102.M)", () 
 //     node:fs/promises: core's appendCommandsLogEntry stays the single
 //     commands.log writer (defense-in-depth with D102.M.4, which already
 //     bans that import workspace-wide).
-//   - D103.M.6 -- no native terminal-bridge dependency: no package
-//     manifest nor pnpm-lock.yaml may contain `node-pty` (pins the
-//     "no native dependency" decision; the full terminal bridge is
-//     deferred to G4).
+//   - D103.M.6 -- node-pty scoped to cli-commands optionalDependencies only
+//     (AMENDED for M G4 / D104.D): node-pty may appear ONLY as an
+//     optionalDependencies entry of packages/cli-commands/package.json and
+//     in the resulting pnpm-lock.yaml -- never in the root manifest, any
+//     other package manifest, or a regular dependency section.
 //   - D103.M.7 -- shell.ts uses exactly one readline interface and the
 //     async iterator line source; no rl.question, AbortController,
 //     readline/promises, line-event queue, or raw process stdin/stdout.
@@ -6080,15 +6091,36 @@ describe("Architectural invariants -- M G3 viberevert shell guarded REPL (D103.M
     ).toBe(false);
   });
 
-  it("D103.M.6: no native terminal-bridge dependency -- no package manifest or pnpm-lock.yaml contains node-pty", () => {
-    // Pins the "no native dependency" G3 decision. The full transparent
-    // terminal bridge (node-pty / ConPTY) is deferred to G4; until then
-    // node-pty must not appear in any manifest or the lockfile.
-    const manifestRels = ["package.json", "pnpm-lock.yaml"];
-    for (const pkg of readdirSync(join(REPO_ROOT, "packages"))) {
-      manifestRels.push(`packages/${pkg}/package.json`);
+  it("D103.M.6: node-pty is scoped to cli-commands optionalDependencies -- absent from every other manifest (AMENDED for G4)", () => {
+    // AMENDED for M G4 (D104.D): the transparent PTY bridge (`shell --pty`)
+    // introduces node-pty as an OPTIONAL dependency of @viberevert/cli-commands.
+    // node-pty may appear ONLY there (under optionalDependencies) and in the
+    // resulting pnpm-lock.yaml -- NOT in the root manifest, any other package
+    // manifest, or a regular dependency section of cli-commands.
+    const OWNER_REL = "packages/cli-commands/package.json";
+
+    // 1. The owner lists node-pty under optionalDependencies, and nowhere else.
+    const ownerPkg = JSON.parse(readSource(OWNER_REL));
+    expect(
+      ownerPkg.optionalDependencies?.["node-pty"],
+      `${OWNER_REL} must list node-pty under optionalDependencies (D103.M.6 scoped allow / D104.D).`,
+    ).toBeDefined();
+    for (const section of ["dependencies", "devDependencies", "peerDependencies"]) {
+      expect(
+        ownerPkg[section]?.["node-pty"],
+        `${OWNER_REL} must NOT list node-pty under ${section} -- it is optional-only (D103.M.6 / D104.D).`,
+      ).toBeUndefined();
     }
-    for (const rel of manifestRels) {
+
+    // 2. No OTHER manifest (root or any workspace package) mentions node-pty.
+    //    pnpm-lock.yaml is intentionally excluded -- it MUST carry the resolved
+    //    optional entry.
+    const otherManifestRels = ["package.json"];
+    for (const pkg of readdirSync(join(REPO_ROOT, "packages"))) {
+      const rel = `packages/${pkg}/package.json`;
+      if (rel !== OWNER_REL) otherManifestRels.push(rel);
+    }
+    for (const rel of otherManifestRels) {
       let raw: string;
       try {
         raw = readFileSync(join(REPO_ROOT, rel), "utf8");
@@ -6097,7 +6129,7 @@ describe("Architectural invariants -- M G3 viberevert shell guarded REPL (D103.M
       }
       expect(
         raw.includes("node-pty"),
-        `${rel} must not contain "node-pty" -- no native terminal-bridge dependency in G3 (D103.M.6).`,
+        `${rel} must not contain "node-pty" -- it is scoped to ${OWNER_REL} optionalDependencies only (D103.M.6 / D104.D).`,
       ).toBe(false);
     }
   });
@@ -6150,5 +6182,115 @@ describe("Architectural invariants -- M G3 viberevert shell guarded REPL (D103.M
       stripped.includes("appendCommandsLogEntry"),
       `${SHELL_COMMAND_REL} must append commands.log through core's appendCommandsLogEntry (D103.M.8).`,
     ).toBe(true);
+  });
+});
+
+// =============================================================================
+// Architectural invariants -- M G4 viberevert shell --pty PTY bridge (D104.M)
+// =============================================================================
+//
+// Step 2 subset (the native-dependency seam). Steps 3+ add D104.M.3/M.4/M.5.
+//
+//   - D104.M.1 -- node-pty is referenced ONLY by pty-loader.ts within
+//     cli-commands/src; no other src file (shell.ts, the future
+//     shell-pty.ts, ...) imports or mentions it -- the native-dep seam is
+//     one tiny file.
+//   - D104.M.2 -- pty-loader.ts imports node-pty DYNAMICALLY
+//     (`import("node-pty")`) only; never a static `import ... from
+//     "node-pty"` / re-export, a side-effect `import "node-pty"`, nor
+//     `require("node-pty")`, so a missing optional dep can never crash
+//     module load / the whole CLI.
+//   - D104.M.6 -- node-pty build scripts are never APPROVED: no
+//     `pnpm.onlyBuiltDependencies` (root package.json) and no
+//     `onlyBuiltDependencies` in pnpm-workspace.yaml. node-pty loads from
+//     bundled prebuilds with build scripts ignored; the "Ignored build
+//     scripts" install warning is expected, not a failure.
+
+describe("Architectural invariants -- M G4 viberevert shell --pty PTY bridge (D104.M)", () => {
+  const PTY_LOADER_REL = "packages/cli-commands/src/commands/pty-loader.ts";
+  const CLI_COMMANDS_SRC = "packages/cli-commands/src";
+
+  it("D104.M.1: node-pty is referenced ONLY by pty-loader.ts within cli-commands/src", () => {
+    const srcAbs = join(REPO_ROOT, CLI_COMMANDS_SRC);
+    const files = findTsFiles(srcAbs);
+    expect(
+      files.length,
+      `Self-check: expected at least one .ts file under ${CLI_COMMANDS_SRC}.`,
+    ).toBeGreaterThan(0);
+
+    let ownerSeen = false;
+    for (const abs of files) {
+      const rel = relative(REPO_ROOT, abs).replace(/\\/g, "/");
+      const stripped = stripTsComments(readFileSync(abs, "utf8")).toLowerCase();
+      const mentionsNodePty = stripped.includes("node-pty");
+      if (rel === PTY_LOADER_REL) {
+        ownerSeen = true;
+        expect(
+          mentionsNodePty,
+          `${PTY_LOADER_REL} is the sole node-pty seam and must reference it (D104.M.1).`,
+        ).toBe(true);
+        continue;
+      }
+      expect(
+        mentionsNodePty,
+        `${rel} must NOT reference node-pty -- the loader (${PTY_LOADER_REL}) is the only seam (D104.M.1).`,
+      ).toBe(false);
+    }
+    expect(ownerSeen, `Self-check: ${PTY_LOADER_REL} must exist and be scanned (D104.M.1).`).toBe(
+      true,
+    );
+  });
+
+  it("D104.M.2: pty-loader.ts imports node-pty DYNAMICALLY only -- no static import/require", () => {
+    const stripped = stripTsComments(readSource(PTY_LOADER_REL));
+
+    expect(
+      /\bimport\s*\(\s*["']node-pty["']\s*\)/.test(stripped),
+      `${PTY_LOADER_REL} must dynamic-import("node-pty") (D104.M.2).`,
+    ).toBe(true);
+
+    const staticFromNodePty = /\bfrom\s*["']node-pty["']/;
+    expect(
+      staticFromNodePty.test(stripped),
+      `${PTY_LOADER_REL} must NOT statically import/re-export from "node-pty" -- a missing optional dep would crash module load (D104.M.2).`,
+    ).toBe(false);
+
+    const sideEffectImport = /\bimport\s+["']node-pty["']/;
+    expect(
+      sideEffectImport.test(stripped),
+      `${PTY_LOADER_REL} must NOT side-effect import "node-pty" -- a missing optional dep would crash module load (D104.M.2).`,
+    ).toBe(false);
+
+    const requireForm = /\brequire\s*\(\s*["']node-pty["']\s*\)/;
+    expect(
+      requireForm.test(stripped),
+      `${PTY_LOADER_REL} must NOT require("node-pty") (D104.M.2).`,
+    ).toBe(false);
+  });
+
+  it("D104.M.6: node-pty build scripts are never approved -- no onlyBuiltDependencies / approve-builds", () => {
+    // Decided B (2026-07-08): node-pty ships bundled prebuilds and its build
+    // scripts stay IGNORED. The repo must not approve them via pnpm's
+    // onlyBuiltDependencies (package.json `pnpm` field OR pnpm-workspace.yaml)
+    // or `pnpm approve-builds`. The "Ignored build scripts" install warning is
+    // expected and acceptable; approving a build script is the regression.
+    const rootPkg = JSON.parse(readSource("package.json"));
+    expect(
+      rootPkg.pnpm?.onlyBuiltDependencies,
+      "Root package.json must NOT set pnpm.onlyBuiltDependencies -- node-pty build scripts stay unapproved (D104.M.6).",
+    ).toBeUndefined();
+
+    // pnpm 10 also reads build-script policy from pnpm-workspace.yaml; guard
+    // that location too (raw substring is enough -- no YAML parser needed).
+    let workspaceYaml = "";
+    try {
+      workspaceYaml = readFileSync(join(REPO_ROOT, "pnpm-workspace.yaml"), "utf8");
+    } catch {
+      workspaceYaml = "";
+    }
+    expect(
+      workspaceYaml.includes("onlyBuiltDependencies"),
+      "pnpm-workspace.yaml must NOT set onlyBuiltDependencies -- node-pty build scripts stay unapproved (D104.M.6).",
+    ).toBe(false);
   });
 });

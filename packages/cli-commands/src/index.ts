@@ -184,6 +184,15 @@ export { RuntimeEnvInvalidError } from "./runtime-env.js";
 //       by ShellCommand; exporting would freeze the v1 tokenizing
 //       semantics as public API.
 //
+//   - loadPtyModule,
+//     PtyModule (type), PtyProcess (type),
+//     PtySpawnOptions (type), PtyDisposable (type),
+//     PtyImporter (type)                    (from ./commands/pty-loader.js)
+//     → M G4 Step 2 (D104.D / D104.M.1): the OPTIONAL node-pty native-dep
+//       loader seam, consumed only by the PTY engine (shell-pty.ts, Step 3).
+//       Exporting any of it would create a public API surface around an
+//       optional native dependency.
+//
 //   - All file-internal helpers in operations/*.ts (readReportBytes,
 //     parseReportFile, assertSourceReportUnchanged, removeStaleFixPrompt,
 //     persistFixPrompt, formatCause, etc.)
