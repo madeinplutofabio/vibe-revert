@@ -2,14 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PTY engine for `viberevert shell --pty` (M G4 Step 3c, D104.C/N/G).
+ * PTY engine for `viberevert shell --pty` (M G4 Step 3c, D104.C/N/G/I).
  *
  * Built incrementally across 3c pieces: host shell RESOLUTION
- * (`resolveHostInteractiveShell`) and the pre-spawn PRECONDITION gate
- * (`evaluatePtyPreconditions`) live here; the PTY lifecycle (spawn / raw
- * passthrough / resize / D104.I teardown) and `runPtyShell` follow. Until the
- * engine is wired behind the guarded `--pty` path (Step 3d/4) this file is
- * reachable only by tests.
+ * (`resolveHostInteractiveShell`), the pre-spawn PRECONDITION gate
+ * (`evaluatePtyPreconditions`), and the raw TERMINAL BRIDGE
+ * (`attachTerminalBridge`) live here; the `runPtyShell` orchestration (default
+ * deps, session machinery, real `pty.spawn`) follows. Until the engine is wired
+ * behind the guarded `--pty` path (Step 3d/4) this file is reachable only by
+ * tests.
  *
  * Boundaries (enforced by invariants): this file reaches the native PTY module
  * ONLY via pty-loader's `loadPtyModule` (never the package name directly),
@@ -46,10 +47,29 @@
  * the loaded PTY module + resolved shell). Session-level refusals (session
  * already active, repo/config) come later from the reused G3 session machinery,
  * not this gate.
+ *
+ * --- Terminal bridge (D104.I) ---
+ *
+ * `attachTerminalBridge` wires a raw transparent passthrough between the
+ * terminal streams and a spawned PTY: stdin (raw) -> pty.write; pty.onData ->
+ * stdout.write; stdout resize -> pty.resize (guarded, plus one initial resize);
+ * pty.onExit -> settles `waitForExit()` AND auto-disposes (so the terminal is
+ * restored the instant the child exits, even if the caller forgets). Every
+ * post-setup handler is wrapped so a throw (e.g. `pty.write` on a dead child)
+ * disposes the bridge rather than escaping uncaught and stranding raw mode.
+ * Setup is TRANSACTIONAL (a failing wire undoes what succeeded before throwing,
+ * and raw restoration is attempted whenever the toggle was even begun).
+ * Teardown (`dispose()`) runs an EXPLICIT ordered sequence (restore raw mode
+ * FIRST, kill child LAST), attempts every step even if one throws, never throws,
+ * is idempotent (cached result), and settles `waitForExit()` with a
+ * deterministic fallback if the child had not exited (so it can never hang).
+ * All handlers go inert after `dispose()`. It touches only the passed streams
+ * (never `process.std*`) and installs no signal handlers (in raw mode Ctrl-C is
+ * a byte to the pty; process-signal cleanup is `runPtyShell`'s concern).
  */
 
 import { createHostExecutablePathResolver } from "./executable-probe.js";
-import type { PtyModule } from "./pty-loader.js";
+import type { PtyDisposable, PtyModule, PtyProcess } from "./pty-loader.js";
 import {
   resolveInteractiveShell,
   type ShellKind,
@@ -224,4 +244,228 @@ export async function evaluatePtyPreconditions(
   }
 
   return { kind: "proceed", pty, shell };
+}
+
+/** The PTY child's exit event (`signal` required so `undefined` assigns cleanly). */
+export interface PtyExitResult {
+  readonly exitCode: number;
+  readonly signal: number | undefined;
+}
+
+/** Teardown outcome: any errors from cleanup steps (`dispose()` never throws). */
+export interface TerminalBridgeDisposeResult {
+  readonly errors: readonly unknown[];
+}
+
+/** A live terminal bridge: await the child's exit, then idempotently tear down. */
+export interface TerminalBridge {
+  /**
+   * Resolves with the child's real exit event, or -- if the bridge is disposed
+   * first (explicitly or via a handler failure) -- a deterministic fallback so
+   * it can never hang.
+   */
+  waitForExit(): Promise<PtyExitResult>;
+  /**
+   * Idempotent teardown in an explicit order (restore raw mode FIRST, kill the
+   * child LAST). Attempts EVERY step even if one throws, never throws, and
+   * returns the collected errors (cached, so repeats return the same result
+   * without re-running cleanup).
+   */
+  dispose(): TerminalBridgeDisposeResult;
+}
+
+/** The exact stdin/stdout surface the bridge drives (this.context.* in prod). */
+export interface PtyBridgeStreams {
+  readonly stdin: {
+    readonly isRaw?: boolean;
+    setRawMode(mode: boolean): void;
+    on(event: "data", listener: (data: Buffer | string) => void): void;
+    removeListener(event: "data", listener: (data: Buffer | string) => void): void;
+  };
+  readonly stdout: {
+    readonly columns?: number;
+    readonly rows?: number;
+    write(data: string): void;
+    on(event: "resize", listener: () => void): void;
+    removeListener(event: "resize", listener: () => void): void;
+  };
+}
+
+/** Deterministic exit used when the bridge is disposed before the child exits. */
+const DISPOSE_FALLBACK_EXIT: PtyExitResult = { exitCode: 1, signal: undefined };
+
+/** A usable PTY dimension: a positive finite integer. */
+function isUsableDimension(value: number | undefined): value is number {
+  return value !== undefined && Number.isInteger(value) && value > 0;
+}
+
+/** Run every cleanup in the given order, collecting (never throwing) any errors. */
+function runCleanups(cleanups: readonly (() => void)[]): unknown[] {
+  const errors: unknown[] = [];
+  for (const cleanup of cleanups) {
+    try {
+      cleanup();
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  return errors;
+}
+
+/**
+ * Wire a raw transparent passthrough between the terminal `streams` and a
+ * spawned `pty` (D104.I). See the module header for the full contract:
+ * auto-dispose on exit, wrapped handlers, transactional setup, explicit-ordered
+ * idempotent non-throwing teardown, deterministic `waitForExit()`,
+ * inert-after-dispose.
+ */
+export function attachTerminalBridge(streams: PtyBridgeStreams, pty: PtyProcess): TerminalBridge {
+  const { stdin, stdout } = streams;
+
+  let disposed = false;
+  let exited = false;
+  let disposeResult: TerminalBridgeDisposeResult | null = null;
+  const bridgeErrors: unknown[] = [];
+
+  let settleExit: (result: PtyExitResult) => void = () => undefined;
+  const exitPromise = new Promise<PtyExitResult>((resolve) => {
+    settleExit = resolve;
+  });
+
+  // Wired resources, recorded as setup progresses so teardown only undoes what
+  // was actually wired (partial-attach rollback + explicit teardown order).
+  // `rawRestoreNeeded` is set BEFORE the setRawMode(true) attempt, so a partial
+  // toggle that throws is still rolled back.
+  let rawRestoreNeeded = false;
+  let previousRaw = false;
+  let onStdinData: ((data: Buffer | string) => void) | undefined;
+  let onResize: (() => void) | undefined;
+  let dataSub: PtyDisposable | undefined;
+  let exitSub: PtyDisposable | undefined;
+
+  const applyResize = (): void => {
+    if (disposed) {
+      return;
+    }
+    const { columns, rows } = stdout;
+    if (isUsableDimension(columns) && isUsableDimension(rows)) {
+      pty.resize(columns, rows);
+    }
+  };
+
+  const disposeBridge = (): TerminalBridgeDisposeResult => {
+    if (disposeResult !== null) {
+      return disposeResult;
+    }
+    disposed = true;
+    if (!exited) {
+      settleExit(DISPOSE_FALLBACK_EXIT);
+    }
+
+    // Explicit teardown order: raw mode FIRST (most important), then listeners,
+    // then subscriptions, then kill LAST. Each step is guarded by whether it was
+    // actually wired and run best-effort by runCleanups.
+    const ordered: (() => void)[] = [];
+    if (rawRestoreNeeded) {
+      ordered.push(() => stdin.setRawMode(previousRaw));
+    }
+    const stdinHandler = onStdinData;
+    if (stdinHandler !== undefined) {
+      ordered.push(() => stdin.removeListener("data", stdinHandler));
+    }
+    const resizeHandler = onResize;
+    if (resizeHandler !== undefined) {
+      ordered.push(() => stdout.removeListener("resize", resizeHandler));
+    }
+    const dataSubscription = dataSub;
+    if (dataSubscription !== undefined) {
+      ordered.push(() => dataSubscription.dispose());
+    }
+    const exitSubscription = exitSub;
+    if (exitSubscription !== undefined) {
+      ordered.push(() => exitSubscription.dispose());
+    }
+    if (!exited) {
+      ordered.push(() => pty.kill());
+    }
+
+    disposeResult = { errors: [...bridgeErrors, ...runCleanups(ordered)] };
+    return disposeResult;
+  };
+
+  /** A post-setup handler threw: record it and tear the bridge down. */
+  const failBridge = (error: unknown): void => {
+    if (disposed) {
+      return;
+    }
+    bridgeErrors.push(error);
+    disposeBridge();
+  };
+
+  try {
+    previousRaw = stdin.isRaw ?? false;
+    rawRestoreNeeded = true;
+    stdin.setRawMode(true);
+
+    onStdinData = (data) => {
+      if (disposed) {
+        return;
+      }
+      try {
+        const chunk = Buffer.isBuffer(data) ? data.toString("utf8") : String(data);
+        pty.write(chunk);
+      } catch (error) {
+        failBridge(error);
+      }
+    };
+    stdin.on("data", onStdinData);
+
+    dataSub = pty.onData((data) => {
+      if (disposed) {
+        return;
+      }
+      try {
+        stdout.write(data);
+      } catch (error) {
+        failBridge(error);
+      }
+    });
+
+    onResize = () => {
+      if (disposed) {
+        return;
+      }
+      try {
+        applyResize();
+      } catch (error) {
+        failBridge(error);
+      }
+    };
+    stdout.on("resize", onResize);
+
+    exitSub = pty.onExit((event) => {
+      if (disposed) {
+        return;
+      }
+      exited = true;
+      settleExit({ exitCode: event.exitCode, signal: event.signal });
+      // Auto-dispose so the terminal is restored the instant the child exits
+      // (exited === true, so this restores raw mode / listeners / subs without
+      // settling the fallback or killing). A later caller dispose() is cached.
+      disposeBridge();
+    });
+
+    // Size the child once now, from the current dimensions (if valid).
+    applyResize();
+  } catch (error) {
+    // Transactional rollback: mark inert, undo whatever was wired, then rethrow.
+    disposed = true;
+    disposeBridge();
+    throw error;
+  }
+
+  return {
+    waitForExit: () => exitPromise,
+    dispose: disposeBridge,
+  };
 }
