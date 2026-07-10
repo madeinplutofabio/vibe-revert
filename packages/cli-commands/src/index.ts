@@ -226,12 +226,22 @@ export { RuntimeEnvInvalidError } from "./runtime-env.js";
 //     RunPtyShellDeps (type),
 //     PtyShellContext (type),
 //     PtyShellSession (type),
-//     PtyShellSessionOpen (type)            (from ./commands/shell-pty.js)
-//     → M G4 Step 3c (D104.C/G/I/J): the PTY engine's host shell resolution,
-//       pre-spawn precondition gate, raw terminal bridge, and runPtyShell
-//       orchestration. Internal until the engine is wired behind the guarded
-//       `--pty` path (Step 3d/4); exporting would surface engine internals as
-//       public API.
+//     PtyShellSessionOpen (type),
+//     PtyShellSessionClose (type),
+//     createG3BackedPtyShellSession,
+//     G3BackedPtyShellSessionOps (type),
+//     CreateG3BackedPtyShellSessionArgs (type),
+//     createScopedSignalCleanup,
+//     SignalSource (type),
+//     createRunPtyShellDeps,
+//     CreateRunPtyShellDepsOptions (type),
+//     RunPtyShellFactoryContext (type)      (from ./commands/shell-pty.js)
+//     → M G4 Step 3c (D104.C/F/G/I/J/N): the PTY engine's host shell
+//       resolution, pre-spawn precondition gate, raw terminal bridge,
+//       runPtyShell orchestration, and the real deps factory + G3-backed
+//       session adapter + scoped signal cleanup. Internal until the engine is
+//       wired behind the guarded `--pty` path (Step 3d/4); exporting would
+//       surface engine internals as public API.
 //
 //   - All file-internal helpers in operations/*.ts (readReportBytes,
 //     parseReportFile, assertSourceReportUnchanged, removeStaleFixPrompt,

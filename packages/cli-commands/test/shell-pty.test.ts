@@ -3,10 +3,17 @@
 
 // Unit tests for the PTY engine: host wiring, precondition gate, and the raw
 // terminal bridge (M G4 Step 3c). All take injected deps / fake streams+pty --
-// deterministic, no real node-pty / TTY / fs.
+// deterministic, no live PTY / native PTY module / TTY / fs.
 
+import {
+  ConfigNotFoundError,
+  ConfigParseError,
+  ConfigValidationError,
+  NoActiveSessionError,
+  RepoRootNotFoundError,
+  SessionAlreadyActiveError,
+} from "@viberevert/core";
 import { describe, expect, it } from "vitest";
-
 import type {
   PtyDisposable,
   PtyModule,
@@ -15,19 +22,31 @@ import type {
 } from "../src/commands/pty-loader.js";
 import {
   attachTerminalBridge,
+  createG3BackedPtyShellSession,
+  createRunPtyShellDeps,
+  createScopedSignalCleanup,
   evaluatePtyPreconditions,
+  type G3BackedPtyShellSessionOps,
   type PtyBridgeStreams,
   type PtyExitResult,
   type PtyShellContext,
   type PtyShellSession,
+  type PtyShellSessionClose,
   type PtyShellSessionOpen,
   type ResolvedInteractiveShell,
   type RunPtyShellDeps,
+  type RunPtyShellFactoryContext,
   resolveHostInteractiveShell,
   runPtyShell,
+  type SignalSource,
   type TerminalBridge,
   type TerminalBridgeDisposeResult,
 } from "../src/commands/shell-pty.js";
+import { truncateIdForDisplay } from "../src/format.js";
+import { ConcurrentOperationError } from "../src/locks.js";
+import { EndSessionRaceError } from "../src/operations/end-session.js";
+import { START_LOCK_REL } from "../src/operations/start-session.js";
+import { RuntimeEnvInvalidError } from "../src/runtime-env.js";
 
 /**
  * Build a fake `resolveExecutablePath` that models the real one: each
@@ -627,7 +646,11 @@ function createFakeContext(opts: { columns?: number; rows?: number; stderrThrows
       },
     },
   };
-  return { context, stderrText: () => stderrWrites.join("") };
+  return {
+    context,
+    stderrText: () => stderrWrites.join(""),
+    stderrWriteCount: () => stderrWrites.length,
+  };
 }
 
 /** A PtyModule that records spawn calls and returns a kill-recording child. */
@@ -669,7 +692,7 @@ function createFakeSession(
   opts: {
     open?: PtyShellSessionOpen;
     openThrows?: unknown;
-    close?: number;
+    close?: PtyShellSessionClose;
     closeThrows?: unknown;
   } = {},
 ) {
@@ -688,7 +711,7 @@ function createFakeSession(
       if (opts.closeThrows !== undefined) {
         throw opts.closeThrows;
       }
-      return opts.close ?? 0;
+      return opts.close ?? { exitCode: 0, stderrText: "" };
     },
   };
   return { session, openCount: () => openCalls, closeCount: () => closeCalls };
@@ -1063,7 +1086,7 @@ describe("runPtyShell -- orchestration (fully injected, no live PTY)", () => {
 
   it("session.close returning non-zero makes the wrapper fail", async () => {
     const ctx = createFakeContext({ columns: 80, rows: 24 });
-    const session = createFakeSession({ close: 2 });
+    const session = createFakeSession({ close: { exitCode: 2, stderrText: "" } });
     const code = await runPtyShell(baseDeps({ context: ctx.context, session: session.session }));
     expect(code).toBe(1);
   });
@@ -1074,6 +1097,28 @@ describe("runPtyShell -- orchestration (fully injected, no live PTY)", () => {
     const code = await runPtyShell(baseDeps({ context: ctx.context, session: session.session }));
     expect(code).toBe(1);
     expect(ctx.stderrText()).toContain("Unexpected error closing PTY shell session: end failed");
+  });
+
+  it("writes the session's close text exactly (runPtyShell owns close output)", async () => {
+    const ctx = createFakeContext({ columns: 80, rows: 24 });
+    const session = createFakeSession({
+      close: {
+        exitCode: 0,
+        stderrText: "Session: sess-1\nNext: viberevert check --since sess-1\n",
+      },
+    });
+    const code = await runPtyShell(baseDeps({ context: ctx.context, session: session.session }));
+    expect(code).toBe(0);
+    expect(ctx.stderrText()).toBe("Session: sess-1\nNext: viberevert check --since sess-1\n");
+  });
+
+  it("does not write stderr for an empty close copy", async () => {
+    const ctx = createFakeContext({ columns: 80, rows: 24 });
+    const session = createFakeSession({ close: { exitCode: 0, stderrText: "" } });
+    const code = await runPtyShell(baseDeps({ context: ctx.context, session: session.session }));
+    expect(code).toBe(0);
+    expect(ctx.stderrText()).toBe("");
+    expect(ctx.stderrWriteCount()).toBe(0);
   });
 
   it("never rejects even when stderr.write throws (refuse path still returns the code)", async () => {
@@ -1206,5 +1251,703 @@ describe("runPtyShell -- orchestration (fully injected, no live PTY)", () => {
       baseDeps({ context: ctx.context, loadPtyModule: async () => spawning.module }),
     );
     expect(spawning.spawnCalls[0]?.options).toEqual({ cwd: "/repo", env: {} });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 3c-v real-bindings fakes + tests
+// ---------------------------------------------------------------------------
+
+/** Build G3-backed session ops with quiet defaults; each test overrides a seam. */
+function makeSessionOps(
+  over: Partial<G3BackedPtyShellSessionOps> = {},
+): G3BackedPtyShellSessionOps {
+  return {
+    resolveRepoRoot: over.resolveRepoRoot ?? (() => "/repo"),
+    startSessionOperation: over.startSessionOperation ?? (async () => ({ sessionId: "sess_1" })),
+    endSessionOperation: over.endSessionOperation ?? (async () => undefined),
+    loadActiveSessionLock: over.loadActiveSessionLock ?? (async () => null),
+  };
+}
+
+describe("createG3BackedPtyShellSession -- open refusals (byte-identical G3 copy)", () => {
+  it("repo root not found", async () => {
+    const session = createG3BackedPtyShellSession({
+      cwd: "/nope",
+      ops: makeSessionOps({
+        resolveRepoRoot: () => {
+          throw new RepoRootNotFoundError("/nope");
+        },
+      }),
+    });
+    expect(await session.open()).toEqual({
+      kind: "refused",
+      exitCode: 1,
+      stderrText: [
+        "No git repository or VibeRevert project found (walked up from cwd looking for .git or .viberevert.yml).\n",
+        "Run `viberevert init` to create a project here.\n",
+      ].join(""),
+    });
+  });
+
+  it("config not found", async () => {
+    const session = createG3BackedPtyShellSession({
+      cwd: "/repo",
+      ops: makeSessionOps({
+        startSessionOperation: async () => {
+          throw new ConfigNotFoundError("/repo/.viberevert.yml");
+        },
+      }),
+    });
+    expect(await session.open()).toEqual({
+      kind: "refused",
+      exitCode: 1,
+      stderrText: [
+        "No .viberevert.yml found in this repo.\n",
+        "Run:\n",
+        "  viberevert init\n\n",
+        "to create one.\n",
+      ].join(""),
+    });
+  });
+
+  it("config parse error (message interpolated)", async () => {
+    const err = new ConfigParseError("/repo/.viberevert.yml", new Error("bad yaml"));
+    const session = createG3BackedPtyShellSession({
+      cwd: "/repo",
+      ops: makeSessionOps({
+        startSessionOperation: async () => {
+          throw err;
+        },
+      }),
+    });
+    expect(await session.open()).toEqual({
+      kind: "refused",
+      exitCode: 1,
+      stderrText: [
+        `Invalid .viberevert.yml: ${err.message}\n`,
+        "Fix the file, or re-run:\n",
+        "  viberevert init\n\n",
+        "to start fresh.\n",
+      ].join(""),
+    });
+  });
+
+  it("config validation error also maps to the invalid-config copy", async () => {
+    const err = new ConfigValidationError("/repo/.viberevert.yml", {
+      issues: [{ path: ["commands"], message: "bad" }],
+    } as unknown as ConstructorParameters<typeof ConfigValidationError>[1]);
+    const session = createG3BackedPtyShellSession({
+      cwd: "/repo",
+      ops: makeSessionOps({
+        startSessionOperation: async () => {
+          throw err;
+        },
+      }),
+    });
+    expect(await session.open()).toEqual({
+      kind: "refused",
+      exitCode: 1,
+      stderrText: [
+        `Invalid .viberevert.yml: ${err.message}\n`,
+        "Fix the file, or re-run:\n",
+        "  viberevert init\n\n",
+        "to start fresh.\n",
+      ].join(""),
+    });
+  });
+
+  it("runtime-env invalid uses the raw message", async () => {
+    const err = new RuntimeEnvInvalidError("VIBEREVERT_TEST_FIXED_NOW", "nope", "not ISO-8601");
+    const session = createG3BackedPtyShellSession({
+      cwd: "/repo",
+      ops: makeSessionOps({
+        startSessionOperation: async () => {
+          throw err;
+        },
+      }),
+    });
+    expect(await session.open()).toEqual({
+      kind: "refused",
+      exitCode: 1,
+      stderrText: `${err.message}\n`,
+    });
+  });
+
+  it("session already active (with task)", async () => {
+    const active = {
+      session_id: "sess_active",
+      started_at: "2026-07-01T00:00:00Z",
+      task: "refactor auth",
+      checkpoint_id: "cp_active",
+    } as unknown as ConstructorParameters<typeof SessionAlreadyActiveError>[0];
+    const session = createG3BackedPtyShellSession({
+      cwd: "/repo",
+      ops: makeSessionOps({
+        startSessionOperation: async () => {
+          throw new SessionAlreadyActiveError(active);
+        },
+      }),
+    });
+    expect(await session.open()).toEqual({
+      kind: "refused",
+      exitCode: 1,
+      stderrText: [
+        "A session is already active in this repo.\n\n",
+        `Session:     ${truncateIdForDisplay("sess_active")}\n`,
+        "Started at:  2026-07-01T00:00:00Z\n",
+        "Task:        refactor auth\n",
+        `Checkpoint:  ${truncateIdForDisplay("cp_active")}\n`,
+        "\nUse:\n",
+        "  viberevert sessions\n",
+        "  viberevert end                                     (then start fresh)\n",
+        "  viberevert end && viberevert rollback <session>    (then discard that session's changes)\n",
+      ].join(""),
+    });
+  });
+
+  it("session already active (without task -> no Task line)", async () => {
+    const active = {
+      session_id: "sess_active",
+      started_at: "2026-07-01T00:00:00Z",
+      checkpoint_id: "cp_active",
+    } as unknown as ConstructorParameters<typeof SessionAlreadyActiveError>[0];
+    const session = createG3BackedPtyShellSession({
+      cwd: "/repo",
+      ops: makeSessionOps({
+        startSessionOperation: async () => {
+          throw new SessionAlreadyActiveError(active);
+        },
+      }),
+    });
+    expect(await session.open()).toEqual({
+      kind: "refused",
+      exitCode: 1,
+      stderrText: [
+        "A session is already active in this repo.\n\n",
+        `Session:     ${truncateIdForDisplay("sess_active")}\n`,
+        "Started at:  2026-07-01T00:00:00Z\n",
+        `Checkpoint:  ${truncateIdForDisplay("cp_active")}\n`,
+        "\nUse:\n",
+        "  viberevert sessions\n",
+        "  viberevert end                                     (then start fresh)\n",
+        "  viberevert end && viberevert rollback <session>    (then discard that session's changes)\n",
+      ].join(""),
+    });
+  });
+
+  it("concurrent operation (with lock info)", async () => {
+    const err = new ConcurrentOperationError("/repo/.viberevert/locks/start", {
+      command: "viberevert run",
+      pid: 4242,
+      started_at: "2026-07-01T00:00:00Z",
+    } as unknown as ConstructorParameters<typeof ConcurrentOperationError>[1]);
+    const session = createG3BackedPtyShellSession({
+      cwd: "/repo",
+      ops: makeSessionOps({
+        startSessionOperation: async () => {
+          throw err;
+        },
+      }),
+    });
+    expect(await session.open()).toEqual({
+      kind: "refused",
+      exitCode: 1,
+      stderrText: [
+        "Another viberevert operation is already running:\n",
+        "  command:  viberevert run\n",
+        "  pid:      4242\n",
+        "  since:    2026-07-01T00:00:00Z\n",
+        "\n",
+        "If you're sure that command isn't running anymore (e.g., crashed),\n",
+        "remove this stale lock directory manually:\n",
+        `  ${START_LOCK_REL}\n`,
+      ].join(""),
+    });
+  });
+
+  it("concurrent operation (no lock info)", async () => {
+    const session = createG3BackedPtyShellSession({
+      cwd: "/repo",
+      ops: makeSessionOps({
+        startSessionOperation: async () => {
+          throw new ConcurrentOperationError("/repo/.viberevert/locks/start", null);
+        },
+      }),
+    });
+    expect(await session.open()).toEqual({
+      kind: "refused",
+      exitCode: 1,
+      stderrText: [
+        "Another viberevert operation is already running (lock metadata unavailable).\n",
+        "\n",
+        "If you're sure no other viberevert command is running,\n",
+        "remove this stale lock directory manually:\n",
+        `  ${START_LOCK_REL}\n`,
+      ].join(""),
+    });
+  });
+
+  it("open refusal does not poison the adapter; a later open can succeed", async () => {
+    let calls = 0;
+    const session = createG3BackedPtyShellSession({
+      cwd: "/repo",
+      ops: makeSessionOps({
+        startSessionOperation: async () => {
+          calls += 1;
+          if (calls === 1) {
+            throw new ConfigNotFoundError("/repo/.viberevert.yml");
+          }
+          return { sessionId: "sess_after_retry" };
+        },
+      }),
+    });
+    expect(await session.open()).toEqual({
+      kind: "refused",
+      exitCode: 1,
+      stderrText: [
+        "No .viberevert.yml found in this repo.\n",
+        "Run:\n",
+        "  viberevert init\n\n",
+        "to create one.\n",
+      ].join(""),
+    });
+    expect(await session.open()).toEqual({ kind: "opened", sessionId: "sess_after_retry" });
+  });
+
+  it("re-throws an unexpected start error", async () => {
+    const session = createG3BackedPtyShellSession({
+      cwd: "/repo",
+      ops: makeSessionOps({
+        startSessionOperation: async () => {
+          throw new Error("weird");
+        },
+      }),
+    });
+    await expect(session.open()).rejects.toThrow("weird");
+  });
+
+  it("re-throws an unexpected repo-root error", async () => {
+    const session = createG3BackedPtyShellSession({
+      cwd: "/repo",
+      ops: makeSessionOps({
+        resolveRepoRoot: () => {
+          throw new Error("repo probe weird");
+        },
+      }),
+    });
+    await expect(session.open()).rejects.toThrow("repo probe weird");
+  });
+});
+
+describe("createG3BackedPtyShellSession -- open success + one-shot", () => {
+  it("records cwd + lockCommand + task and returns the session id", async () => {
+    let recorded: { cwd: string; lockCommand: string; task?: string } | undefined;
+    const session = createG3BackedPtyShellSession({
+      cwd: "/repo",
+      task: "do things",
+      ops: makeSessionOps({
+        startSessionOperation: async (input) => {
+          recorded = input;
+          return { sessionId: "sess_new" };
+        },
+      }),
+    });
+    expect(await session.open()).toEqual({ kind: "opened", sessionId: "sess_new" });
+    expect(recorded).toEqual({
+      cwd: "/repo",
+      lockCommand: "viberevert shell --pty",
+      task: "do things",
+    });
+  });
+
+  it("omits task from the start call when none is given", async () => {
+    let recorded: { cwd: string; lockCommand: string; task?: string } | undefined;
+    const session = createG3BackedPtyShellSession({
+      cwd: "/repo",
+      ops: makeSessionOps({
+        startSessionOperation: async (input) => {
+          recorded = input;
+          return { sessionId: "sess_1" };
+        },
+      }),
+    });
+    await session.open();
+    expect(recorded).toEqual({ cwd: "/repo", lockCommand: "viberevert shell --pty" });
+    expect("task" in (recorded ?? {})).toBe(false);
+  });
+
+  it("is one-shot: repeat open returns the same session; after close it refuses", async () => {
+    let startCalls = 0;
+    const session = createG3BackedPtyShellSession({
+      cwd: "/repo",
+      ops: makeSessionOps({
+        startSessionOperation: async () => {
+          startCalls += 1;
+          return { sessionId: "sess_1" };
+        },
+      }),
+    });
+    expect(await session.open()).toEqual({ kind: "opened", sessionId: "sess_1" });
+    expect(await session.open()).toEqual({ kind: "opened", sessionId: "sess_1" });
+    expect(startCalls).toBe(1);
+    await session.close();
+    expect(await session.open()).toEqual({
+      kind: "refused",
+      exitCode: 1,
+      stderrText: "This PTY shell session adapter has already been closed.\n",
+    });
+  });
+});
+
+describe("createG3BackedPtyShellSession -- close (scoped teardown copy + idempotency)", () => {
+  async function opened(ops: G3BackedPtyShellSessionOps) {
+    const session = createG3BackedPtyShellSession({ cwd: "/repo", ops });
+    await session.open();
+    return session;
+  }
+
+  it("success -> Session/Next summary; repeat is quiet", async () => {
+    const session = await opened(
+      makeSessionOps({ loadActiveSessionLock: async () => ({ session_id: "sess_1" }) }),
+    );
+    expect(await session.close()).toEqual({
+      exitCode: 0,
+      stderrText: "Session: sess_1\nNext: viberevert check --since sess_1\n",
+    });
+    expect(await session.close()).toEqual({ exitCode: 0, stderrText: "" });
+  });
+
+  it("lock already gone -> nothing-to-close note", async () => {
+    const session = await opened(makeSessionOps({ loadActiveSessionLock: async () => null }));
+    expect(await session.close()).toEqual({
+      exitCode: 0,
+      stderrText: "Note: the session was already ended; nothing to close.\n",
+    });
+  });
+
+  it("different active session is left untouched", async () => {
+    const session = await opened(
+      makeSessionOps({ loadActiveSessionLock: async () => ({ session_id: "sess_other" }) }),
+    );
+    expect(await session.close()).toEqual({
+      exitCode: 1,
+      stderrText:
+        "Warning: the active session belongs to a different session; leaving it untouched.\n",
+    });
+  });
+
+  it("NoActiveSessionError -> already-ended note + summary (exit 0)", async () => {
+    const session = await opened(
+      makeSessionOps({
+        loadActiveSessionLock: async () => ({ session_id: "sess_1" }),
+        endSessionOperation: async () => {
+          throw new NoActiveSessionError();
+        },
+      }),
+    );
+    expect(await session.close()).toEqual({
+      exitCode: 0,
+      stderrText: [
+        "Note: the session was already ended before the shell could close it.\n",
+        "Session: sess_1\n",
+        "Next: viberevert check --since sess_1\n",
+      ].join(""),
+    });
+  });
+
+  it("EndSessionRaceError -> already-ended note + summary (exit 0)", async () => {
+    const session = await opened(
+      makeSessionOps({
+        loadActiveSessionLock: async () => ({ session_id: "sess_1" }),
+        endSessionOperation: async () => {
+          throw new EndSessionRaceError();
+        },
+      }),
+    );
+    expect(await session.close()).toEqual({
+      exitCode: 0,
+      stderrText: [
+        "Note: the session was already ended before the shell could close it.\n",
+        "Session: sess_1\n",
+        "Next: viberevert check --since sess_1\n",
+      ].join(""),
+    });
+  });
+
+  it("read failure stays `opened` so a later close can retry", async () => {
+    let lockCalls = 0;
+    const session = await opened(
+      makeSessionOps({
+        loadActiveSessionLock: async () => {
+          lockCalls += 1;
+          if (lockCalls === 1) {
+            throw new Error("lock read boom");
+          }
+          return null;
+        },
+      }),
+    );
+    expect(await session.close()).toEqual({
+      exitCode: 1,
+      stderrText: [
+        "Could not read the active session state while shutting down: lock read boom\n",
+        "If a session is still active, close it manually with:\n",
+        "  viberevert end\n",
+      ].join(""),
+    });
+    // retry succeeds because state stayed `opened`
+    expect(await session.close()).toEqual({
+      exitCode: 0,
+      stderrText: "Note: the session was already ended; nothing to close.\n",
+    });
+  });
+
+  it("unknown end failure stays `opened` for a retry", async () => {
+    let endCalls = 0;
+    const session = await opened(
+      makeSessionOps({
+        loadActiveSessionLock: async () => ({ session_id: "sess_1" }),
+        endSessionOperation: async () => {
+          endCalls += 1;
+          if (endCalls === 1) {
+            throw new Error("end boom");
+          }
+          return undefined;
+        },
+      }),
+    );
+    expect(await session.close()).toEqual({
+      exitCode: 1,
+      stderrText: [
+        "The session could not be closed: end boom\n",
+        "Close it manually with:\n",
+        "  viberevert end\n",
+      ].join(""),
+    });
+    expect(await session.close()).toEqual({
+      exitCode: 0,
+      stderrText: "Session: sess_1\nNext: viberevert check --since sess_1\n",
+    });
+  });
+
+  it("close before open is a quiet no-op", async () => {
+    const session = createG3BackedPtyShellSession({ cwd: "/repo", ops: makeSessionOps() });
+    expect(await session.close()).toEqual({ exitCode: 0, stderrText: "" });
+  });
+});
+
+describe("createScopedSignalCleanup", () => {
+  function createFakeSignalSource() {
+    const handlers = new Map<string, Set<() => void>>();
+    const onCalls: string[] = [];
+    const source: SignalSource = {
+      on: (signal, listener) => {
+        onCalls.push(signal);
+        const set = handlers.get(signal) ?? new Set<() => void>();
+        set.add(listener);
+        handlers.set(signal, set);
+      },
+      removeListener: (signal, listener) => {
+        handlers.get(signal)?.delete(listener);
+      },
+    };
+    return {
+      source,
+      onCalls,
+      emit: (signal: string) => {
+        for (const h of [...(handlers.get(signal) ?? [])]) {
+          h();
+        }
+      },
+      listenerCount: (signal: string) => handlers.get(signal)?.size ?? 0,
+    };
+  }
+
+  it("installs SIGTERM+SIGHUP and removes them after run resolves", async () => {
+    const sig = createFakeSignalSource();
+    const result = await createScopedSignalCleanup(sig.source)(
+      () => undefined,
+      async () => 42,
+    );
+    expect(result).toBe(42);
+    expect(sig.onCalls).toEqual(["SIGTERM", "SIGHUP"]);
+    expect(sig.listenerCount("SIGTERM")).toBe(0);
+    expect(sig.listenerCount("SIGHUP")).toBe(0);
+  });
+
+  it("removes listeners even when run rejects", async () => {
+    const sig = createFakeSignalSource();
+    await expect(
+      createScopedSignalCleanup(sig.source)(
+        () => undefined,
+        async () => {
+          throw new Error("run boom");
+        },
+      ),
+    ).rejects.toThrow("run boom");
+    expect(sig.listenerCount("SIGTERM")).toBe(0);
+    expect(sig.listenerCount("SIGHUP")).toBe(0);
+  });
+
+  it("fires onSignal at most once even if both signals emit", async () => {
+    const sig = createFakeSignalSource();
+    let fired = 0;
+    await createScopedSignalCleanup(sig.source)(
+      () => {
+        fired += 1;
+      },
+      async () => {
+        sig.emit("SIGTERM");
+        sig.emit("SIGHUP");
+      },
+    );
+    expect(fired).toBe(1);
+  });
+
+  it("a throwing onSignal does not prevent listener removal", async () => {
+    const sig = createFakeSignalSource();
+    await createScopedSignalCleanup(sig.source)(
+      () => {
+        throw new Error("onSignal boom");
+      },
+      async () => {
+        sig.emit("SIGTERM");
+      },
+    );
+    expect(sig.listenerCount("SIGTERM")).toBe(0);
+    expect(sig.listenerCount("SIGHUP")).toBe(0);
+  });
+
+  it("removes the installed SIGTERM listener and does not run when SIGHUP installation throws", async () => {
+    let ran = false;
+    const removed: string[] = [];
+    const source: SignalSource = {
+      on: (signal) => {
+        if (signal === "SIGHUP") {
+          throw new Error("install SIGHUP boom");
+        }
+      },
+      removeListener: (signal) => {
+        removed.push(signal);
+      },
+    };
+    await expect(
+      createScopedSignalCleanup(source)(
+        () => undefined,
+        async () => {
+          ran = true;
+        },
+      ),
+    ).rejects.toThrow("install SIGHUP boom");
+    expect(ran).toBe(false);
+    expect(removed).toEqual(["SIGTERM"]);
+  });
+
+  it("does not run and has nothing to remove when SIGTERM installation throws", async () => {
+    let ran = false;
+    const removed: string[] = [];
+    const source: SignalSource = {
+      on: () => {
+        throw new Error("install SIGTERM boom");
+      },
+      removeListener: (signal) => {
+        removed.push(signal);
+      },
+    };
+    await expect(
+      createScopedSignalCleanup(source)(
+        () => undefined,
+        async () => {
+          ran = true;
+        },
+      ),
+    ).rejects.toThrow("install SIGTERM boom");
+    expect(ran).toBe(false);
+    expect(removed).toEqual([]);
+  });
+
+  it("attempts both removals even if one removal throws", async () => {
+    const removed: string[] = [];
+    const source: SignalSource = {
+      on: () => undefined,
+      removeListener: (signal) => {
+        removed.push(signal);
+        if (signal === "SIGTERM") {
+          throw new Error("remove SIGTERM boom");
+        }
+      },
+    };
+    const result = await createScopedSignalCleanup(source)(
+      () => undefined,
+      async () => "ok",
+    );
+    expect(result).toBe("ok");
+    expect(removed).toEqual(["SIGTERM", "SIGHUP"]);
+  });
+});
+
+describe("createRunPtyShellDeps", () => {
+  function fakeFactoryContext(
+    over: { stdin?: unknown; stdout?: unknown } = {},
+  ): RunPtyShellFactoryContext {
+    return {
+      stdin: over.stdin ?? { isTTY: true },
+      stdout: over.stdout ?? { isTTY: true },
+      stderr: { write: () => undefined },
+    };
+  }
+
+  it("hasInteractiveTty is true only when both streams report isTTY", () => {
+    const deps = createRunPtyShellDeps(fakeFactoryContext(), { cwd: "/repo", env: {} });
+    expect(deps.hasInteractiveTty()).toBe(true);
+  });
+
+  it("hasInteractiveTty is false when stdout is not a TTY", () => {
+    const deps = createRunPtyShellDeps(fakeFactoryContext({ stdout: { isTTY: false } }), {
+      cwd: "/repo",
+      env: {},
+    });
+    expect(deps.hasInteractiveTty()).toBe(false);
+  });
+
+  it("hasInteractiveTty is false (never throws) for null / missing-isTTY streams", () => {
+    const deps = createRunPtyShellDeps(fakeFactoryContext({ stdin: null, stdout: {} }), {
+      cwd: "/repo",
+      env: {},
+    });
+    expect(deps.hasInteractiveTty()).toBe(false);
+  });
+
+  it("hasInteractiveTty is false when the isTTY getter throws", () => {
+    const throwingStream = Object.defineProperty({}, "isTTY", {
+      get: () => {
+        throw new Error("isTTY getter boom");
+      },
+    });
+    const deps = createRunPtyShellDeps(
+      fakeFactoryContext({ stdin: throwingStream, stdout: { isTTY: true } }),
+      { cwd: "/repo", env: {} },
+    );
+    expect(deps.hasInteractiveTty()).toBe(false);
+  });
+
+  it("snapshots spawnEnv (copy, not the same reference, immune to later mutation)", () => {
+    const env = { FOO: "bar" };
+    const deps = createRunPtyShellDeps(fakeFactoryContext(), { cwd: "/repo", env });
+    env.FOO = "mutated";
+    expect(deps.spawnEnv).toEqual({ FOO: "bar" });
+    expect(deps.spawnEnv).not.toBe(env);
+  });
+
+  it("threads cwd and wires the injected seams", () => {
+    const deps = createRunPtyShellDeps(fakeFactoryContext(), { cwd: "/work", env: {} });
+    expect(deps.cwd).toBe("/work");
+    expect(typeof deps.loadPtyModule).toBe("function");
+    expect(typeof deps.resolveHostShell).toBe("function");
+    expect(typeof deps.attachBridge).toBe("function");
+    expect(typeof deps.withSignalCleanup).toBe("function");
+    expect(typeof deps.session.open).toBe("function");
+    expect(typeof deps.session.close).toBe("function");
   });
 });

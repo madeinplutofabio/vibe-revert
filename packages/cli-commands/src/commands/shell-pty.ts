@@ -9,9 +9,9 @@
  * (`evaluatePtyPreconditions`), the raw TERMINAL BRIDGE
  * (`attachTerminalBridge`), and the `runPtyShell` ORCHESTRATION that binds them
  * live here. `runPtyShell` is FULLY INJECTED (every side-effecting seam is a
- * dep); the real default-deps factory + the G3-backed session adapter follow in
- * 3c-v. Until the engine is wired behind the guarded `--pty` path (Step 3d/4)
- * this file is reachable only by tests.
+ * dep); the real default-deps factory (`createRunPtyShellDeps`) + the G3-backed
+ * session adapter are bound below (3c-v). Until the engine is wired behind the
+ * guarded `--pty` path (Step 3d/4) this file is reachable only by tests.
  *
  * Boundaries (enforced by invariants): this file reaches the native PTY module
  * ONLY via pty-loader's `loadPtyModule` (never the package name directly),
@@ -80,11 +80,28 @@
  * errors as a wrapper failure (exit 1), never a clean success. The inner shell's
  * own exit is displayed but not propagated (D104.G). Every seam is injected, so
  * the whole flow is unit-tested with no live PTY / native PTY module / session
- * locks; the real deps factory + G3-backed session adapter land in 3c-v.
+ * locks; the real deps factory + G3-backed session adapter are bound below (3c-v).
  */
 
+import {
+  ConfigNotFoundError,
+  ConfigParseError,
+  ConfigValidationError,
+  loadActiveSessionLock,
+  NoActiveSessionError,
+  RepoRootNotFoundError,
+  resolveRepoRoot,
+  SessionAlreadyActiveError,
+} from "@viberevert/core";
+
+import { truncateIdForDisplay } from "../format.js";
+import { ConcurrentOperationError } from "../locks.js";
+import { EndSessionRaceError, endSessionOperation } from "../operations/end-session.js";
+import { START_LOCK_REL, startSessionOperation } from "../operations/start-session.js";
+import { RuntimeEnvInvalidError } from "../runtime-env.js";
 import { createHostExecutablePathResolver } from "./executable-probe.js";
 import type { PtyDisposable, PtyModule, PtyProcess, PtySpawnOptions } from "./pty-loader.js";
+import { loadPtyModule } from "./pty-loader.js";
 import {
   resolveInteractiveShell,
   type ShellKind,
@@ -499,17 +516,24 @@ export type PtyShellSessionOpen =
   | { readonly kind: "opened"; readonly sessionId: string }
   | { readonly kind: "refused"; readonly exitCode: number; readonly stderrText: string };
 
+/** Outcome of closing the one PTY session (returns copy for the runner to write). */
+export interface PtyShellSessionClose {
+  readonly exitCode: number;
+  readonly stderrText: string;
+}
+
 /**
- * The session lifecycle as an injected PORT. The real G3-backed adapter (start +
- * scoped teardown + the elaborate refusal copy) lands in 3c-v; `runPtyShell`
- * owns ALL user-visible output, so `open()` RETURNS refusal text rather than
- * writing it (D104.M.4: adapters return decisions/data, the runner writes).
+ * The session lifecycle as an injected PORT. The real G3-backed adapter
+ * (`createG3BackedPtyShellSession`, below) reuses the shipped session machinery;
+ * `runPtyShell` owns ALL user-visible output, so BOTH `open()` and `close()`
+ * RETURN copy rather than writing it (D104.M.4: adapters return decisions/data,
+ * the runner writes).
  */
 export interface PtyShellSession {
   /** Open the one session; `refused` carries copy for `runPtyShell` to write. */
   open(): Promise<PtyShellSessionOpen>;
-  /** Scoped teardown: 0 on success, non-zero on teardown failure. Contract: never throws. */
-  close(): Promise<number>;
+  /** Scoped teardown -> exit code + copy for the runner. Contract: never throws. */
+  close(): Promise<PtyShellSessionClose>;
 }
 
 /** Everything `runPtyShell` needs, ALL injected (no host default factory until 3c-v). */
@@ -523,7 +547,7 @@ export interface RunPtyShellDeps {
   readonly resolveHostShell: () => ResolvedInteractiveShell | null;
   /** Wire the raw terminal bridge (`attachTerminalBridge` in prod). */
   readonly attachBridge: (streams: PtyBridgeStreams, pty: PtyProcess) => TerminalBridge;
-  /** The one PTY session (G3-backed adapter in 3c-v). */
+  /** The one PTY session; real deps bind the G3-backed adapter below. */
   readonly session: PtyShellSession;
   /** Working directory for the spawned PTY (`process.cwd()` in prod). */
   readonly cwd: string;
@@ -563,6 +587,9 @@ function formatErrorMessage(error: unknown): string {
 
 /** Write to stderr without ever letting a throwing stream crash the runner. */
 function writeStderrSafely(context: PtyShellContext, text: string): void {
+  if (text.length === 0) {
+    return;
+  }
   try {
     context.stderr.write(text);
   } catch {
@@ -704,19 +731,15 @@ async function drivePty(
   return { kind: "completed", exit, disposeErrors };
 }
 
-/** Close the session, mapping a broken `close()` contract to a safe exit 1. */
-async function closeSessionSafely(
-  session: PtyShellSession,
-  context: PtyShellContext,
-): Promise<number> {
+/** Close the session, mapping a broken `close()` contract to a safe failure. */
+async function closeSessionSafely(session: PtyShellSession): Promise<PtyShellSessionClose> {
   try {
     return await session.close();
   } catch (error) {
-    writeStderrSafely(
-      context,
-      `Unexpected error closing PTY shell session: ${formatErrorMessage(error)}\n`,
-    );
-    return 1;
+    return {
+      exitCode: 1,
+      stderrText: `Unexpected error closing PTY shell session: ${formatErrorMessage(error)}\n`,
+    };
   }
 }
 
@@ -813,7 +836,377 @@ export async function runPtyShell(deps: RunPtyShellDeps): Promise<number> {
     displayChildExit(context, drive.exit);
   }
 
-  const closeCode = await closeSessionSafely(deps.session, context);
-  const closeFailed = closeCode !== 0;
+  const close = await closeSessionSafely(deps.session);
+  writeStderrSafely(context, close.stderrText);
+  const closeFailed = close.exitCode !== 0;
   return driveFailed || closeFailed ? 1 : 0;
+}
+
+// ============================================================================
+// Real deps + G3-backed session adapter (M G4 Step 3c-v, D104.C/F/N)
+// ============================================================================
+//
+// These bind runPtyShell's injected seams to the real host: the in-file shell
+// resolver, the pty-loader, the terminal bridge, a scoped signal cleanup, and a
+// G3-backed PtyShellSession that reuses the shipped session machinery
+// (startSessionOperation + the scoped teardown). The engine stays test-only
+// until the guarded `--pty` path is wired (Step 3d/4) -- nothing public calls
+// these.
+//
+// The session-refusal + teardown COPY is duplicated byte-for-byte from shell.ts
+// (the established v1 pattern -- shell.ts itself duplicates run.ts's copy). A
+// future cleanup extracts one shared copy module once PTY mode is wired and
+// stable; until then the golden-string tests pin parity so the two commands'
+// session copy cannot drift.
+
+/** The lock command recorded for a PTY session (distinct from the REPL's). */
+const PTY_LOCK_COMMAND = "viberevert shell --pty";
+
+// --- session-refusal / teardown copy (byte-identical to shell.ts) ---
+
+const repoRootNotFoundCopy = (): string =>
+  "No git repository or VibeRevert project found (walked up from cwd looking for .git or .viberevert.yml).\nRun `viberevert init` to create a project here.\n";
+
+const configNotFoundCopy = (): string =>
+  "No .viberevert.yml found in this repo.\nRun:\n  viberevert init\n\nto create one.\n";
+
+const invalidConfigCopy = (message: string): string =>
+  `Invalid .viberevert.yml: ${message}\nFix the file, or re-run:\n  viberevert init\n\nto start fresh.\n`;
+
+/** The "session already active" block (Task line only when the lock has one). */
+function sessionAlreadyActiveCopy(lock: SessionAlreadyActiveError["active"]): string {
+  let text = "A session is already active in this repo.\n\n";
+  text += `Session:     ${truncateIdForDisplay(lock.session_id)}\n`;
+  text += `Started at:  ${lock.started_at}\n`;
+  if (lock.task !== undefined) {
+    text += `Task:        ${lock.task}\n`;
+  }
+  text += `Checkpoint:  ${truncateIdForDisplay(lock.checkpoint_id)}\n`;
+  text += "\nUse:\n";
+  text += "  viberevert sessions\n";
+  text += "  viberevert end                                     (then start fresh)\n";
+  text +=
+    "  viberevert end && viberevert rollback <session>    (then discard that session's changes)\n";
+  return text;
+}
+
+/** The "another operation is already running" block (with/without lock info). */
+function concurrentOperationCopy(info: ConcurrentOperationError["info"]): string {
+  return info !== null
+    ? `Another viberevert operation is already running:\n  command:  ${info.command}\n  pid:      ${info.pid}\n  since:    ${info.started_at}\n\nIf you're sure that command isn't running anymore (e.g., crashed),\nremove this stale lock directory manually:\n  ${START_LOCK_REL}\n`
+    : `Another viberevert operation is already running (lock metadata unavailable).\n\nIf you're sure no other viberevert command is running,\nremove this stale lock directory manually:\n  ${START_LOCK_REL}\n`;
+}
+
+// --- G3-backed session adapter ---
+
+/**
+ * The shipped session operations the adapter reuses (all-or-none injected). A
+ * minimal STRUCTURAL surface -- only what the adapter reads -- so tests fake it
+ * without reproducing the full ActiveSessionLock / operation-result schemas; the
+ * real host functions still bind to it (REAL_G3_SESSION_OPS) by covariant
+ * return / contravariant param.
+ */
+export interface G3BackedPtyShellSessionOps {
+  readonly resolveRepoRoot: (cwd: string) => string;
+  readonly startSessionOperation: (input: {
+    readonly cwd: string;
+    readonly lockCommand: string;
+    readonly task?: string;
+  }) => Promise<{ readonly sessionId: string }>;
+  readonly endSessionOperation: (input: { readonly cwd: string }) => Promise<unknown>;
+  readonly loadActiveSessionLock: (
+    repoRoot: string,
+  ) => Promise<{ readonly session_id: string } | null>;
+}
+
+/** Real host binding of the session operations. */
+const REAL_G3_SESSION_OPS: G3BackedPtyShellSessionOps = {
+  resolveRepoRoot,
+  startSessionOperation,
+  endSessionOperation,
+  loadActiveSessionLock,
+};
+
+/** Args for the G3-backed session adapter (ops default to the real host ops). */
+export interface CreateG3BackedPtyShellSessionArgs {
+  readonly cwd: string;
+  readonly task?: string;
+  readonly ops?: G3BackedPtyShellSessionOps;
+}
+
+/** Adapter state: prevents close-before-open, double-close, partial-open fuzz. */
+type SessionState =
+  | { readonly kind: "not_opened" }
+  | { readonly kind: "opened"; readonly repoRoot: string; readonly sessionId: string }
+  | { readonly kind: "closed" };
+
+/**
+ * A PtyShellSession backed by the shipped G3 session machinery
+ * (startSessionOperation + the scoped teardown). BOTH `open()` and `close()`
+ * RETURN copy for `runPtyShell` to write. `open()` maps every start error to the
+ * byte-identical G3 refusal text and is one-shot (a second open returns the same
+ * session; after close it refuses). `close()` reproduces the G3 scoped-teardown
+ * copy, performs the same scoped ownership check as the G3 shell teardown before
+ * ending (the check->end window is not atomic), never throws, and is IDEMPOTENT:
+ * only a close that reaches a TERMINAL outcome marks the adapter closed; a read
+ * failure or an unknown end failure leaves it `opened` so a later close can retry.
+ */
+export function createG3BackedPtyShellSession(
+  args: CreateG3BackedPtyShellSessionArgs,
+): PtyShellSession {
+  const { cwd } = args;
+  const task = args.task;
+  const ops = args.ops ?? REAL_G3_SESSION_OPS;
+  let state: SessionState = { kind: "not_opened" };
+
+  const open = async (): Promise<PtyShellSessionOpen> => {
+    if (state.kind === "opened") {
+      // One-shot: a repeat open returns the already-open session (no re-start).
+      return { kind: "opened", sessionId: state.sessionId };
+    }
+    if (state.kind === "closed") {
+      return {
+        kind: "refused",
+        exitCode: 1,
+        stderrText: "This PTY shell session adapter has already been closed.\n",
+      };
+    }
+
+    let repoRoot: string;
+    try {
+      repoRoot = ops.resolveRepoRoot(cwd);
+    } catch (err) {
+      if (err instanceof RepoRootNotFoundError) {
+        return { kind: "refused", exitCode: 1, stderrText: repoRootNotFoundCopy() };
+      }
+      throw err;
+    }
+
+    let sessionId: string;
+    try {
+      const started = await ops.startSessionOperation({
+        cwd,
+        lockCommand: PTY_LOCK_COMMAND,
+        ...(task !== undefined ? { task } : {}),
+      });
+      sessionId = started.sessionId;
+    } catch (err) {
+      if (err instanceof RuntimeEnvInvalidError) {
+        return { kind: "refused", exitCode: 1, stderrText: `${err.message}\n` };
+      }
+      if (err instanceof SessionAlreadyActiveError) {
+        return { kind: "refused", exitCode: 1, stderrText: sessionAlreadyActiveCopy(err.active) };
+      }
+      if (err instanceof ConcurrentOperationError) {
+        return { kind: "refused", exitCode: 1, stderrText: concurrentOperationCopy(err.info) };
+      }
+      if (err instanceof RepoRootNotFoundError) {
+        return { kind: "refused", exitCode: 1, stderrText: repoRootNotFoundCopy() };
+      }
+      if (err instanceof ConfigNotFoundError) {
+        return { kind: "refused", exitCode: 1, stderrText: configNotFoundCopy() };
+      }
+      if (err instanceof ConfigParseError || err instanceof ConfigValidationError) {
+        return { kind: "refused", exitCode: 1, stderrText: invalidConfigCopy(err.message) };
+      }
+      throw err;
+    }
+
+    state = { kind: "opened", repoRoot, sessionId };
+    return { kind: "opened", sessionId };
+  };
+
+  const close = async (): Promise<PtyShellSessionClose> => {
+    if (state.kind !== "opened") {
+      // close-before-open or an idempotent repeat after a terminal close -> quiet.
+      return { exitCode: 0, stderrText: "" };
+    }
+    const { repoRoot, sessionId } = state;
+
+    let lock: Awaited<ReturnType<typeof ops.loadActiveSessionLock>>;
+    try {
+      lock = await ops.loadActiveSessionLock(repoRoot);
+    } catch (err) {
+      // Read failure: the session may still exist -> stay `opened` so a later
+      // close can retry; surface the failure.
+      return {
+        exitCode: 1,
+        stderrText: `Could not read the active session state while shutting down: ${formatErrorMessage(err)}\nIf a session is still active, close it manually with:\n  viberevert end\n`,
+      };
+    }
+
+    if (lock === null) {
+      state = { kind: "closed" };
+      return {
+        exitCode: 0,
+        stderrText: "Note: the session was already ended; nothing to close.\n",
+      };
+    }
+    if (lock.session_id !== sessionId) {
+      state = { kind: "closed" };
+      return {
+        exitCode: 1,
+        stderrText:
+          "Warning: the active session belongs to a different session; leaving it untouched.\n",
+      };
+    }
+
+    try {
+      await ops.endSessionOperation({ cwd });
+    } catch (err) {
+      if (err instanceof NoActiveSessionError || err instanceof EndSessionRaceError) {
+        state = { kind: "closed" };
+        return {
+          exitCode: 0,
+          stderrText: `Note: the session was already ended before the shell could close it.\nSession: ${sessionId}\nNext: viberevert check --since ${sessionId}\n`,
+        };
+      }
+      // Unknown end failure: the session may still exist -> stay `opened` for a
+      // possible retry; surface the failure.
+      return {
+        exitCode: 1,
+        stderrText: `The session could not be closed: ${formatErrorMessage(err)}\nClose it manually with:\n  viberevert end\n`,
+      };
+    }
+
+    state = { kind: "closed" };
+    return {
+      exitCode: 0,
+      stderrText: `Session: ${sessionId}\nNext: viberevert check --since ${sessionId}\n`,
+    };
+  };
+
+  return { open, close };
+}
+
+// --- scoped signal cleanup ---
+
+/** The signal-source surface `createScopedSignalCleanup` drives (process in prod). */
+export interface SignalSource {
+  on(signal: NodeJS.Signals, listener: () => void): void;
+  removeListener(signal: NodeJS.Signals, listener: () => void): void;
+}
+
+/**
+ * Build a `withSignalCleanup` that installs SIGTERM + SIGHUP handlers for the
+ * duration of `run()`, invokes `onSignal` AT MOST ONCE (single-shot), and
+ * removes ONLY the handlers it actually installed, in a `finally`, whether
+ * `run()` resolves or rejects. Installation is tracked so a partial install
+ * (SIGTERM ok, SIGHUP throws) still removes what was installed; each removal is
+ * best-effort so one throwing removal does not skip the other. A throwing
+ * `onSignal` is swallowed so it cannot crash the handler or block removal. No
+ * SIGINT (raw-mode Ctrl-C semantics are delicate -- deferred past live PTY
+ * validation); never calls process.exit; touches no stdio. When used by
+ * runPtyShell, `onSignal` disposes the bridge -> waitForExit settles the
+ * fallback -> runPtyShell fails closed (exit 1).
+ */
+export function createScopedSignalCleanup(
+  source: SignalSource = process,
+): RunPtyShellDeps["withSignalCleanup"] {
+  return async (onSignal, run) => {
+    let fired = false;
+    let sigtermInstalled = false;
+    let sighupInstalled = false;
+
+    const handler = (): void => {
+      if (fired) {
+        return;
+      }
+      fired = true;
+      try {
+        onSignal();
+      } catch {
+        // A failing onSignal must not crash the signal handler; teardown still
+        // proceeds and the installed listeners are removed in the finally.
+      }
+    };
+
+    try {
+      source.on("SIGTERM", handler);
+      sigtermInstalled = true;
+      source.on("SIGHUP", handler);
+      sighupInstalled = true;
+      return await run();
+    } finally {
+      if (sigtermInstalled) {
+        try {
+          source.removeListener("SIGTERM", handler);
+        } catch {
+          // Best-effort cleanup.
+        }
+      }
+      if (sighupInstalled) {
+        try {
+          source.removeListener("SIGHUP", handler);
+        } catch {
+          // Best-effort cleanup.
+        }
+      }
+    }
+  };
+}
+
+// --- real deps factory ---
+
+/** Non-stream inputs the real-deps factory needs (cwd/env snapshot + task). */
+export interface CreateRunPtyShellDepsOptions {
+  readonly cwd: string;
+  readonly env: NodeJS.ProcessEnv;
+  readonly task?: string;
+}
+
+/** The (Clipanion-style) command context the factory adapts; streams cast here. */
+export interface RunPtyShellFactoryContext {
+  readonly stdin: unknown;
+  readonly stdout: unknown;
+  readonly stderr: { write(data: string): void };
+}
+
+/** True only when a stream structurally exposes `isTTY === true` (never throws). */
+function hasTrueIsTty(stream: unknown): boolean {
+  if ((typeof stream !== "object" && typeof stream !== "function") || stream === null) {
+    return false;
+  }
+  try {
+    return (stream as { readonly isTTY?: unknown }).isTTY === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Bind runPtyShell's injected seams to the real host (M G4 Step 3c-v). The
+ * tty.ReadStream/WriteStream casts live ONLY here; `hasInteractiveTty` is fully
+ * defensive (a null/typeless stream, a missing `isTTY`, or a throwing getter all
+ * yield false -- never throws). `spawnEnv` is a SNAPSHOT so the spawned child is
+ * independent of later env mutation; shell RESOLUTION intentionally reads the
+ * live host env via `resolveHostInteractiveShell()` (a one-shot synchronous
+ * lookup at gate time -- and there is no env-snapshot host path resolver without
+ * touching the Step-3b module). Still unwired: nothing public calls this until
+ * Step 3d/4.
+ */
+export function createRunPtyShellDeps(
+  context: RunPtyShellFactoryContext,
+  options: CreateRunPtyShellDepsOptions,
+): RunPtyShellDeps {
+  const stdin = context.stdin as NodeJS.ReadStream;
+  const stdout = context.stdout as NodeJS.WriteStream;
+  const ptyContext: PtyShellContext = { stdin, stdout, stderr: context.stderr };
+
+  const sessionArgs: CreateG3BackedPtyShellSessionArgs = {
+    cwd: options.cwd,
+    ...(options.task !== undefined ? { task: options.task } : {}),
+  };
+
+  return {
+    context: ptyContext,
+    hasInteractiveTty: () => hasTrueIsTty(context.stdin) && hasTrueIsTty(context.stdout),
+    loadPtyModule,
+    resolveHostShell: () => resolveHostInteractiveShell(),
+    attachBridge: attachTerminalBridge,
+    session: createG3BackedPtyShellSession(sessionArgs),
+    cwd: options.cwd,
+    spawnEnv: { ...options.env },
+    withSignalCleanup: createScopedSignalCleanup(),
+  };
 }

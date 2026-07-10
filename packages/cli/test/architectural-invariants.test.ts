@@ -2567,10 +2567,11 @@ describe("Architectural invariants -- M G1a D99.M @viberevert/cli-commands bound
       "createHostExecutablePathResolver",
       "createHostExecutableProbe",
       "ExecutableProbeDeps",
-      // PTY engine internals (M G4 Step 3c, D104.C/G/I/J) -- the engine's host
-      // shell resolution + pre-spawn precondition gate + raw terminal bridge +
-      // runPtyShell orchestration + types, consumed only within the engine;
-      // internal until the guarded `--pty` path is wired (Step 3d/4).
+      // PTY engine internals (M G4 Step 3c, D104.C/F/G/I/J/N) -- the engine's
+      // host shell resolution + pre-spawn precondition gate + raw terminal
+      // bridge + runPtyShell orchestration + real deps factory + G3-backed
+      // session adapter + scoped signal cleanup + types, consumed only within
+      // the engine; internal until the guarded `--pty` path is wired (Step 3d/4).
       "resolveHostInteractiveShell",
       "ResolvedInteractiveShell",
       "HostShellResolutionDeps",
@@ -2588,6 +2589,15 @@ describe("Architectural invariants -- M G1a D99.M @viberevert/cli-commands bound
       "PtyShellContext",
       "PtyShellSession",
       "PtyShellSessionOpen",
+      "PtyShellSessionClose",
+      "createG3BackedPtyShellSession",
+      "G3BackedPtyShellSessionOps",
+      "CreateG3BackedPtyShellSessionArgs",
+      "createScopedSignalCleanup",
+      "SignalSource",
+      "createRunPtyShellDeps",
+      "CreateRunPtyShellDepsOptions",
+      "RunPtyShellFactoryContext",
     ];
     for (const symbol of FORBIDDEN_ABSENT) {
       expect(
