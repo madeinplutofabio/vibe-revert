@@ -2598,6 +2598,22 @@ describe("Architectural invariants -- M G1a D99.M @viberevert/cli-commands bound
       "createRunPtyShellDeps",
       "CreateRunPtyShellDepsOptions",
       "RunPtyShellFactoryContext",
+      // Interception protocol contract (M G4 Step 4a, D104.E/H/J/O) -- the wire
+      // types + constants + the branded InstalledInterception handle factory,
+      // consumed only within the interception layer; internal until the guarded
+      // interception path is wired (Step 4f).
+      "PTY_INTERCEPTION_PROTOCOL_VERSION",
+      "PTY_INTERCEPTION_DECISION_TIMEOUT_MS",
+      "createInstalledInterceptionHandle",
+      "InstalledInterception",
+      "InterceptionChannelRef",
+      "InterceptionRequest",
+      "InterceptionDecision",
+      "InterceptionFailureReason",
+      "InterceptionInstallFailureReason",
+      "InterceptionLiveFailureReason",
+      "InterceptionDecisionBlockReason",
+      "InterceptionShellSupport",
     ];
     for (const symbol of FORBIDDEN_ABSENT) {
       expect(

@@ -243,6 +243,24 @@ export { RuntimeEnvInvalidError } from "./runtime-env.js";
 //       wired behind the guarded `--pty` path (Step 3d/4); exporting would
 //       surface engine internals as public API.
 //
+//   - PTY_INTERCEPTION_PROTOCOL_VERSION,
+//     PTY_INTERCEPTION_DECISION_TIMEOUT_MS,
+//     createInstalledInterceptionHandle,
+//     InstalledInterception (type),
+//     InterceptionChannelRef (type),
+//     InterceptionRequest (type),
+//     InterceptionDecision (type),
+//     InterceptionFailureReason (type),
+//     InterceptionInstallFailureReason (type),
+//     InterceptionLiveFailureReason (type),
+//     InterceptionDecisionBlockReason (type),
+//     InterceptionShellSupport (type)       (from ./commands/pty-interception.js)
+//     → M G4 Step 4a (D104.E/H/J/O): the interception protocol CONTRACT (wire
+//       types + constants + the branded InstalledInterception handle factory).
+//       Internal until the guarded interception path is wired (Step 4f);
+//       exporting would freeze the interception wire contract as public API
+//       before it exists.
+//
 //   - All file-internal helpers in operations/*.ts (readReportBytes,
 //     parseReportFile, assertSourceReportUnchanged, removeStaleFixPrompt,
 //     persistFixPrompt, formatCause, etc.)
