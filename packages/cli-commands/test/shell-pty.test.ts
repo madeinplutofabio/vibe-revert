@@ -7,13 +7,26 @@
 
 import { describe, expect, it } from "vitest";
 
-import type { PtyDisposable, PtyModule, PtyProcess } from "../src/commands/pty-loader.js";
+import type {
+  PtyDisposable,
+  PtyModule,
+  PtyProcess,
+  PtySpawnOptions,
+} from "../src/commands/pty-loader.js";
 import {
   attachTerminalBridge,
   evaluatePtyPreconditions,
   type PtyBridgeStreams,
+  type PtyExitResult,
+  type PtyShellContext,
+  type PtyShellSession,
+  type PtyShellSessionOpen,
   type ResolvedInteractiveShell,
+  type RunPtyShellDeps,
   resolveHostInteractiveShell,
+  runPtyShell,
+  type TerminalBridge,
+  type TerminalBridgeDisposeResult,
 } from "../src/commands/shell-pty.js";
 
 /**
@@ -573,5 +586,625 @@ describe("attachTerminalBridge -- raw passthrough + D104.I teardown", () => {
     expect(streams.stdoutWrites).toEqual([]);
     const exit = await bridge.waitForExit();
     expect(exit).toEqual({ exitCode: 1, signal: undefined });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runPtyShell orchestration fakes (all injected; no live PTY / native PTY module / fs)
+// ---------------------------------------------------------------------------
+
+const identitySignalCleanup: RunPtyShellDeps["withSignalCleanup"] = (_onSignal, run) => run();
+const firingSignalCleanup: RunPtyShellDeps["withSignalCleanup"] = (onSignal, run) => {
+  const pending = run();
+  onSignal();
+  return pending;
+};
+
+/** A recording PtyShellContext: stdout dims for spawn options + capturable stderr. */
+function createFakeContext(opts: { columns?: number; rows?: number; stderrThrows?: boolean } = {}) {
+  const stderrWrites: string[] = [];
+  const context: PtyShellContext = {
+    stdin: {
+      setRawMode: () => undefined,
+      on: () => undefined,
+      removeListener: () => undefined,
+    },
+    stdout: {
+      // Omit dims when undefined (exactOptionalPropertyTypes): absent, not
+      // present-with-undefined.
+      ...(opts.columns !== undefined ? { columns: opts.columns } : {}),
+      ...(opts.rows !== undefined ? { rows: opts.rows } : {}),
+      write: () => undefined,
+      on: () => undefined,
+      removeListener: () => undefined,
+    },
+    stderr: {
+      write: (data) => {
+        if (opts.stderrThrows) {
+          throw new Error("stderr.write failed");
+        }
+        stderrWrites.push(data);
+      },
+    },
+  };
+  return { context, stderrText: () => stderrWrites.join("") };
+}
+
+/** A PtyModule that records spawn calls and returns a kill-recording child. */
+function createSpawningPty(opts: { spawnThrows?: boolean; killThrows?: boolean } = {}) {
+  const spawnCalls: {
+    file: string;
+    args: readonly string[] | undefined;
+    options: PtySpawnOptions | undefined;
+  }[] = [];
+  let killCalls = 0;
+  const child: PtyProcess = {
+    write: () => undefined,
+    resize: () => undefined,
+    kill: () => {
+      // Count the attempt, then throw: killCount() stays honest even when the
+      // backstop kill fails.
+      killCalls += 1;
+      if (opts.killThrows) {
+        throw new Error("child.kill failed");
+      }
+    },
+    onData: () => noopDisposable,
+    onExit: () => noopDisposable,
+  };
+  const module: PtyModule = {
+    spawn: (file, args, options) => {
+      if (opts.spawnThrows) {
+        throw new Error("pty.spawn failed");
+      }
+      spawnCalls.push({ file, args, options });
+      return child;
+    },
+  };
+  return { module, child, spawnCalls, killCount: () => killCalls };
+}
+
+/** A fake session port: open/close outcomes + call counts. */
+function createFakeSession(
+  opts: {
+    open?: PtyShellSessionOpen;
+    openThrows?: unknown;
+    close?: number;
+    closeThrows?: unknown;
+  } = {},
+) {
+  let openCalls = 0;
+  let closeCalls = 0;
+  const session: PtyShellSession = {
+    open: async () => {
+      openCalls += 1;
+      if (opts.openThrows !== undefined) {
+        throw opts.openThrows;
+      }
+      return opts.open ?? { kind: "opened", sessionId: "sess-1" };
+    },
+    close: async () => {
+      closeCalls += 1;
+      if (opts.closeThrows !== undefined) {
+        throw opts.closeThrows;
+      }
+      return opts.close ?? 0;
+    },
+  };
+  return { session, openCount: () => openCalls, closeCount: () => closeCalls };
+}
+
+/** A fake TerminalBridge: configurable exit / rejection / per-call dispose results. */
+function createFakeBridge(
+  opts: {
+    exit?: PtyExitResult;
+    rejects?: boolean;
+    rejectError?: unknown;
+    disposeResults?: readonly TerminalBridgeDisposeResult[];
+    disposeThrows?: unknown;
+  } = {},
+) {
+  let disposeCalls = 0;
+  const disposeResults = opts.disposeResults ?? [{ errors: [] }];
+  const bridge: TerminalBridge = {
+    waitForExit: () =>
+      opts.rejects === true
+        ? Promise.reject(opts.rejectError ?? new Error("waitForExit rejected"))
+        : Promise.resolve(opts.exit ?? { exitCode: 0, signal: undefined }),
+    dispose: () => {
+      const index = Math.min(disposeCalls, disposeResults.length - 1);
+      disposeCalls += 1;
+      if (opts.disposeThrows !== undefined) {
+        throw opts.disposeThrows;
+      }
+      return disposeResults[index] ?? { errors: [] };
+    },
+  };
+  return { bridge, disposeCount: () => disposeCalls };
+}
+
+/** Assemble RunPtyShellDeps with proceed-happy defaults; each test overrides seams. */
+function baseDeps(over: Partial<RunPtyShellDeps> = {}): RunPtyShellDeps {
+  return {
+    context: over.context ?? createFakeContext().context,
+    hasInteractiveTty: over.hasInteractiveTty ?? (() => true),
+    loadPtyModule: over.loadPtyModule ?? (async () => fakePty),
+    resolveHostShell: over.resolveHostShell ?? (() => fakeShell),
+    attachBridge: over.attachBridge ?? (() => createFakeBridge().bridge),
+    session: over.session ?? createFakeSession().session,
+    cwd: over.cwd ?? "/repo",
+    spawnEnv: over.spawnEnv ?? {},
+    withSignalCleanup: over.withSignalCleanup ?? identitySignalCleanup,
+  };
+}
+
+/** Count how many `Error in PTY shell:` lines were written to stderr. */
+function driveErrorLineCount(stderr: string): number {
+  return stderr.split("Error in PTY shell:").length - 1;
+}
+
+describe("runPtyShell -- orchestration (fully injected, no live PTY)", () => {
+  it("refuses not_tty: exit 1, message, session never opened", async () => {
+    const ctx = createFakeContext();
+    const session = createFakeSession();
+    const code = await runPtyShell(
+      baseDeps({ context: ctx.context, hasInteractiveTty: () => false, session: session.session }),
+    );
+    expect(code).toBe(1);
+    expect(ctx.stderrText()).toContain("requires an interactive terminal");
+    expect(session.openCount()).toBe(0);
+  });
+
+  it("refuses pty_unavailable when the loader returns null: exit 1, session never opened", async () => {
+    const ctx = createFakeContext();
+    const session = createFakeSession();
+    const code = await runPtyShell(
+      baseDeps({ context: ctx.context, loadPtyModule: async () => null, session: session.session }),
+    );
+    expect(code).toBe(1);
+    expect(ctx.stderrText()).toContain("optional native PTY dependency");
+    expect(session.openCount()).toBe(0);
+  });
+
+  it("refuses no_shell when no shell resolves: exit 1, session never opened", async () => {
+    const ctx = createFakeContext();
+    const session = createFakeSession();
+    const code = await runPtyShell(
+      baseDeps({ context: ctx.context, resolveHostShell: () => null, session: session.session }),
+    );
+    expect(code).toBe(1);
+    expect(ctx.stderrText()).toContain("could not find a suitable interactive shell");
+    expect(session.openCount()).toBe(0);
+  });
+
+  it("surfaces an unexpected error preparing the gate (hasInteractiveTty throws)", async () => {
+    const ctx = createFakeContext();
+    const session = createFakeSession();
+    const code = await runPtyShell(
+      baseDeps({
+        context: ctx.context,
+        hasInteractiveTty: () => {
+          throw new Error("tty probe blew up");
+        },
+        session: session.session,
+      }),
+    );
+    expect(code).toBe(1);
+    expect(ctx.stderrText()).toContain("Unexpected error preparing PTY shell: tty probe blew up");
+    expect(session.openCount()).toBe(0);
+  });
+
+  it("surfaces an unexpected error preparing the gate (resolveHostShell throws)", async () => {
+    const ctx = createFakeContext();
+    const code = await runPtyShell(
+      baseDeps({
+        context: ctx.context,
+        resolveHostShell: () => {
+          throw new Error("shell probe blew up");
+        },
+      }),
+    );
+    expect(code).toBe(1);
+    expect(ctx.stderrText()).toContain("Unexpected error preparing PTY shell: shell probe blew up");
+  });
+
+  it("writes the session's refusal text and returns its exit code without closing or spawning", async () => {
+    const ctx = createFakeContext();
+    const spawning = createSpawningPty();
+    const session = createFakeSession({
+      open: { kind: "refused", exitCode: 3, stderrText: "session busy\n" },
+    });
+    const code = await runPtyShell(
+      baseDeps({
+        context: ctx.context,
+        loadPtyModule: async () => spawning.module,
+        session: session.session,
+      }),
+    );
+    expect(code).toBe(3);
+    expect(ctx.stderrText()).toBe("session busy\n");
+    expect(session.closeCount()).toBe(0);
+    expect(spawning.spawnCalls).toHaveLength(0);
+  });
+
+  it("returns 1 and does not close when session.open throws", async () => {
+    const ctx = createFakeContext();
+    const session = createFakeSession({ openThrows: new Error("lock read failed") });
+    const code = await runPtyShell(baseDeps({ context: ctx.context, session: session.session }));
+    expect(code).toBe(1);
+    expect(ctx.stderrText()).toContain(
+      "Unexpected error starting PTY shell session: lock read failed",
+    );
+    expect(session.closeCount()).toBe(0);
+  });
+
+  it("formats a non-Error thrown by session.open", async () => {
+    const ctx = createFakeContext();
+    const session = createFakeSession({ openThrows: "boom" });
+    const code = await runPtyShell(baseDeps({ context: ctx.context, session: session.session }));
+    expect(code).toBe(1);
+    expect(ctx.stderrText()).toContain("Unexpected error starting PTY shell session: boom");
+  });
+
+  it("formats an unprintable thrown value without rejecting", async () => {
+    const ctx = createFakeContext();
+    const unprintable = {
+      toString: () => {
+        throw new Error("toString failed");
+      },
+    };
+    const session = createFakeSession({ openThrows: unprintable });
+    const code = await runPtyShell(baseDeps({ context: ctx.context, session: session.session }));
+    expect(code).toBe(1);
+    expect(ctx.stderrText()).toContain(
+      "Unexpected error starting PTY shell session: [unprintable thrown value]",
+    );
+  });
+
+  it("happy path: spawns the resolved shell, drives the bridge, closes, returns 0", async () => {
+    const ctx = createFakeContext({ columns: 80, rows: 24 });
+    const spawning = createSpawningPty();
+    const fakeBridge = createFakeBridge({ exit: { exitCode: 0, signal: undefined } });
+    const session = createFakeSession();
+    const spawnEnv = { FOO: "bar" };
+    let attachStreams: PtyBridgeStreams | undefined;
+    let attachChild: PtyProcess | undefined;
+
+    const code = await runPtyShell(
+      baseDeps({
+        context: ctx.context,
+        loadPtyModule: async () => spawning.module,
+        attachBridge: (streams, child) => {
+          attachStreams = streams;
+          attachChild = child;
+          return fakeBridge.bridge;
+        },
+        session: session.session,
+        cwd: "/work",
+        spawnEnv,
+      }),
+    );
+
+    expect(code).toBe(0);
+    expect(spawning.spawnCalls).toHaveLength(1);
+    const call = spawning.spawnCalls[0];
+    expect(call?.file).toBe("/bin/bash");
+    expect(call?.args).toEqual(["-i"]);
+    expect(call?.args).not.toBe(fakeShell.args); // copied, not the resolved array
+    expect(call?.options).toEqual({ cwd: "/work", env: { FOO: "bar" }, cols: 80, rows: 24 });
+    expect(call?.options?.env).not.toBe(spawnEnv); // env copied
+    expect(attachStreams).toBe(ctx.context);
+    expect(attachChild).toBe(spawning.child);
+    expect(ctx.stderrText()).toBe("");
+    expect(session.openCount()).toBe(1);
+    expect(session.closeCount()).toBe(1);
+  });
+
+  it("displays a non-zero inner-shell exit but returns 0 (swallowed)", async () => {
+    const ctx = createFakeContext({ columns: 80, rows: 24 });
+    const code = await runPtyShell(
+      baseDeps({
+        context: ctx.context,
+        attachBridge: () => createFakeBridge({ exit: { exitCode: 5, signal: undefined } }).bridge,
+      }),
+    );
+    expect(code).toBe(0);
+    expect(ctx.stderrText()).toContain("[exit: 5]");
+  });
+
+  it("displays a signal exit numerically but returns 0", async () => {
+    const ctx = createFakeContext({ columns: 80, rows: 24 });
+    const code = await runPtyShell(
+      baseDeps({
+        context: ctx.context,
+        attachBridge: () => createFakeBridge({ exit: { exitCode: 0, signal: 15 } }).bridge,
+      }),
+    );
+    expect(code).toBe(0);
+    expect(ctx.stderrText()).toContain("[signal: 15]");
+  });
+
+  it("prints no status line on a clean zero exit", async () => {
+    const ctx = createFakeContext({ columns: 80, rows: 24 });
+    const code = await runPtyShell(baseDeps({ context: ctx.context }));
+    expect(code).toBe(0);
+    expect(ctx.stderrText()).toBe("");
+  });
+
+  it("spawn throws: fails, still closes the session, returns 1, no kill", async () => {
+    const ctx = createFakeContext();
+    const spawning = createSpawningPty({ spawnThrows: true });
+    const session = createFakeSession();
+    const code = await runPtyShell(
+      baseDeps({
+        context: ctx.context,
+        loadPtyModule: async () => spawning.module,
+        session: session.session,
+      }),
+    );
+    expect(code).toBe(1);
+    expect(ctx.stderrText()).toContain("Error in PTY shell: pty.spawn failed");
+    expect(spawning.killCount()).toBe(0);
+    expect(session.closeCount()).toBe(1);
+  });
+
+  it("attach throws: backstop-kills the child, closes, returns 1", async () => {
+    const ctx = createFakeContext();
+    const spawning = createSpawningPty();
+    const session = createFakeSession();
+    const code = await runPtyShell(
+      baseDeps({
+        context: ctx.context,
+        loadPtyModule: async () => spawning.module,
+        attachBridge: () => {
+          throw new Error("attach boom");
+        },
+        session: session.session,
+      }),
+    );
+    expect(code).toBe(1);
+    expect(ctx.stderrText()).toContain("Error in PTY shell: attach boom");
+    expect(spawning.killCount()).toBe(1);
+    expect(session.closeCount()).toBe(1);
+  });
+
+  it("attach throws and the backstop kill also throws: both errors reported", async () => {
+    const ctx = createFakeContext();
+    const spawning = createSpawningPty({ killThrows: true });
+    const code = await runPtyShell(
+      baseDeps({
+        context: ctx.context,
+        loadPtyModule: async () => spawning.module,
+        attachBridge: () => {
+          throw new Error("attach boom");
+        },
+      }),
+    );
+    expect(code).toBe(1);
+    expect(ctx.stderrText()).toContain("attach boom");
+    expect(ctx.stderrText()).toContain("child.kill failed");
+    expect(driveErrorLineCount(ctx.stderrText())).toBe(2);
+    expect(spawning.killCount()).toBe(1);
+  });
+
+  it("waitForExit rejection: disposes, fails closed, closes, returns 1", async () => {
+    const ctx = createFakeContext();
+    const bridge = createFakeBridge({ rejects: true, rejectError: new Error("wait boom") });
+    const session = createFakeSession();
+    const code = await runPtyShell(
+      baseDeps({
+        context: ctx.context,
+        attachBridge: () => bridge.bridge,
+        session: session.session,
+      }),
+    );
+    expect(code).toBe(1);
+    expect(ctx.stderrText()).toContain("Error in PTY shell: wait boom");
+    expect(bridge.disposeCount()).toBeGreaterThanOrEqual(1);
+    expect(session.closeCount()).toBe(1);
+  });
+
+  it("waitForExit rejection plus dispose throw reports both errors and still closes", async () => {
+    const ctx = createFakeContext();
+    const session = createFakeSession();
+    const bridge = createFakeBridge({
+      rejects: true,
+      rejectError: new Error("wait boom"),
+      disposeThrows: new Error("dispose after wait boom"),
+    });
+
+    const code = await runPtyShell(
+      baseDeps({
+        context: ctx.context,
+        attachBridge: () => bridge.bridge,
+        session: session.session,
+      }),
+    );
+
+    expect(code).toBe(1);
+    expect(ctx.stderrText()).toContain("Error in PTY shell: wait boom");
+    expect(ctx.stderrText()).toContain("Error in PTY shell: dispose after wait boom");
+    expect(driveErrorLineCount(ctx.stderrText())).toBe(2);
+    expect(bridge.disposeCount()).toBeGreaterThanOrEqual(1);
+    expect(session.closeCount()).toBe(1);
+  });
+
+  it("dispose errors on clean completion are treated as failure", async () => {
+    const ctx = createFakeContext({ columns: 80, rows: 24 });
+    const code = await runPtyShell(
+      baseDeps({
+        context: ctx.context,
+        attachBridge: () =>
+          createFakeBridge({
+            exit: { exitCode: 0, signal: undefined },
+            disposeResults: [{ errors: [new Error("teardown boom")] }],
+          }).bridge,
+      }),
+    );
+    expect(code).toBe(1);
+    expect(ctx.stderrText()).toContain("Error tearing down PTY shell: teardown boom");
+  });
+
+  it("tolerates a contract-violating dispose() throw (no rejection escapes)", async () => {
+    const ctx = createFakeContext({ columns: 80, rows: 24 });
+    const code = await runPtyShell(
+      baseDeps({
+        context: ctx.context,
+        attachBridge: () =>
+          createFakeBridge({
+            exit: { exitCode: 0, signal: undefined },
+            disposeThrows: new Error("dispose exploded"),
+          }).bridge,
+      }),
+    );
+    expect(code).toBe(1);
+    expect(ctx.stderrText()).toContain("Error tearing down PTY shell: dispose exploded");
+  });
+
+  it("session.close returning non-zero makes the wrapper fail", async () => {
+    const ctx = createFakeContext({ columns: 80, rows: 24 });
+    const session = createFakeSession({ close: 2 });
+    const code = await runPtyShell(baseDeps({ context: ctx.context, session: session.session }));
+    expect(code).toBe(1);
+  });
+
+  it("session.close throwing is observed safely and fails the wrapper", async () => {
+    const ctx = createFakeContext({ columns: 80, rows: 24 });
+    const session = createFakeSession({ closeThrows: new Error("end failed") });
+    const code = await runPtyShell(baseDeps({ context: ctx.context, session: session.session }));
+    expect(code).toBe(1);
+    expect(ctx.stderrText()).toContain("Unexpected error closing PTY shell session: end failed");
+  });
+
+  it("never rejects even when stderr.write throws (refuse path still returns the code)", async () => {
+    const ctx = createFakeContext({ stderrThrows: true });
+    await expect(
+      runPtyShell(baseDeps({ context: ctx.context, hasInteractiveTty: () => false })),
+    ).resolves.toBe(1);
+  });
+
+  it("signal-triggered dispose fails closed with a synthetic error", async () => {
+    const ctx = createFakeContext({ columns: 80, rows: 24 });
+    const bridge = createFakeBridge({ exit: { exitCode: 0, signal: undefined } });
+    const session = createFakeSession();
+    const code = await runPtyShell(
+      baseDeps({
+        context: ctx.context,
+        attachBridge: () => bridge.bridge,
+        session: session.session,
+        withSignalCleanup: firingSignalCleanup,
+      }),
+    );
+    expect(code).toBe(1);
+    expect(ctx.stderrText()).toContain(
+      "Error in PTY shell: PTY shell interrupted by parent signal",
+    );
+    expect(ctx.stderrText()).not.toContain("[exit:");
+    expect(bridge.disposeCount()).toBeGreaterThanOrEqual(1);
+    expect(session.closeCount()).toBe(1);
+  });
+
+  it("signal-triggered dispose surfaces a cached teardown error exactly once (deduped)", async () => {
+    const ctx = createFakeContext({ columns: 80, rows: 24 });
+    const sharedErr = new Error("cached teardown");
+    const code = await runPtyShell(
+      baseDeps({
+        context: ctx.context,
+        attachBridge: () =>
+          createFakeBridge({
+            exit: { exitCode: 0, signal: undefined },
+            disposeResults: [{ errors: [sharedErr] }], // same object returned each dispose
+          }).bridge,
+        withSignalCleanup: firingSignalCleanup,
+      }),
+    );
+    expect(code).toBe(1);
+    expect(driveErrorLineCount(ctx.stderrText())).toBe(1);
+    expect(ctx.stderrText()).toContain("cached teardown");
+  });
+
+  it("signal cleanup error and a different final dispose error are both reported", async () => {
+    const ctx = createFakeContext({ columns: 80, rows: 24 });
+    const code = await runPtyShell(
+      baseDeps({
+        context: ctx.context,
+        attachBridge: () =>
+          createFakeBridge({
+            exit: { exitCode: 0, signal: undefined },
+            disposeResults: [
+              { errors: [new Error("signal teardown")] },
+              { errors: [new Error("final teardown")] },
+            ],
+          }).bridge,
+        withSignalCleanup: firingSignalCleanup,
+      }),
+    );
+    expect(code).toBe(1);
+    expect(ctx.stderrText()).toContain("signal teardown");
+    expect(ctx.stderrText()).toContain("final teardown");
+    expect(driveErrorLineCount(ctx.stderrText())).toBe(2);
+  });
+
+  it("waitForExit rejection after signal cleanup includes wait and teardown errors", async () => {
+    const ctx = createFakeContext({ columns: 80, rows: 24 });
+    const sharedErr = new Error("signal teardown");
+    const bridge = createFakeBridge({
+      rejects: true,
+      rejectError: new Error("wait after signal"),
+      disposeResults: [{ errors: [sharedErr] }],
+    });
+    const session = createFakeSession();
+
+    const code = await runPtyShell(
+      baseDeps({
+        context: ctx.context,
+        attachBridge: () => bridge.bridge,
+        session: session.session,
+        withSignalCleanup: firingSignalCleanup,
+      }),
+    );
+
+    expect(code).toBe(1);
+    expect(ctx.stderrText()).toContain("Error in PTY shell: wait after signal");
+    expect(ctx.stderrText()).toContain("Error in PTY shell: signal teardown");
+    expect(driveErrorLineCount(ctx.stderrText())).toBe(2);
+    expect(bridge.disposeCount()).toBeGreaterThanOrEqual(1);
+    expect(session.closeCount()).toBe(1);
+  });
+
+  it("passes cols+rows to spawn only when both dimensions are usable", async () => {
+    const ctx = createFakeContext({ columns: 120, rows: 40 });
+    const spawning = createSpawningPty();
+    await runPtyShell(
+      baseDeps({ context: ctx.context, loadPtyModule: async () => spawning.module }),
+    );
+    expect(spawning.spawnCalls[0]?.options).toEqual({ cwd: "/repo", env: {}, cols: 120, rows: 40 });
+  });
+
+  it("omits both dimensions when only columns is present", async () => {
+    const ctx = createFakeContext({ columns: 120 });
+    const spawning = createSpawningPty();
+    await runPtyShell(
+      baseDeps({ context: ctx.context, loadPtyModule: async () => spawning.module }),
+    );
+    expect(spawning.spawnCalls[0]?.options).toEqual({ cwd: "/repo", env: {} });
+  });
+
+  it("omits both dimensions when only rows is present", async () => {
+    const ctx = createFakeContext({ rows: 40 });
+    const spawning = createSpawningPty();
+    await runPtyShell(
+      baseDeps({ context: ctx.context, loadPtyModule: async () => spawning.module }),
+    );
+    expect(spawning.spawnCalls[0]?.options).toEqual({ cwd: "/repo", env: {} });
+  });
+
+  it("omits both dimensions when a dimension is zero", async () => {
+    const ctx = createFakeContext({ columns: 0, rows: 40 });
+    const spawning = createSpawningPty();
+    await runPtyShell(
+      baseDeps({ context: ctx.context, loadPtyModule: async () => spawning.module }),
+    );
+    expect(spawning.spawnCalls[0]?.options).toEqual({ cwd: "/repo", env: {} });
   });
 });

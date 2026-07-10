@@ -221,11 +221,17 @@ export { RuntimeEnvInvalidError } from "./runtime-env.js";
 //     TerminalBridge (type),
 //     PtyBridgeStreams (type),
 //     PtyExitResult (type),
-//     TerminalBridgeDisposeResult (type)    (from ./commands/shell-pty.js)
-//     → M G4 Step 3c (D104.C/G/I): the PTY engine's host shell resolution,
-//       pre-spawn precondition gate, and raw terminal bridge. Internal until
-//       the engine is wired behind the guarded `--pty` path (Step 3d/4);
-//       exporting would surface engine internals as public API.
+//     TerminalBridgeDisposeResult (type),
+//     runPtyShell,
+//     RunPtyShellDeps (type),
+//     PtyShellContext (type),
+//     PtyShellSession (type),
+//     PtyShellSessionOpen (type)            (from ./commands/shell-pty.js)
+//     → M G4 Step 3c (D104.C/G/I/J): the PTY engine's host shell resolution,
+//       pre-spawn precondition gate, raw terminal bridge, and runPtyShell
+//       orchestration. Internal until the engine is wired behind the guarded
+//       `--pty` path (Step 3d/4); exporting would surface engine internals as
+//       public API.
 //
 //   - All file-internal helpers in operations/*.ts (readReportBytes,
 //     parseReportFile, assertSourceReportUnchanged, removeStaleFixPrompt,
