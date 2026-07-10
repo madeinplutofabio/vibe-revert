@@ -2634,6 +2634,16 @@ describe("Architectural invariants -- M G1a D99.M @viberevert/cli-commands bound
       "InterceptionServiceConnection",
       "InterceptionServiceTransport",
       "InterceptionService",
+      // Interception connection core (M G4 Step 4b-iii-a, D104.E/H/J/O) -- the
+      // socket-like NDJSON framing + per-read timeout wrapper; socket-free,
+      // internal until the guarded path is wired (Step 4f).
+      "SocketLike",
+      "takeFirstLine",
+      "TakeFirstLineResult",
+      "PTY_INTERCEPTION_MAX_LINE_BYTES",
+      "CancelTimer",
+      "InterceptionConnectionOptions",
+      "createInterceptionConnection",
     ];
     for (const symbol of FORBIDDEN_ABSENT) {
       expect(

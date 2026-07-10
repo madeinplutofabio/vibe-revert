@@ -284,6 +284,19 @@ export { RuntimeEnvInvalidError } from "./runtime-env.js";
 //       interception path is wired (Step 4f); the real 127.0.0.1 loopback
 //       transport is Step 4b-iii.
 //
+//   - SocketLike (type),
+//     takeFirstLine, TakeFirstLineResult (type),
+//     PTY_INTERCEPTION_MAX_LINE_BYTES,
+//     CancelTimer (type),
+//     InterceptionConnectionOptions (type),
+//     createInterceptionConnection    (from ./commands/pty-interception-connection.js)
+//     → M G4 Step 4b-iii-a (D104.E/H/J/O): the interception CONNECTION core over
+//       a socket-like -- NDJSON line framing (LF split, raw-byte cap, fatal UTF-8)
+//       + the per-read timeout + fail-closed teardown, wrapping a SocketLike into
+//       the 4b-ii connection port. Socket-free (no node:net); the real 127.0.0.1
+//       loopback adapter + endpoint is 4b-iii-b. Internal until the guarded
+//       interception path is wired (Step 4f).
+//
 //   - All file-internal helpers in operations/*.ts (readReportBytes,
 //     parseReportFile, assertSourceReportUnchanged, removeStaleFixPrompt,
 //     persistFixPrompt, formatCause, etc.)
