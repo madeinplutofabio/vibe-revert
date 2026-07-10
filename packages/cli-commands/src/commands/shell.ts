@@ -135,6 +135,22 @@ const PROMPT = "viberevert> ";
 /** The exact single-token line that terminates the REPL (D103.E). */
 const EXIT_WORD = "exit";
 
+/**
+ * The internal engine model (M G4, D104.A). `--pty` is thin sugar for the
+ * transparent PTY bridge; the default is the guarded REPL.
+ */
+type ShellEngine = "repl" | "pty";
+
+/**
+ * Refusal copy for the not-yet-enabled `shell --pty` path (D104.M.5). Until
+ * interception lands (Step 4), the public `--pty` path REFUSES and never reaches
+ * the PTY engine -- no unguarded transparent shell on main; the engine
+ * (shell-pty.ts) is exercised by tests via a direct import of runPtyShell only.
+ */
+const PTY_MODE_NOT_ENABLED_MESSAGE =
+  "PTY mode (--pty) is not enabled yet: the transparent PTY bridge is still under development.\n" +
+  "Use `viberevert shell` for the guarded command loop.\n";
+
 /** Result of the D103.G active-session ownership re-check. */
 type SessionOwnership = "ours" | "missing" | "different" | "unknown";
 
@@ -246,6 +262,11 @@ export class ShellCommand extends Command {
     description: "Optional human-readable description of what this session will do",
   });
 
+  pty = Option.Boolean("--pty", false, {
+    description:
+      "Experimental: transparent PTY bridge instead of the guarded REPL (not enabled yet)",
+  });
+
   /** True while a child is spawned -- suppresses the TTY SIGINT re-prompt. */
   private childRunning = false;
 
@@ -256,6 +277,17 @@ export class ShellCommand extends Command {
 
   override async execute(): Promise<number> {
     const stderr = this.context.stderr;
+
+    // M G4 (D104.A / D104.M.5): --pty selects the transparent PTY engine. Until
+    // interception lands (Step 4), the public --pty path REFUSES here -- BEFORE
+    // any --task/repo/config/session work -- and never reaches the PTY engine.
+    // The engine (shell-pty.ts) stays unwired; tests exercise it via a direct
+    // import of runPtyShell only.
+    const engine: ShellEngine = this.pty ? "pty" : "repl";
+    if (engine === "pty") {
+      stderr.write(PTY_MODE_NOT_ENABLED_MESSAGE);
+      return 1;
+    }
 
     // Defensive --task validation (mirrors StartCommand / RunCommand).
     if (this.task !== undefined && this.task.trim().length === 0) {

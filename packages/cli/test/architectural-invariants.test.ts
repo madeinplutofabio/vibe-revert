@@ -6406,20 +6406,39 @@ describe("Architectural invariants -- M G4 PTY engine boundaries (shell-pty.ts)"
   const SHELL_PTY_REL = "packages/cli-commands/src/commands/shell-pty.ts";
   const SHELL_REL = "packages/cli-commands/src/commands/shell.ts";
 
-  it("shell.ts does not import or reference shell-pty.ts (engine unwired in 3c)", () => {
+  it("D104.M.5 (TEMPORARY, M G4 Step 3d): shell.ts declares --pty but the public path REFUSES and never reaches the engine", () => {
+    // TEMPORARY M G4 Step 3d guard: replaced in Step 4 when the guarded PTY
+    // path is wired. Until then, `viberevert shell --pty` MUST refuse with the
+    // not-enabled copy and MUST NOT import/dispatch the PTY engine -- no
+    // unguarded transparent shell on main (D104.M.5). The engine (shell-pty.ts)
+    // is exercised by tests via a direct import of runPtyShell only.
+    //
+    // Non-regressions (already enforced, not re-duplicated here):
+    //   D104.M.3 -- shell.ts has no node-pty/openpty/conpty: see D103.M.3 above.
+    //   D104.M.4 -- shell-pty.ts routes I/O via injected context: see the
+    //               shell-pty process-stream invariant below.
     const stripped = stripTsComments(readSource(SHELL_REL));
-    expect(
-      stripped.includes("shell-pty"),
-      `${SHELL_REL} must not reference shell-pty.ts -- the PTY engine stays unwired until interception lands (M G4 Step 3c).`,
-    ).toBe(false);
-  });
 
-  it("shell.ts has no --pty flag yet (no public PTY path before interception)", () => {
-    const stripped = stripTsComments(readSource(SHELL_REL));
+    // The --pty flag exists (thin sugar for the "pty" engine model).
     expect(
-      stripped.includes("--pty"),
-      `${SHELL_REL} must not declare a --pty flag yet -- public --pty (refusing) lands in Step 3d/4, not 3c (M G4 Step 3c).`,
-    ).toBe(false);
+      /Option\.Boolean\(\s*["']--pty["']/.test(stripped),
+      `${SHELL_REL} must declare the --pty flag (M G4 Step 3d).`,
+    ).toBe(true);
+
+    // ...and the public path refuses with the not-enabled copy.
+    expect(
+      stripped.includes("PTY mode (--pty) is not enabled yet"),
+      `${SHELL_REL} must refuse the public --pty path with the not-enabled copy (D104.M.5).`,
+    ).toBe(true);
+
+    // ...and it NEVER reaches the engine: no shell-pty import, no runPtyShell,
+    // no createRunPtyShellDeps (all wired only in Step 4).
+    for (const banned of ["shell-pty", "runPtyShell", "createRunPtyShellDeps"]) {
+      expect(
+        stripped.includes(banned),
+        `${SHELL_REL} must NOT reference "${banned}" -- the public --pty path refuses and never reaches the engine until Step 4 (D104.M.5, TEMPORARY).`,
+      ).toBe(false);
+    }
   });
 
   it("shell-pty.ts references node-pty only via pty-loader, never directly", () => {
