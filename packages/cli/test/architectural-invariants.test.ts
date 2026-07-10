@@ -2622,6 +2622,18 @@ describe("Architectural invariants -- M G1a D99.M @viberevert/cli-commands bound
       "ParseInterceptionRequestResult",
       "decideInterception",
       "DecideInterceptionDeps",
+      // Interception service (M G4 Step 4b-ii, D104.E/H/J/O) -- the NDJSON frame
+      // kernel + the accept-loop lifecycle over an injected transport port
+      // (socket-free); internal until the guarded path is wired (Step 4f).
+      "encodeDecisionFrame",
+      "handleRequestLine",
+      "createInterceptionService",
+      "InterceptionServiceDeps",
+      "InterceptionFrameOutcome",
+      "InterceptionConnectionRead",
+      "InterceptionServiceConnection",
+      "InterceptionServiceTransport",
+      "InterceptionService",
     ];
     for (const symbol of FORBIDDEN_ABSENT) {
       expect(

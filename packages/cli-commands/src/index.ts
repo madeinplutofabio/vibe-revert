@@ -269,6 +269,21 @@ export { RuntimeEnvInvalidError } from "./runtime-env.js";
 //       CORE (wire-envelope parser + the nonce/policy fail-closed decision).
 //       Internal until the guarded interception path is wired (Step 4f).
 //
+//   - encodeDecisionFrame,
+//     handleRequestLine,
+//     createInterceptionService,
+//     InterceptionServiceDeps (type),
+//     InterceptionFrameOutcome (type),
+//     InterceptionConnectionRead (type),
+//     InterceptionServiceConnection (type),
+//     InterceptionServiceTransport (type),
+//     InterceptionService (type)      (from ./commands/pty-interception-service.js)
+//     → M G4 Step 4b-ii (D104.E/H/J/O): the parent-side interception SERVICE
+//       (NDJSON frame kernel + the accept-loop lifecycle over an injected
+//       transport port; still socket-free). Internal until the guarded
+//       interception path is wired (Step 4f); the real 127.0.0.1 loopback
+//       transport is Step 4b-iii.
+//
 //   - All file-internal helpers in operations/*.ts (readReportBytes,
 //     parseReportFile, assertSourceReportUnchanged, removeStaleFixPrompt,
 //     persistFixPrompt, formatCause, etc.)
