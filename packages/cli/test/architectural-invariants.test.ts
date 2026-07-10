@@ -2614,6 +2614,14 @@ describe("Architectural invariants -- M G1a D99.M @viberevert/cli-commands bound
       "InterceptionLiveFailureReason",
       "InterceptionDecisionBlockReason",
       "InterceptionShellSupport",
+      // Interception decision core (M G4 Step 4b-i, D104.E/H/J/O) -- the
+      // wire-envelope parser + the nonce/policy fail-closed decision, consumed
+      // only within the interception service; internal until the guarded
+      // interception path is wired (Step 4f).
+      "parseInterceptionRequest",
+      "ParseInterceptionRequestResult",
+      "decideInterception",
+      "DecideInterceptionDeps",
     ];
     for (const symbol of FORBIDDEN_ABSENT) {
       expect(

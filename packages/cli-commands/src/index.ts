@@ -261,6 +261,14 @@ export { RuntimeEnvInvalidError } from "./runtime-env.js";
 //       exporting would freeze the interception wire contract as public API
 //       before it exists.
 //
+//   - ParseInterceptionRequestResult (type),
+//     parseInterceptionRequest,
+//     DecideInterceptionDeps (type),
+//     decideInterception              (from ./commands/pty-interception-service.js)
+//     → M G4 Step 4b-i (D104.E/H/J/O): the parent-side interception decision
+//       CORE (wire-envelope parser + the nonce/policy fail-closed decision).
+//       Internal until the guarded interception path is wired (Step 4f).
+//
 //   - All file-internal helpers in operations/*.ts (readReportBytes,
 //     parseReportFile, assertSourceReportUnchanged, removeStaleFixPrompt,
 //     persistFixPrompt, formatCause, etc.)
