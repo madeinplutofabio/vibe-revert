@@ -2653,6 +2653,11 @@ describe("Architectural invariants -- M G1a D99.M @viberevert/cli-commands bound
       // Interception hook capability matrix (M G4 Step 4c, D104.E/O) -- the pure
       // bash-only shell gate; internal until the guarded path is wired (Step 4f).
       "resolveInterceptionShellSupport",
+      // Interception hook generator (M G4 Step 4d, D104.E/O) -- the pure bash
+      // DEBUG-trap rc-script generator; internal until the guarded path is wired
+      // (Step 4f).
+      "generateBashInterceptionHook",
+      "BashInterceptionHookParams",
     ];
     for (const symbol of FORBIDDEN_ABSENT) {
       expect(

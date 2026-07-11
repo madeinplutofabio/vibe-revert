@@ -312,6 +312,15 @@ export { RuntimeEnvInvalidError } from "./runtime-env.js";
 //       first gate in the interception-install path. Internal until the guarded
 //       interception path is wired (Step 4f).
 //
+//   - generateBashInterceptionHook,
+//     BashInterceptionHookParams (type)  (from ./commands/pty-interception-hook.js)
+//     → M G4 Step 4d (D104.E/O): the pure bash DEBUG-trap interception HOOK
+//       generator -- emits the nonce-bound rc-script that reports each command
+//       observed at Bash's interactive DEBUG boundary to the private 127.0.0.1
+//       channel and fail-closed skips unless the parent returns the exact allow.
+//       Validates+injects nonce/port/timeout (throws on unsafe). Internal until
+//       the guarded interception path is wired (Step 4f).
+//
 //   - All file-internal helpers in operations/*.ts (readReportBytes,
 //     parseReportFile, assertSourceReportUnchanged, removeStaleFixPrompt,
 //     persistFixPrompt, formatCause, etc.)
