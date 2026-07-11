@@ -2650,6 +2650,9 @@ describe("Architectural invariants -- M G1a D99.M @viberevert/cli-commands bound
       "isLoopbackPeer",
       "LoopbackInterceptionTransportOptions",
       "LoopbackInterceptionTransport",
+      // Interception hook capability matrix (M G4 Step 4c, D104.E/O) -- the pure
+      // bash-only shell gate; internal until the guarded path is wired (Step 4f).
+      "resolveInterceptionShellSupport",
     ];
     for (const symbol of FORBIDDEN_ABSENT) {
       expect(

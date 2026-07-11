@@ -306,6 +306,12 @@ export { RuntimeEnvInvalidError } from "./runtime-env.js";
 //       transport port + the InterceptionChannelRef endpoint. Internal until the
 //       guarded interception path is wired (Step 4f).
 //
+//   - resolveInterceptionShellSupport (from ./commands/pty-interception-shell-support.js)
+//     → M G4 Step 4c (D104.E/O): the interception hook capability matrix -- bash
+//       supported, everything else (incl. future ShellKinds) refused. Pure; the
+//       first gate in the interception-install path. Internal until the guarded
+//       interception path is wired (Step 4f).
+//
 //   - All file-internal helpers in operations/*.ts (readReportBytes,
 //     parseReportFile, assertSourceReportUnchanged, removeStaleFixPrompt,
 //     persistFixPrompt, formatCause, etc.)
