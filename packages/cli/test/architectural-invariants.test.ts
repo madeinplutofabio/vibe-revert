@@ -2644,6 +2644,12 @@ describe("Architectural invariants -- M G1a D99.M @viberevert/cli-commands bound
       "CancelTimer",
       "InterceptionConnectionOptions",
       "createInterceptionConnection",
+      // Loopback interception transport (M G4 Step 4b-iii-b, D104.E/H/J/O) -- the
+      // real node:net adapter; internal until the guarded path is wired (Step 4f).
+      "createLoopbackInterceptionTransport",
+      "isLoopbackPeer",
+      "LoopbackInterceptionTransportOptions",
+      "LoopbackInterceptionTransport",
     ];
     for (const symbol of FORBIDDEN_ABSENT) {
       expect(
@@ -6301,6 +6307,7 @@ describe("Architectural invariants -- M G3 viberevert shell guarded REPL (D103.M
 
 describe("Architectural invariants -- M G4 viberevert shell --pty PTY bridge (D104.M)", () => {
   const PTY_LOADER_REL = "packages/cli-commands/src/commands/pty-loader.ts";
+  const TRANSPORT_REL = "packages/cli-commands/src/commands/pty-interception-transport.ts";
   const CLI_COMMANDS_SRC = "packages/cli-commands/src";
 
   it("D104.M.1: node-pty is referenced ONLY by pty-loader.ts within cli-commands/src", () => {
@@ -6385,6 +6392,41 @@ describe("Architectural invariants -- M G4 viberevert shell --pty PTY bridge (D1
       workspaceYaml.includes("onlyBuiltDependencies"),
       "pnpm-workspace.yaml must NOT set onlyBuiltDependencies -- node-pty build scripts stay unapproved (D104.M.6).",
     ).toBe(false);
+  });
+
+  it("D104.M.7: net imports are confined to pty-interception-transport.ts within cli-commands/src", () => {
+    const srcAbs = join(REPO_ROOT, CLI_COMMANDS_SRC);
+    const files = findTsFiles(srcAbs);
+    expect(
+      files.length,
+      `Self-check: expected at least one .ts file under ${CLI_COMMANDS_SRC}.`,
+    ).toBeGreaterThan(0);
+
+    let ownerSeen = false;
+    for (const abs of files) {
+      const rel = relative(REPO_ROOT, abs).replace(/\\/g, "/");
+      const stripped = stripTsComments(readFileSync(abs, "utf8"));
+      const importsNet =
+        /\bfrom\s+["']node:net["']/.test(stripped) ||
+        /\bfrom\s+["']net["']/.test(stripped) ||
+        /\bimport\s*\(\s*["']node:net["']\s*\)/.test(stripped) ||
+        /\bimport\s*\(\s*["']net["']\s*\)/.test(stripped);
+      if (rel === TRANSPORT_REL) {
+        ownerSeen = true;
+        expect(
+          importsNet,
+          `${TRANSPORT_REL} is the sole net seam and must import node:net (D104.M.7).`,
+        ).toBe(true);
+        continue;
+      }
+      expect(
+        importsNet,
+        `${rel} must NOT import node:net/net -- the loopback transport (${TRANSPORT_REL}) is the only seam (D104.M.7).`,
+      ).toBe(false);
+    }
+    expect(ownerSeen, `Self-check: ${TRANSPORT_REL} must exist and be scanned (D104.M.7).`).toBe(
+      true,
+    );
   });
 });
 

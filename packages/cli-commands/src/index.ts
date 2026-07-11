@@ -297,6 +297,15 @@ export { RuntimeEnvInvalidError } from "./runtime-env.js";
 //       loopback adapter + endpoint is 4b-iii-b. Internal until the guarded
 //       interception path is wired (Step 4f).
 //
+//   - createLoopbackInterceptionTransport,
+//     isLoopbackPeer,
+//     LoopbackInterceptionTransportOptions (type),
+//     LoopbackInterceptionTransport (type) (from ./commands/pty-interception-transport.js)
+//     → M G4 Step 4b-iii-b (D104.E/H/J/O): the REAL 127.0.0.1 loopback net
+//       adapter -- the sole node:net file, implementing the interception
+//       transport port + the InterceptionChannelRef endpoint. Internal until the
+//       guarded interception path is wired (Step 4f).
+//
 //   - All file-internal helpers in operations/*.ts (readReportBytes,
 //     parseReportFile, assertSourceReportUnchanged, removeStaleFixPrompt,
 //     persistFixPrompt, formatCause, etc.)
