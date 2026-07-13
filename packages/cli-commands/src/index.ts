@@ -321,6 +321,25 @@ export { RuntimeEnvInvalidError } from "./runtime-env.js";
 //       Validates+injects nonce/port/timeout (throws on unsafe). Internal until
 //       the guarded interception path is wired (Step 4f).
 //
+//   - InterceptionShellStartup (type)  (from ./commands/pty-interception.js)
+//     → M G4 Step 4e-i (D104.E/H): the 4a contract's guarded-shell startup
+//       material, carried INSIDE the branded InstalledInterception handle so it
+//       is inseparable from a genuine install. Internal until the guarded
+//       interception path is wired (Step 4f).
+//
+//   - installBashInterception,
+//     publicReasonFor,
+//     BashInterceptionInstallResult (type),
+//     BashInterceptionInstallFailureCause (type),
+//     MaterializedInterceptionHook (type),
+//     InterceptionInstallDiagnostic (type),
+//     InstallBashInterceptionDeps (type)  (from ./commands/pty-interception-installer.js)
+//     → M G4 Step 4e-i (D104.E/H/J/O): the fully-injected bash interception
+//       INSTALLER -- assembles the channel (4b) + hook (4d) behind the shell
+//       gate (4c) into one branded handle; fail-closed + hostile-dependency-
+//       resistant, never throws. Internal until the guarded interception path is
+//       wired (Step 4f).
+//
 //   - All file-internal helpers in operations/*.ts (readReportBytes,
 //     parseReportFile, assertSourceReportUnchanged, removeStaleFixPrompt,
 //     persistFixPrompt, formatCause, etc.)

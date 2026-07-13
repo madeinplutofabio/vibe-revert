@@ -18,10 +18,13 @@
  * request/decision path -> FAIL CLOSED (block); never execute. This survives
  * any shell / PTY backend: no hook, no channel, no policy decision => no run.
  *
- * The engine may SPAWN only when it holds an `InstalledInterception` handle,
- * which only the installer can mint (branded; see below). An unsupported shell,
- * a hook-setup failure, or a channel-setup failure produces NO handle -> no
- * spawn. There is NO observe-only / warn-only path anywhere in public `--pty`.
+ * The engine may SPAWN only when it holds an `InstalledInterception` handle.
+ * Only this module's branded factory can mint one, and production installation
+ * obtains that factory through the real-bindings layer; the handle CARRIES the
+ * exact spawn material (`shellStartup`), so a guarded-shell spawn spec is
+ * inseparable from a genuine install. An unsupported shell, a hook-setup
+ * failure, or a channel-setup failure produces NO handle -> no spawn. There is
+ * NO observe-only / warn-only path anywhere in public `--pty`.
  *
  * --- Fail-closed taxonomy (one closed set, three surfaces) ---
  *
@@ -42,10 +45,11 @@
  *
  * --- Policy mapping (PTY v1) ---
  *
- * The parent evaluates policy against the raw prompt line as a single synthetic
- * argv `[rawLine]` (D104.H). In PTY v1, BOTH a guard match AND a require_confirm
- * match produce `blocked_by_policy`; a non-match produces `allow`. PTY v1 has NO
- * interactive confirm -- the guarded REPL remains the interactive-confirm path.
+ * The parent evaluates policy against the command text observed at the supported
+ * shell's interception boundary as a single synthetic argv `[rawLine]` (D104.H).
+ * In PTY v1, BOTH a guard match AND a require_confirm match produce
+ * `blocked_by_policy`; a non-match produces `allow`. PTY v1 has NO interactive
+ * confirm -- the guarded REPL remains the interactive-confirm path.
  *
  * --- Nonce posture (NOT a sandbox secret) ---
  *
@@ -120,8 +124,10 @@ export interface InterceptionRequest {
   readonly nonce: string;
   /** Per-request id; the decision echoes it -- a mismatch is desync -> fail closed. */
   readonly id: string;
-  // Exact prompt line observed by the supported shell hook before execution.
-  // NOT shell-expanded, NOT parsed by VibeRevert, NOT a child-process transcript.
+  // Command text exposed by the supported shell at its pre-execution interception
+  // boundary. For Bash v1 this is `$BASH_COMMAND` from the interactive DEBUG trap.
+  // NOT shell-expanded by VibeRevert, NOT parsed by VibeRevert, and NOT a
+  // child-process transcript.
   readonly rawLine: string;
 }
 
@@ -148,39 +154,132 @@ export interface InterceptionChannelRef {
   readonly endpoint: string;
 }
 
+/**
+ * The exact, validated startup the engine must use to spawn the guarded PTY
+ * shell. Carried INSIDE the branded handle (see `InstalledInterception`) so the
+ * spawn material is inseparable from a genuinely-installed interception -- there
+ * is no separate, forgeable way to obtain a guarded-shell spawn spec. For bash,
+ * `args` invoke it with ONLY the private hook rc file
+ * (`--noprofile --rcfile <rc> -i`): a clean guarded shell that loads NO user
+ * profile/rc -- aliases, prompt customizations, shell plugins, and user startup
+ * scripts are intentionally not loaded in v1. The `shellKind` discriminant
+ * leaves room for future non-bash startup forms.
+ */
+export type InterceptionShellStartup = {
+  readonly shellKind: "bash";
+  readonly executable: string;
+  readonly args: readonly string[];
+};
+
 // Brand: a REAL, module-PRIVATE Symbol (not exported). The factory stamps it
 // onto the handle, so an InstalledInterception is an honest runtime artifact --
 // and no other module can name the symbol, so createInstalledInterceptionHandle
-// is the only producer (a 4g invariant confines its production callers to the
-// installer).
+// is the only producer (a 4g invariant confines its production import to the
+// real-bindings layer).
 const interceptionReadyBrand: unique symbol = Symbol("viberevert.pty.interception.ready");
 
 /**
  * The opaque "interception is installed" handle. The PTY engine (4e) may spawn
  * ONLY when it holds one -- making "no interception => no spawn" a type-level
  * property (backstopped by the runtime pre-spawn refusal and a 4g invariant).
- * `shellKind` stays narrow (`"bash"`) until PowerShell interception is proven.
+ * `shellStartup` is the SOLE carrier of the guarded-shell spawn material, so the
+ * spawn spec is inseparable from a genuinely-installed interception. `shellKind`
+ * stays narrow (`"bash"`) until PowerShell interception is proven.
  */
 export interface InstalledInterception {
   readonly [interceptionReadyBrand]: true;
   readonly shellKind: "bash";
   readonly nonce: string;
   readonly channel: InterceptionChannelRef;
+  readonly shellStartup: InterceptionShellStartup;
 }
 
 /**
- * The SOLE producer of the branded handle. Production callers: the installer
- * (4d) only, after a real, successful hook + channel install (this contract's
- * unit test also calls it). Barrel-guarded (internal); a 4g invariant confines
- * production callers to the installer. The brand is stamped LAST so a future
- * field change cannot accidentally overwrite it.
+ * Validate the EXACT guarded bash startup shape. The only supported discriminant
+ * must invoke bash with precisely `--noprofile --rcfile <non-empty rcPath> -i`,
+ * so no branded bash handle can carry an unguarded argument arrangement such as
+ * a bare `-i`, an omitted/empty rc path, reordered flags, or extra args. The
+ * installer is responsible for supplying the path returned by its OWN successful
+ * hook materialization -- the factory validates the SHAPE, not that the path is
+ * that specific materialized file. Positional checks also close the sparse-array
+ * hole that `Array.prototype.every` would skip; a whitespace-only rc path is
+ * rejected as unusable.
+ */
+function validateBashStartup(startup: InterceptionShellStartup): void {
+  const { args } = startup;
+  if (
+    !Array.isArray(args) ||
+    args.length !== 4 ||
+    args[0] !== "--noprofile" ||
+    args[1] !== "--rcfile" ||
+    typeof args[2] !== "string" ||
+    args[2].trim().length === 0 ||
+    args[3] !== "-i"
+  ) {
+    throw new Error("InstalledInterception bash startup must be --noprofile --rcfile <rcPath> -i");
+  }
+}
+
+/**
+ * The SOLE producer of the branded handle -- and the validator/freezer of the
+ * spawn material it carries. Production orchestration reaches it ONLY through the
+ * 4e-iii real-bindings module, which imports it and injects it into the installer
+ * (the installer itself never imports it); a 4g invariant confines the
+ * real-factory import to that bindings module + tests. Validates the handle
+ * fields at RUNTIME (non-blank nonce, non-blank transport-opaque channel
+ * endpoint, an object startup that matches shellKind, non-blank executable) and,
+ * for the bash discriminant, the EXACT guarded startup shape (`--noprofile
+ * --rcfile <rcPath> -i`); a bad payload THROWS, so a stamp-time failure is
+ * fail-closed -- never a handle carrying unusable or unguarded spawn material.
+ * Copies + freezes every layer -- the channel, the startup payload, its args
+ * array, and the handle itself -- so no caller-retained reference can mutate the
+ * installed artifact afterward; the brand is stamped LAST so a future field
+ * change cannot overwrite it. Runtime guards are deliberate: TS types do not
+ * protect this factory from JavaScript callers or unsafe casts.
  */
 export function createInstalledInterceptionHandle(fields: {
   shellKind: "bash";
   nonce: string;
   channel: InterceptionChannelRef;
+  shellStartup: InterceptionShellStartup;
 }): InstalledInterception {
-  return { ...fields, [interceptionReadyBrand]: true };
+  const { shellKind, nonce, channel, shellStartup } = fields;
+
+  if (typeof nonce !== "string" || nonce.trim().length === 0) {
+    throw new Error("InstalledInterception nonce must be a non-blank string");
+  }
+  if (typeof channel?.endpoint !== "string" || channel.endpoint.trim().length === 0) {
+    throw new Error("InstalledInterception channel endpoint must be a non-blank string");
+  }
+  // Guard through an `unknown` view: a direct `shellStartup === null` would be a
+  // TS "no overlap" error since the static type is non-null, but a JS caller can
+  // still pass a non-object here.
+  const rawStartup = shellStartup as unknown;
+  if (typeof rawStartup !== "object" || rawStartup === null) {
+    throw new Error("InstalledInterception shellStartup must be an object");
+  }
+  if (shellStartup.shellKind !== shellKind) {
+    throw new Error("InstalledInterception shellStartup.shellKind must match shellKind");
+  }
+  if (typeof shellStartup.executable !== "string" || shellStartup.executable.trim().length === 0) {
+    throw new Error("InstalledInterception shellStartup.executable must be a non-empty string");
+  }
+  validateBashStartup(shellStartup);
+
+  const frozenChannel: InterceptionChannelRef = Object.freeze({ endpoint: channel.endpoint });
+  const frozenStartup: InterceptionShellStartup = Object.freeze({
+    shellKind: shellStartup.shellKind,
+    executable: shellStartup.executable,
+    args: Object.freeze([...shellStartup.args]),
+  });
+  const handle: InstalledInterception = {
+    shellKind,
+    nonce,
+    channel: frozenChannel,
+    shellStartup: frozenStartup,
+    [interceptionReadyBrand]: true,
+  };
+  return Object.freeze(handle);
 }
 
 /**

@@ -2658,6 +2658,20 @@ describe("Architectural invariants -- M G1a D99.M @viberevert/cli-commands bound
       // (Step 4f).
       "generateBashInterceptionHook",
       "BashInterceptionHookParams",
+      // Interception contract's guarded-shell startup material (M G4 Step 4e-i,
+      // D104.E/H) -- carried inside the branded handle; internal until the
+      // guarded path is wired (Step 4f).
+      "InterceptionShellStartup",
+      // Bash interception installer (M G4 Step 4e-i, D104.E/H/J/O) -- the 7
+      // fully-injected orchestration exports; internal until the guarded path is
+      // wired (Step 4f).
+      "installBashInterception",
+      "publicReasonFor",
+      "BashInterceptionInstallResult",
+      "BashInterceptionInstallFailureCause",
+      "MaterializedInterceptionHook",
+      "InterceptionInstallDiagnostic",
+      "InstallBashInterceptionDeps",
     ];
     for (const symbol of FORBIDDEN_ABSENT) {
       expect(
