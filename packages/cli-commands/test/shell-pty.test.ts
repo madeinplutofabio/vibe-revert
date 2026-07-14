@@ -6,6 +6,7 @@
 // deterministic, no live PTY / native PTY module / TTY / fs.
 
 import {
+  type Config,
   ConfigNotFoundError,
   ConfigParseError,
   ConfigValidationError,
@@ -704,7 +705,7 @@ function createFakeSession(
       if (opts.openThrows !== undefined) {
         throw opts.openThrows;
       }
-      return opts.open ?? { kind: "opened", sessionId: "sess-1" };
+      return opts.open ?? { kind: "opened", sessionId: "sess-1", commandsPolicy: undefined };
     },
     close: async () => {
       closeCalls += 1;
@@ -1258,12 +1259,21 @@ describe("runPtyShell -- orchestration (fully injected, no live PTY)", () => {
 // 3c-v real-bindings fakes + tests
 // ---------------------------------------------------------------------------
 
+/** A valid config with no command policy (`.commands === undefined`). */
+const OPS_DEFAULT_CONFIG = { version: 1 } as Config;
+
+/** The sanitized copy for a defensive config-extraction failure (matches source). */
+const configLoadFailedText =
+  "The VibeRevert configuration could not be read while starting the PTY shell.\n" +
+  "Use `viberevert shell` for the guarded command loop.\n";
+
 /** Build G3-backed session ops with quiet defaults; each test overrides a seam. */
 function makeSessionOps(
   over: Partial<G3BackedPtyShellSessionOps> = {},
 ): G3BackedPtyShellSessionOps {
   return {
     resolveRepoRoot: over.resolveRepoRoot ?? (() => "/repo"),
+    loadConfig: over.loadConfig ?? (async () => OPS_DEFAULT_CONFIG),
     startSessionOperation: over.startSessionOperation ?? (async () => ({ sessionId: "sess_1" })),
     endSessionOperation: over.endSessionOperation ?? (async () => undefined),
     loadActiveSessionLock: over.loadActiveSessionLock ?? (async () => null),
@@ -1512,7 +1522,11 @@ describe("createG3BackedPtyShellSession -- open refusals (byte-identical G3 copy
         "to create one.\n",
       ].join(""),
     });
-    expect(await session.open()).toEqual({ kind: "opened", sessionId: "sess_after_retry" });
+    expect(await session.open()).toEqual({
+      kind: "opened",
+      sessionId: "sess_after_retry",
+      commandsPolicy: undefined,
+    });
   });
 
   it("re-throws an unexpected start error", async () => {
@@ -1542,7 +1556,9 @@ describe("createG3BackedPtyShellSession -- open refusals (byte-identical G3 copy
 
 describe("createG3BackedPtyShellSession -- open success + one-shot", () => {
   it("records cwd + lockCommand + task and returns the session id", async () => {
-    let recorded: { cwd: string; lockCommand: string; task?: string } | undefined;
+    let recorded:
+      | { cwd: string; lockCommand: string; task?: string; loadedConfig?: Config }
+      | undefined;
     const session = createG3BackedPtyShellSession({
       cwd: "/repo",
       task: "do things",
@@ -1553,16 +1569,23 @@ describe("createG3BackedPtyShellSession -- open success + one-shot", () => {
         },
       }),
     });
-    expect(await session.open()).toEqual({ kind: "opened", sessionId: "sess_new" });
+    expect(await session.open()).toEqual({
+      kind: "opened",
+      sessionId: "sess_new",
+      commandsPolicy: undefined,
+    });
     expect(recorded).toEqual({
       cwd: "/repo",
       lockCommand: "viberevert shell --pty",
       task: "do things",
+      loadedConfig: OPS_DEFAULT_CONFIG,
     });
   });
 
   it("omits task from the start call when none is given", async () => {
-    let recorded: { cwd: string; lockCommand: string; task?: string } | undefined;
+    let recorded:
+      | { cwd: string; lockCommand: string; task?: string; loadedConfig?: Config }
+      | undefined;
     const session = createG3BackedPtyShellSession({
       cwd: "/repo",
       ops: makeSessionOps({
@@ -1573,7 +1596,11 @@ describe("createG3BackedPtyShellSession -- open success + one-shot", () => {
       }),
     });
     await session.open();
-    expect(recorded).toEqual({ cwd: "/repo", lockCommand: "viberevert shell --pty" });
+    expect(recorded).toEqual({
+      cwd: "/repo",
+      lockCommand: "viberevert shell --pty",
+      loadedConfig: OPS_DEFAULT_CONFIG,
+    });
     expect("task" in (recorded ?? {})).toBe(false);
   });
 
@@ -1588,8 +1615,16 @@ describe("createG3BackedPtyShellSession -- open success + one-shot", () => {
         },
       }),
     });
-    expect(await session.open()).toEqual({ kind: "opened", sessionId: "sess_1" });
-    expect(await session.open()).toEqual({ kind: "opened", sessionId: "sess_1" });
+    expect(await session.open()).toEqual({
+      kind: "opened",
+      sessionId: "sess_1",
+      commandsPolicy: undefined,
+    });
+    expect(await session.open()).toEqual({
+      kind: "opened",
+      sessionId: "sess_1",
+      commandsPolicy: undefined,
+    });
     expect(startCalls).toBe(1);
     await session.close();
     expect(await session.open()).toEqual({
@@ -1597,6 +1632,372 @@ describe("createG3BackedPtyShellSession -- open success + one-shot", () => {
       exitCode: 1,
       stderrText: "This PTY shell session adapter has already been closed.\n",
     });
+  });
+});
+
+describe("createG3BackedPtyShellSession -- config load + policy surfacing (M G4 4e-iv-a)", () => {
+  it("loads config against the resolved repo root, surfaces commandsPolicy by identity (read once), threads the exact Config with the original cwd, and leaks no other fields", async () => {
+    const policy = { guard: ["rm -rf /"] } as NonNullable<Config["commands"]>;
+    let commandsReads = 0;
+    const config = {
+      version: 1,
+      get commands() {
+        commandsReads += 1;
+        return policy;
+      },
+    } as Config;
+    let loadedRepoRoot: string | undefined;
+    let startedInput:
+      | {
+          readonly cwd: string;
+          readonly lockCommand: string;
+          readonly task?: string;
+          readonly loadedConfig?: Config;
+        }
+      | undefined;
+    const session = createG3BackedPtyShellSession({
+      cwd: "/work/tree",
+      ops: makeSessionOps({
+        resolveRepoRoot: () => "/repo",
+        loadConfig: async (repoRoot) => {
+          loadedRepoRoot = repoRoot;
+          return config;
+        },
+        startSessionOperation: async (input) => {
+          startedInput = input;
+          return { sessionId: "sess_x" };
+        },
+      }),
+    });
+
+    const opened = await session.open();
+
+    expect(commandsReads).toBe(1); // commands read exactly once
+    expect(loadedRepoRoot).toBe("/repo"); // config loaded against the RESOLVED repo root
+    expect(startedInput?.cwd).toBe("/work/tree"); // start still gets the ORIGINAL caller cwd
+    expect(startedInput?.lockCommand).toBe("viberevert shell --pty"); // PTY lock label unchanged
+    expect(startedInput?.loadedConfig).toBe(config); // the exact Config threaded onward
+
+    if (opened.kind !== "opened") {
+      throw new Error("expected opened");
+    }
+    expect(opened.sessionId).toBe("sess_x");
+    expect(opened.commandsPolicy).toBe(policy); // surfaced by identity
+    expect(Object.keys(opened).sort()).toEqual(["commandsPolicy", "kind", "sessionId"]);
+  });
+
+  it("primary path: ConfigNotFoundError from the loader maps to the exact copy without starting", async () => {
+    let startCalls = 0;
+    const session = createG3BackedPtyShellSession({
+      cwd: "/repo",
+      ops: makeSessionOps({
+        loadConfig: async () => {
+          throw new ConfigNotFoundError("/repo/.viberevert.yml");
+        },
+        startSessionOperation: async () => {
+          startCalls += 1;
+          return { sessionId: "x" };
+        },
+      }),
+    });
+    expect(await session.open()).toEqual({
+      kind: "refused",
+      exitCode: 1,
+      stderrText: [
+        "No .viberevert.yml found in this repo.\n",
+        "Run:\n",
+        "  viberevert init\n\n",
+        "to create one.\n",
+      ].join(""),
+    });
+    expect(startCalls).toBe(0);
+  });
+
+  it("primary path: ConfigParseError / ConfigValidationError from the loader map to the invalid-config copy without starting", async () => {
+    const parseErr = new ConfigParseError("/repo/.viberevert.yml", new Error("bad yaml"));
+    let startCalls = 0;
+    const parseSession = createG3BackedPtyShellSession({
+      cwd: "/repo",
+      ops: makeSessionOps({
+        loadConfig: async () => {
+          throw parseErr;
+        },
+        startSessionOperation: async () => {
+          startCalls += 1;
+          return { sessionId: "x" };
+        },
+      }),
+    });
+    expect(await parseSession.open()).toEqual({
+      kind: "refused",
+      exitCode: 1,
+      stderrText: `Invalid .viberevert.yml: ${parseErr.message}\nFix the file, or re-run:\n  viberevert init\n\nto start fresh.\n`,
+    });
+
+    const validationErr = new ConfigValidationError("/repo/.viberevert.yml", {
+      issues: [{ path: ["commands"], message: "bad" }],
+    } as unknown as ConstructorParameters<typeof ConfigValidationError>[1]);
+    const validationSession = createG3BackedPtyShellSession({
+      cwd: "/repo",
+      ops: makeSessionOps({
+        loadConfig: async () => {
+          throw validationErr;
+        },
+        startSessionOperation: async () => {
+          startCalls += 1;
+          return { sessionId: "x" };
+        },
+      }),
+    });
+    expect(await validationSession.open()).toEqual({
+      kind: "refused",
+      exitCode: 1,
+      stderrText: `Invalid .viberevert.yml: ${validationErr.message}\nFix the file, or re-run:\n  viberevert init\n\nto start fresh.\n`,
+    });
+    expect(startCalls).toBe(0);
+  });
+
+  it("extraction boundary: a null config fails closed and does not start", async () => {
+    let startCalls = 0;
+    const session = createG3BackedPtyShellSession({
+      cwd: "/repo",
+      ops: makeSessionOps({
+        loadConfig: async () => null as unknown as Config,
+        startSessionOperation: async () => {
+          startCalls += 1;
+          return { sessionId: "x" };
+        },
+      }),
+    });
+    expect(await session.open()).toEqual({
+      kind: "refused",
+      exitCode: 1,
+      stderrText: configLoadFailedText,
+    });
+    expect(startCalls).toBe(0);
+  });
+
+  it("extraction boundary: an array config fails closed and does not start", async () => {
+    let startCalls = 0;
+    const session = createG3BackedPtyShellSession({
+      cwd: "/repo",
+      ops: makeSessionOps({
+        loadConfig: async () => [] as unknown as Config,
+        startSessionOperation: async () => {
+          startCalls += 1;
+          return { sessionId: "x" };
+        },
+      }),
+    });
+    expect(await session.open()).toEqual({
+      kind: "refused",
+      exitCode: 1,
+      stderrText: configLoadFailedText,
+    });
+    expect(startCalls).toBe(0);
+  });
+
+  it("extraction boundary: a throwing `commands` getter fails closed and does not start", async () => {
+    let startCalls = 0;
+    const hostile = {
+      version: 1,
+      get commands() {
+        throw new Error("hostile getter");
+      },
+    } as unknown as Config;
+    const session = createG3BackedPtyShellSession({
+      cwd: "/repo",
+      ops: makeSessionOps({
+        loadConfig: async () => hostile,
+        startSessionOperation: async () => {
+          startCalls += 1;
+          return { sessionId: "x" };
+        },
+      }),
+    });
+    expect(await session.open()).toEqual({
+      kind: "refused",
+      exitCode: 1,
+      stderrText: configLoadFailedText,
+    });
+    expect(startCalls).toBe(0);
+  });
+
+  it("extraction boundary: a revoked proxy fails closed (unmapped loader tier) and does not start", async () => {
+    let startCalls = 0;
+    const { proxy, revoke } = Proxy.revocable({}, {});
+    revoke();
+    const session = createG3BackedPtyShellSession({
+      cwd: "/repo",
+      ops: makeSessionOps({
+        loadConfig: async () => proxy as Config,
+        startSessionOperation: async () => {
+          startCalls += 1;
+          return { sessionId: "x" };
+        },
+      }),
+    });
+    // A revoked proxy throws during the async await's thenable-check (`get then`),
+    // BEFORE the structural inspection -- so it surfaces as an unmapped loader
+    // failure that propagates (fail-closed via runPtyShell's unexpected-error
+    // path), and no session is started.
+    await expect(session.open()).rejects.toThrow(/revoked/);
+    expect(startCalls).toBe(0);
+  });
+
+  it("an unmapped loader rejection propagates and does not start (state stays retryable)", async () => {
+    const boom = new Error("EACCES: permission denied");
+    let fail = true;
+    let loadCalls = 0;
+    let startCalls = 0;
+    const session = createG3BackedPtyShellSession({
+      cwd: "/repo",
+      ops: makeSessionOps({
+        loadConfig: async () => {
+          loadCalls += 1;
+          if (fail) {
+            throw boom;
+          }
+          return OPS_DEFAULT_CONFIG;
+        },
+        startSessionOperation: async () => {
+          startCalls += 1;
+          return { sessionId: "sess_ok" };
+        },
+      }),
+    });
+    await expect(session.open()).rejects.toBe(boom);
+    expect(loadCalls).toBe(1);
+    expect(startCalls).toBe(0);
+    // Not poisoned: a later valid open() succeeds.
+    fail = false;
+    expect(await session.open()).toEqual({
+      kind: "opened",
+      sessionId: "sess_ok",
+      commandsPolicy: undefined,
+    });
+    expect(loadCalls).toBe(2);
+    expect(startCalls).toBe(1);
+    // cached reopen -> no reload/restart.
+    await session.open();
+    expect(loadCalls).toBe(2);
+    expect(startCalls).toBe(1);
+  });
+
+  it("re-open returns the captured policy without reloading or restarting", async () => {
+    let loadCalls = 0;
+    let startCalls = 0;
+    const policy = { guard: [] } as NonNullable<Config["commands"]>;
+    const config = { version: 1, commands: policy } as Config;
+    const session = createG3BackedPtyShellSession({
+      cwd: "/repo",
+      ops: makeSessionOps({
+        loadConfig: async () => {
+          loadCalls += 1;
+          return config;
+        },
+        startSessionOperation: async () => {
+          startCalls += 1;
+          return { sessionId: "sess_1" };
+        },
+      }),
+    });
+    await session.open();
+    const second = await session.open();
+    expect(loadCalls).toBe(1);
+    expect(startCalls).toBe(1);
+    expect(second).toEqual({ kind: "opened", sessionId: "sess_1", commandsPolicy: policy });
+    if (second.kind === "opened") {
+      expect(second.commandsPolicy).toBe(policy);
+    }
+  });
+
+  it("extraction failure does not poison state: refuse, then a valid retry, then cached reopen", async () => {
+    let loadCalls = 0;
+    let startCalls = 0;
+    let malformed = true;
+    const session = createG3BackedPtyShellSession({
+      cwd: "/repo",
+      ops: makeSessionOps({
+        loadConfig: async () => {
+          loadCalls += 1;
+          return malformed ? (null as unknown as Config) : OPS_DEFAULT_CONFIG;
+        },
+        startSessionOperation: async () => {
+          startCalls += 1;
+          return { sessionId: "sess_ok" };
+        },
+      }),
+    });
+    // 1. malformed -> refused, no start.
+    expect((await session.open()).kind).toBe("refused");
+    expect(loadCalls).toBe(1);
+    expect(startCalls).toBe(0);
+    // 2. valid retry -> opened.
+    malformed = false;
+    expect(await session.open()).toEqual({
+      kind: "opened",
+      sessionId: "sess_ok",
+      commandsPolicy: undefined,
+    });
+    expect(loadCalls).toBe(2);
+    expect(startCalls).toBe(1);
+    // 3. cached reopen -> no reload/restart.
+    await session.open();
+    expect(loadCalls).toBe(2);
+    expect(startCalls).toBe(1);
+  });
+
+  it("session-start failure does not commit: refuse, then a valid retry reloads a DISTINCT config, then cached reopen", async () => {
+    let loadCalls = 0;
+    let startCalls = 0;
+    let failStart = true;
+    const failedPolicy = { guard: [] } as NonNullable<Config["commands"]>;
+    const successfulPolicy = { guard: [] } as NonNullable<Config["commands"]>;
+    const configs = [
+      { version: 1, commands: failedPolicy } as Config,
+      { version: 1, commands: successfulPolicy } as Config,
+    ];
+    const active = {
+      session_id: "sess_active",
+      started_at: "2026-07-01T00:00:00Z",
+      checkpoint_id: "cp_active",
+    } as unknown as ConstructorParameters<typeof SessionAlreadyActiveError>[0];
+    const session = createG3BackedPtyShellSession({
+      cwd: "/repo",
+      ops: makeSessionOps({
+        loadConfig: async () => {
+          const config = configs[loadCalls] ?? OPS_DEFAULT_CONFIG;
+          loadCalls += 1;
+          return config;
+        },
+        startSessionOperation: async () => {
+          startCalls += 1;
+          if (failStart) {
+            throw new SessionAlreadyActiveError(active);
+          }
+          return { sessionId: "sess_ok" };
+        },
+      }),
+    });
+    // 1. start fails after a valid (failed-attempt) config -> refused, no commit.
+    expect((await session.open()).kind).toBe("refused");
+    expect(loadCalls).toBe(1);
+    expect(startCalls).toBe(1);
+    // 2. valid retry -> opened; a DISTINCT config was reloaded (commit is after start).
+    failStart = false;
+    const opened = await session.open();
+    expect(loadCalls).toBe(2);
+    expect(startCalls).toBe(2);
+    if (opened.kind !== "opened") {
+      throw new Error("expected opened");
+    }
+    expect(opened.commandsPolicy).toBe(successfulPolicy);
+    expect(opened.commandsPolicy).not.toBe(failedPolicy); // failed attempt's policy was NOT cached
+    // 3. cached reopen -> no reload/restart.
+    await session.open();
+    expect(loadCalls).toBe(2);
+    expect(startCalls).toBe(2);
   });
 });
 

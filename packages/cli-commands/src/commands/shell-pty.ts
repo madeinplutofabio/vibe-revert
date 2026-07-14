@@ -84,16 +84,19 @@
  */
 
 import {
+  type Config,
   ConfigNotFoundError,
   ConfigParseError,
   ConfigValidationError,
   loadActiveSessionLock,
+  loadConfig,
   NoActiveSessionError,
   RepoRootNotFoundError,
   resolveRepoRoot,
   SessionAlreadyActiveError,
 } from "@viberevert/core";
 
+import type { CommandsPolicyConfig } from "../command-guard.js";
 import { truncateIdForDisplay } from "../format.js";
 import { ConcurrentOperationError } from "../locks.js";
 import { EndSessionRaceError, endSessionOperation } from "../operations/end-session.js";
@@ -513,7 +516,11 @@ export interface PtyShellContext extends PtyBridgeStreams {
 
 /** Outcome of opening the one PTY session (the port RETURNS copy, never writes it). */
 export type PtyShellSessionOpen =
-  | { readonly kind: "opened"; readonly sessionId: string }
+  | {
+      readonly kind: "opened";
+      readonly sessionId: string;
+      readonly commandsPolicy: CommandsPolicyConfig | undefined;
+    }
   | { readonly kind: "refused"; readonly exitCode: number; readonly stderrText: string };
 
 /** Outcome of closing the one PTY session (returns copy for the runner to write). */
@@ -873,6 +880,17 @@ const configNotFoundCopy = (): string =>
 const invalidConfigCopy = (message: string): string =>
   `Invalid .viberevert.yml: ${message}\nFix the file, or re-run:\n  viberevert init\n\nto start fresh.\n`;
 
+/**
+ * Sanitized refusal for a DEFENSIVE config-extraction failure: a hostile/fake
+ * loader returning a non-object (null/array/scalar) or a throwing `commands`
+ * getter. The real loadConfig never produces these (it returns a valid Config or
+ * throws a typed ConfigNotFound/Parse/Validation error, which keep their own
+ * copy), so this is a fail-closed boundary guard, not an "invalid YAML" case.
+ */
+const configLoadFailedCopy = (): string =>
+  "The VibeRevert configuration could not be read while starting the PTY shell.\n" +
+  "Use `viberevert shell` for the guarded command loop.\n";
+
 /** The "session already active" block (Task line only when the lock has one). */
 function sessionAlreadyActiveCopy(lock: SessionAlreadyActiveError["active"]): string {
   let text = "A session is already active in this repo.\n\n";
@@ -908,10 +926,12 @@ function concurrentOperationCopy(info: ConcurrentOperationError["info"]): string
  */
 export interface G3BackedPtyShellSessionOps {
   readonly resolveRepoRoot: (cwd: string) => string;
+  readonly loadConfig: (repoRoot: string) => Promise<Config>;
   readonly startSessionOperation: (input: {
     readonly cwd: string;
     readonly lockCommand: string;
     readonly task?: string;
+    readonly loadedConfig?: Config;
   }) => Promise<{ readonly sessionId: string }>;
   readonly endSessionOperation: (input: { readonly cwd: string }) => Promise<unknown>;
   readonly loadActiveSessionLock: (
@@ -922,6 +942,7 @@ export interface G3BackedPtyShellSessionOps {
 /** Real host binding of the session operations. */
 const REAL_G3_SESSION_OPS: G3BackedPtyShellSessionOps = {
   resolveRepoRoot,
+  loadConfig,
   startSessionOperation,
   endSessionOperation,
   loadActiveSessionLock,
@@ -937,7 +958,12 @@ export interface CreateG3BackedPtyShellSessionArgs {
 /** Adapter state: prevents close-before-open, double-close, partial-open fuzz. */
 type SessionState =
   | { readonly kind: "not_opened" }
-  | { readonly kind: "opened"; readonly repoRoot: string; readonly sessionId: string }
+  | {
+      readonly kind: "opened";
+      readonly repoRoot: string;
+      readonly sessionId: string;
+      readonly commandsPolicy: CommandsPolicyConfig | undefined;
+    }
   | { readonly kind: "closed" };
 
 /**
@@ -961,8 +987,9 @@ export function createG3BackedPtyShellSession(
 
   const open = async (): Promise<PtyShellSessionOpen> => {
     if (state.kind === "opened") {
-      // One-shot: a repeat open returns the already-open session (no re-start).
-      return { kind: "opened", sessionId: state.sessionId };
+      // One-shot: a repeat open returns the already-open session (no re-start,
+      // no config reload) -- the policy captured at start is returned verbatim.
+      return { kind: "opened", sessionId: state.sessionId, commandsPolicy: state.commandsPolicy };
     }
     if (state.kind === "closed") {
       return {
@@ -982,11 +1009,42 @@ export function createG3BackedPtyShellSession(
       throw err;
     }
 
+    // Load the ONE config snapshot BEFORE starting the session: its command
+    // policy is surfaced to the engine AND the exact object is threaded into
+    // startSessionOperation (loadedConfig), so the session's rollback snapshot
+    // and the guard policy derive from one on-disk read (M G4 4e-iv-a). Typed
+    // parse/validation errors keep their existing copy; a DEFENSIVE extraction
+    // failure (a hostile/fake loader returning a non-object, or a throwing
+    // `commands` getter) fails closed -- no session is started.
+    let config: Config;
+    try {
+      config = await ops.loadConfig(repoRoot);
+    } catch (err) {
+      if (err instanceof ConfigNotFoundError) {
+        return { kind: "refused", exitCode: 1, stderrText: configNotFoundCopy() };
+      }
+      if (err instanceof ConfigParseError || err instanceof ConfigValidationError) {
+        return { kind: "refused", exitCode: 1, stderrText: invalidConfigCopy(err.message) };
+      }
+      throw err;
+    }
+    let commandsPolicy: CommandsPolicyConfig | undefined;
+    try {
+      const rawConfig: unknown = config;
+      if (typeof rawConfig !== "object" || rawConfig === null || Array.isArray(rawConfig)) {
+        return { kind: "refused", exitCode: 1, stderrText: configLoadFailedCopy() };
+      }
+      commandsPolicy = config.commands;
+    } catch {
+      return { kind: "refused", exitCode: 1, stderrText: configLoadFailedCopy() };
+    }
+
     let sessionId: string;
     try {
       const started = await ops.startSessionOperation({
         cwd,
         lockCommand: PTY_LOCK_COMMAND,
+        loadedConfig: config,
         ...(task !== undefined ? { task } : {}),
       });
       sessionId = started.sessionId;
@@ -1012,8 +1070,10 @@ export function createG3BackedPtyShellSession(
       throw err;
     }
 
-    state = { kind: "opened", repoRoot, sessionId };
-    return { kind: "opened", sessionId };
+    // Commit the opened state ONLY after startSessionOperation succeeds; any
+    // earlier refusal left `state` untouched (not_opened), so a retry is possible.
+    state = { kind: "opened", repoRoot, sessionId, commandsPolicy };
+    return { kind: "opened", sessionId, commandsPolicy };
   };
 
   const close = async (): Promise<PtyShellSessionClose> => {
