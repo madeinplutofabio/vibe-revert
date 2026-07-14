@@ -352,6 +352,19 @@ export { RuntimeEnvInvalidError } from "./runtime-env.js";
 //       materializeHook. Internal until the guarded interception path is wired
 //       (Step 4f).
 //
+//   - createBashInterceptionInstallerDeps,
+//     createBashInterceptionInstallerDepsWithBindings,
+//     CreateBashInterceptionInstallerDepsArgs (type),
+//     BashInterceptionInstallerBindings (type)
+//       (from ./commands/pty-interception-installer-bindings.js)
+//     → M G4 Step 4e-iii (D104.E/H/J/O): the REAL BINDINGS factory -- wires the
+//       installer's (4e-i) injected deps to the real crypto nonce, loopback
+//       transport (4b), interception service (4b), hook generator (4d),
+//       materializer (4e-ii), and the branded-handle factory (4a). The SOLE
+//       production importer of createInstalledInterceptionHandle. Adds no
+//       validation. Internal until the guarded interception path is wired
+//       (Step 4f).
+//
 //   - All file-internal helpers in operations/*.ts (readReportBytes,
 //     parseReportFile, assertSourceReportUnchanged, removeStaleFixPrompt,
 //     persistFixPrompt, formatCause, etc.)

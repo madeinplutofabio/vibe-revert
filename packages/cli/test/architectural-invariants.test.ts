@@ -2680,6 +2680,15 @@ describe("Architectural invariants -- M G1a D99.M @viberevert/cli-commands bound
       "MaterializeBashHookOptions",
       "MaterializeFs",
       "MaterializeFileHandle",
+      // Bash interception installer real bindings (M G4 Step 4e-iii,
+      // D104.E/H/J/O) -- the production factory (+ its @internal injection seam)
+      // wiring the real primitives; the sole production importer of the
+      // branded-handle factory. Internal until the guarded path is wired (Step
+      // 4f).
+      "createBashInterceptionInstallerDeps",
+      "createBashInterceptionInstallerDepsWithBindings",
+      "CreateBashInterceptionInstallerDepsArgs",
+      "BashInterceptionInstallerBindings",
     ];
     for (const symbol of FORBIDDEN_ABSENT) {
       expect(
