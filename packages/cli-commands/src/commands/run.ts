@@ -66,13 +66,13 @@
 //   close leaves a stale active-session.json — the existing documented
 //   recovery applies (next start refuses; manual `viberevert end`).
 //
-// Note: config is loaded here (for the guard) AND inside
-// startSessionOperation (its own D19 load). The double read is cheap
-// and keeps the operation self-contained; not worth a bypass seam in
-// v1. Because of the TOCTOU window between the two reads, the
-// startSessionOperation catch maps the repo-root/config error family
-// too — via the shared copy helpers below, so the two sites cannot
-// drift.
+// Note: config is loaded here ONCE (for the guard) and threaded into
+// startSessionOperation via loadedConfig (M G4 4e-iv-a0), so the guard
+// evaluation and the session start derive from ONE on-disk read — no
+// second internal load, no TOCTOU window between them. The
+// startSessionOperation catch still maps the repo-root/config error
+// family via the shared copy helpers below (retained defensively; the
+// config arms do not fire when loadedConfig is supplied).
 
 import { spawn } from "node:child_process";
 import { constants as osConstants } from "node:os";
@@ -81,6 +81,7 @@ import { createInterface } from "node:readline/promises";
 import type { Writable } from "node:stream";
 import {
   appendCommandsLogEntry,
+  type Config,
   ConfigNotFoundError,
   ConfigParseError,
   ConfigValidationError,
@@ -238,11 +239,15 @@ export class RunCommand extends Command {
     }
 
     // Step 2: load config for the guard evaluation (D19: run REQUIRES
-    // valid config, like start).
+    // valid config, like start). The SAME validated Config object is
+    // threaded into startSessionOperation below (loadedConfig) so the
+    // guard evaluation and the session derive from ONE on-disk read
+    // (M G4 4e-iv-a0).
+    let loadedConfig: Config;
     let commandsPolicy: CommandsPolicyConfig | undefined;
     try {
-      const config = await loadConfig(repoRoot);
-      commandsPolicy = config.commands;
+      loadedConfig = await loadConfig(repoRoot);
+      commandsPolicy = loadedConfig.commands;
     } catch (err) {
       if (err instanceof ConfigNotFoundError) {
         writeConfigNotFoundCopy(stderr);
@@ -294,10 +299,12 @@ export class RunCommand extends Command {
     }
 
     // Step 4: start the session (D22 lock lives inside the operation;
-    // the child never runs under it). The repo-root/config mappings
-    // repeat here because the operation re-reads both — a config change
-    // in the TOCTOU window must surface as the normal copy, not an
-    // uncaught exception.
+    // the child never runs under it). The repo root is still re-resolved
+    // internally; the CONFIG is threaded via loadedConfig so the session
+    // shares this command's ONE on-disk read (M G4 4e-iv-a0). The
+    // config-error catch arms below are retained defensively (with
+    // loadedConfig supplied, the operation performs no config load, so they
+    // do not fire from this path).
     const lockCommandFull = `viberevert run ${decision.normalized}`;
     const lockCommand =
       lockCommandFull.length > LOCK_COMMAND_MAX
@@ -310,6 +317,7 @@ export class RunCommand extends Command {
         cwd: invocationCwd,
         lockCommand,
         agentCommand: decision.normalized,
+        loadedConfig,
         ...(this.task !== undefined ? { task: this.task } : {}),
       });
       sessionId = started.sessionId;

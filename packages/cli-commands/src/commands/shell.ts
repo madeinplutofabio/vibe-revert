@@ -106,6 +106,7 @@ import { createInterface, type Interface } from "node:readline";
 import type { Writable } from "node:stream";
 import {
   appendCommandsLogEntry,
+  type Config,
   ConfigNotFoundError,
   ConfigParseError,
   ConfigValidationError,
@@ -313,11 +314,14 @@ export class ShellCommand extends Command {
     // valid config, like start/run). Snapshot the guard/confirm policy
     // at shell start (D103 snapshot semantics): edits to .viberevert.yml
     // during the REPL take effect in the NEXT shell session, not
-    // mid-session.
+    // mid-session. The SAME validated Config object is threaded into
+    // startSessionOperation below (loadedConfig) so the shell's guard
+    // policy and the session derive from ONE on-disk read (M G4 4e-iv-a0).
+    let loadedConfig: Config;
     let commandsPolicy: CommandsPolicyConfig | undefined;
     try {
-      const config = await loadConfig(repoRoot);
-      commandsPolicy = config.commands;
+      loadedConfig = await loadConfig(repoRoot);
+      commandsPolicy = loadedConfig.commands;
     } catch (err) {
       if (err instanceof ConfigNotFoundError) {
         writeConfigNotFoundCopy(stderr);
@@ -331,13 +335,18 @@ export class ShellCommand extends Command {
     }
 
     // Step 3: start the ONE session for the whole REPL (D103.F). No
-    // agentCommand -- there is no single child. The repo-root/config
-    // mappings repeat here because the operation re-reads both (TOCTOU).
+    // agentCommand -- there is no single child. The repo root is still
+    // re-resolved internally; the CONFIG is threaded via loadedConfig so
+    // the session shares the shell's ONE on-disk read (M G4 4e-iv-a0). The
+    // config-error catch arms below are retained defensively (with
+    // loadedConfig supplied, the operation performs no config load, so they
+    // do not fire from this path).
     let sessionId: string;
     try {
       const started = await startSessionOperation({
         cwd: invocationCwd,
         lockCommand: "viberevert shell",
+        loadedConfig,
         ...(this.task !== undefined ? { task: this.task } : {}),
       });
       sessionId = started.sessionId;

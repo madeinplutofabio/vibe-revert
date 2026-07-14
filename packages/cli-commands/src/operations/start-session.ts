@@ -15,7 +15,10 @@
 //
 // 1. **D19** — REQUIRES valid config. Hard-fails with typed errors on
 //    missing or invalid `.viberevert.yml`. Callers (CLI Command, MCP
-//    handler) translate to presentation.
+//    handler) translate to presentation. A caller that ALREADY holds the
+//    validated Config may pass it as `opts.loadedConfig`; the operation
+//    then performs NO internal `loadConfig` (M G4 4e-iv-a0) so the session
+//    and that caller derive from ONE config snapshot.
 //
 // 2. **D16/D17c** — git invocation through `@viberevert/git` only. NO
 //    `child_process` imports here.
@@ -53,6 +56,10 @@
 // - SessionAlreadyActiveError (from @viberevert/core)        → D11 refusal copy (active.session_id etc.)
 // - ConcurrentOperationError (from locks.js)                 → D22 refusal copy (info.command etc.)
 //
+// (When `opts.loadedConfig` is supplied, the config-error family cannot
+// originate here — the caller already loaded + validated it — but the
+// catch arms remain valid for the internal-load path.)
+//
 // =============================================================================
 // Input validation boundary
 // =============================================================================
@@ -66,6 +73,7 @@ import { mkdir, rm } from "node:fs/promises";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import {
+  type Config,
   generateSessionId,
   loadActiveSessionLock,
   loadConfig,
@@ -102,6 +110,15 @@ export type StartSessionOperationOpts = {
    *  copy is truthful about the actual holder without leaking raw MCP
    *  argument bytes into lock metadata. */
   lockCommand?: string;
+  /** Optional pre-validated config snapshot (M G4 4e-iv-a0). When present,
+   *  the operation performs NO `loadConfig` and derives EVERY config-driven
+   *  value (currently the rollback excludes) from THIS object — so a caller
+   *  that already loaded + validated `.viberevert.yml` (the REPL, `run`, and
+   *  the PTY session adapter) starts the session under exactly the snapshot
+   *  it also uses for command policy, with no second on-disk read in the
+   *  TOCTOU window. Callers that do not already hold config omit this and get
+   *  the internal load unchanged. */
+  loadedConfig?: Config;
 };
 
 export type StartSessionOperationResult = {
@@ -116,9 +133,14 @@ export async function startSessionOperation(
   // Step 1: resolve repo root from caller-supplied cwd.
   const repoRoot = resolveRepoRoot(opts.cwd);
 
-  // Step 2: load+validate config (D19; outside the D22 lock per the
-  // "config touches .viberevert.yml, not session state" scope).
-  const config = await loadConfig(repoRoot);
+  // Step 2: obtain the validated config (D19; outside the D22 lock per the
+  // "config touches .viberevert.yml, not session state" scope). Snapshot the
+  // optional preloaded input ONCE, then select the source ONCE: a supplied
+  // snapshot is used verbatim (no internal load); otherwise load from disk.
+  // Every config-derived value below reads from `config` — never re-read
+  // `opts.loadedConfig` (M G4 4e-iv-a0).
+  const loadedConfig = opts.loadedConfig;
+  const config = loadedConfig ?? (await loadConfig(repoRoot));
   const rollbackExcludePatterns: readonly string[] = config.rollback?.exclude ?? [];
 
   // Step 3: resolve the wall-clock timestamp ONCE for this operation.
