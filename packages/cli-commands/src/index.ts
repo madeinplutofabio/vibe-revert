@@ -340,6 +340,18 @@ export { RuntimeEnvInvalidError } from "./runtime-env.js";
 //       resistant, never throws. Internal until the guarded interception path is
 //       wired (Step 4f).
 //
+//   - materializeBashHook,
+//     createMaterializeFs,
+//     MaterializeBashHookOptions (type),
+//     MaterializeFs (type),
+//     MaterializeFileHandle (type)  (from ./commands/pty-interception-hook-materializer.js)
+//     → M G4 Step 4e-ii (D104.I): the hook MATERIALIZATION fs seam -- writes the
+//       guarded rc file (PS1/PROMPT_COMMAND prelude + the 4d hook, byte-exact)
+//       into a private per-session 0700 dir with a 0600 exclusive+no-follow rc
+//       file, returning {rcPath, cleanup} for the installer's injected
+//       materializeHook. Internal until the guarded interception path is wired
+//       (Step 4f).
+//
 //   - All file-internal helpers in operations/*.ts (readReportBytes,
 //     parseReportFile, assertSourceReportUnchanged, removeStaleFixPrompt,
 //     persistFixPrompt, formatCause, etc.)

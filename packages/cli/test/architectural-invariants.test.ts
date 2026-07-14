@@ -2672,6 +2672,14 @@ describe("Architectural invariants -- M G1a D99.M @viberevert/cli-commands bound
       "MaterializedInterceptionHook",
       "InterceptionInstallDiagnostic",
       "InstallBashInterceptionDeps",
+      // Hook materialization fs seam (M G4 Step 4e-ii, D104.I) -- the private-dir
+      // rc writer + its real fs bindings; internal until the guarded path is
+      // wired (Step 4f).
+      "materializeBashHook",
+      "createMaterializeFs",
+      "MaterializeBashHookOptions",
+      "MaterializeFs",
+      "MaterializeFileHandle",
     ];
     for (const symbol of FORBIDDEN_ABSENT) {
       expect(
