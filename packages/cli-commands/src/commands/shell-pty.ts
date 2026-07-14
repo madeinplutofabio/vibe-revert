@@ -103,6 +103,11 @@ import { EndSessionRaceError, endSessionOperation } from "../operations/end-sess
 import { START_LOCK_REL, startSessionOperation } from "../operations/start-session.js";
 import { RuntimeEnvInvalidError } from "../runtime-env.js";
 import { createHostExecutablePathResolver } from "./executable-probe.js";
+import {
+  type BashInterceptionInstallResult,
+  installBashInterception,
+} from "./pty-interception-installer.js";
+import { createBashInterceptionInstallerDeps } from "./pty-interception-installer-bindings.js";
 import type { PtyDisposable, PtyModule, PtyProcess, PtySpawnOptions } from "./pty-loader.js";
 import { loadPtyModule } from "./pty-loader.js";
 import {
@@ -556,6 +561,15 @@ export interface RunPtyShellDeps {
   readonly attachBridge: (streams: PtyBridgeStreams, pty: PtyProcess) => TerminalBridge;
   /** The one PTY session; real deps bind the G3-backed adapter below. */
   readonly session: PtyShellSession;
+  /**
+   * Install interception for the resolved shell (interception-REQUIRED). The engine
+   * may spawn ONLY from a genuine install's handle.shellStartup; the real deps bind
+   * this to installBashInterception(createBashInterceptionInstallerDeps(args)).
+   */
+  readonly installInterception: (args: {
+    readonly shell: { readonly path: string; readonly kind: ShellKind };
+    readonly commandsPolicy: CommandsPolicyConfig | undefined;
+  }) => Promise<BashInterceptionInstallResult>;
   /** Working directory for the spawned PTY (`process.cwd()` in prod). */
   readonly cwd: string;
   /** Environment for the spawned PTY (`process.env` in prod). */
@@ -633,6 +647,97 @@ function combineUniqueErrors(...groups: readonly (readonly unknown[])[]): readon
   return combined;
 }
 
+/** True for a non-null object (defensive reads use readProp on top of this). */
+function isObjectValue(value: unknown): value is object {
+  return typeof value === "object" && value !== null;
+}
+
+/** Read a property off an unknown as unknown (variable-key bracket: satisfies tsc + biome). */
+function readProp(value: unknown, key: PropertyKey): unknown {
+  return isObjectValue(value) ? (value as Record<PropertyKey, unknown>)[key] : undefined;
+}
+
+/** The trusted, immutable engine inputs distilled from an untrusted install result. */
+type ClassifiedInstallResult =
+  | {
+      readonly kind: "installed";
+      readonly dispose: () => Promise<void>;
+      readonly startup: { readonly executable: string; readonly args: readonly string[] };
+    }
+  | { readonly kind: "install_failed"; readonly message: string }
+  | { readonly kind: "invalid" };
+
+/**
+ * The FINAL no-spawn authorization boundary. `installInterception` is injected, so a
+ * JS caller / test double can return anything; classify the RAW value entirely through
+ * guarded reads -- reading each untrusted field ONCE -- and return only trusted, frozen
+ * engine inputs. Any hostile getter/proxy throw, or any missing/ill-typed field, yields
+ * `invalid` (fail-closed) rather than escaping. Validates ONLY what the engine
+ * dereferences (dispose + the spawn material); the installer owns the branded handle.
+ * The captured `dispose` is invoked later as a standalone zero-argument callback (it is
+ * already bound by the installer), never method-style off the raw result.
+ */
+function classifyInstallResult(value: unknown): ClassifiedInstallResult {
+  try {
+    const kind = readProp(value, "kind");
+    if (kind === "install_failed") {
+      const message = readProp(value, "message");
+      return typeof message === "string"
+        ? { kind: "install_failed", message }
+        : { kind: "invalid" };
+    }
+    if (kind !== "installed") {
+      return { kind: "invalid" };
+    }
+    const dispose = readProp(value, "dispose");
+    if (typeof dispose !== "function") {
+      return { kind: "invalid" };
+    }
+    const startup = readProp(readProp(value, "handle"), "shellStartup");
+    if (!isObjectValue(startup)) {
+      return { kind: "invalid" };
+    }
+    const executable = readProp(startup, "executable");
+    if (typeof executable !== "string" || executable.trim().length === 0) {
+      return { kind: "invalid" };
+    }
+    const rawArgs = readProp(startup, "args");
+    if (!Array.isArray(rawArgs)) {
+      return { kind: "invalid" };
+    }
+    // Copy ONCE, then validate + freeze the copy (a hostile array-like cannot differ
+    // between the validation pass and the frozen snapshot).
+    const args = [...rawArgs];
+    if (!args.every((arg) => typeof arg === "string")) {
+      return { kind: "invalid" };
+    }
+    return {
+      kind: "installed",
+      dispose: dispose as () => Promise<void>,
+      startup: Object.freeze({ executable, args: Object.freeze(args) }),
+    };
+  } catch {
+    return { kind: "invalid" };
+  }
+}
+
+/** Append a trailing newline only when absent (installer messages may or may not carry one). */
+function ensureTrailingNewline(text: string): string {
+  return text.endsWith("\n") ? text : `${text}\n`;
+}
+
+/** Dispose interception, capturing a SINGLE failure (0 or 1) without ever throwing. */
+async function disposeInterceptionSafely(
+  dispose: () => Promise<void>,
+): Promise<{ readonly error: unknown } | null> {
+  try {
+    await dispose();
+    return null;
+  } catch (error) {
+    return { error };
+  }
+}
+
 /**
  * Build the PTY spawn options. The size is a PAIR: `cols`/`rows` are passed only
  * when BOTH are usable (mirrors the bridge resize rule) -- never a half
@@ -653,8 +758,8 @@ function createPtySpawnOptions(deps: RunPtyShellDeps): PtySpawnOptions {
 }
 
 /**
- * Spawn the resolved shell, attach the bridge, wait for exit (through the signal
- * cleanup seam), then ALWAYS dispose. Returns a stable union instead of throwing
+ * Spawn the guarded shell startup, attach the bridge, wait for exit (through the
+ * signal cleanup seam), then ALWAYS dispose. Returns a stable union instead of throwing
  * so every failure (spawn, attach + backstop kill, wait rejection, dispose) is
  * observable without exception control flow. On attach failure the bridge never
  * took ownership, so the child is backstop-killed; BOTH the attach and kill
@@ -667,13 +772,13 @@ function createPtySpawnOptions(deps: RunPtyShellDeps): PtySpawnOptions {
 async function drivePty(
   deps: RunPtyShellDeps,
   pty: PtyModule,
-  shell: ResolvedInteractiveShell,
+  startup: { readonly executable: string; readonly args: readonly string[] },
 ): Promise<DrivePtyResult> {
   let child: PtyProcess;
   try {
     // Copy the readonly args to a fresh array (no accidental mutation of the
-    // resolved shell by a future spawn implementation).
-    child = pty.spawn(shell.path, [...shell.args], createPtySpawnOptions(deps));
+    // guarded startup by a future spawn implementation).
+    child = pty.spawn(startup.executable, [...startup.args], createPtySpawnOptions(deps));
   } catch (spawnError) {
     return { kind: "failed", errors: [spawnError] };
   }
@@ -815,16 +920,75 @@ export async function runPtyShell(deps: RunPtyShellDeps): Promise<number> {
     return opened.exitCode;
   }
 
-  // Session is open -> from here it is ALWAYS closed, whatever happens. drivePty
-  // is designed not to throw, but runPtyShell is the outer boundary and must not
-  // trust even its own helper -- so a stray throw still reaches the session close.
-  let drive: DrivePtyResult;
+  // Session is open. Install interception (interception-REQUIRED) BEFORE any spawn.
+  // Snapshot + freeze the install inputs ONCE so the installer sees exactly
+  // {shell:{path,kind}, commandsPolicy} -- resolver args absent, path/kind copied (a
+  // later pre.shell mutation cannot change what it saw), commandsPolicy by identity.
+  const installArgs = Object.freeze({
+    shell: Object.freeze({ path: pre.shell.path, kind: pre.shell.kind }),
+    commandsPolicy: opened.commandsPolicy,
+  });
+
+  let rawInstallResult: unknown;
   try {
-    drive = await drivePty(deps, pre.pty, pre.shell);
+    rawInstallResult = await deps.installInterception(installArgs);
   } catch (error) {
-    drive = { kind: "failed", errors: [error] };
+    // A defensive throw from the injected seam -> fail closed. The just-opened
+    // session must still be closed.
+    writeStderrSafely(
+      context,
+      `Unexpected error installing PTY command interception: ${formatErrorMessage(error)}\n`,
+    );
+    const close = await closeSessionSafely(deps.session);
+    writeStderrSafely(context, close.stderrText);
+    return 1;
   }
 
+  // Positive authorization: only a classified `installed` result authorizes a spawn.
+  // `install_failed` writes the installer's sanitized message; ANY other/malformed
+  // result writes a generic invalid-result message. Both close the just-opened
+  // session, exit 1, and NEVER spawn -- and neither invokes an untrusted `dispose`.
+  const classified = classifyInstallResult(rawInstallResult);
+  if (classified.kind === "install_failed") {
+    writeStderrSafely(context, ensureTrailingNewline(classified.message));
+    const close = await closeSessionSafely(deps.session);
+    writeStderrSafely(context, close.stderrText);
+    return 1;
+  }
+  if (classified.kind === "invalid") {
+    writeStderrSafely(
+      context,
+      "PTY command interception returned an invalid installation result.\n",
+    );
+    const close = await closeSessionSafely(deps.session);
+    writeStderrSafely(context, close.stderrText);
+    return 1;
+  }
+
+  // Authorized: `dispose` and `startup` are captured + frozen; the raw result is
+  // never touched again. Interception-disposal ownership begins NOW, so EVERY path
+  // below runs the ordered teardown: bridge dispose (restore raw -> kill child,
+  // inside drivePty) -> interception dispose -> session close. The nested finally
+  // guarantees the session close is attempted even if interception disposal throws.
+  const disposeInterception = classified.dispose;
+
+  let drive: DrivePtyResult;
+  let interceptionFailure: { readonly error: unknown } | null = null;
+  let close: PtyShellSessionClose = { exitCode: 0, stderrText: "" };
+  try {
+    drive = await drivePty(deps, pre.pty, classified.startup);
+  } catch (error) {
+    drive = { kind: "failed", errors: [error] };
+  } finally {
+    try {
+      interceptionFailure = await disposeInterceptionSafely(disposeInterception);
+    } finally {
+      close = await closeSessionSafely(deps.session);
+    }
+  }
+
+  // Report in precedence order: drive (primary) -> interception teardown (secondary)
+  // -> close copy. Any failure -> exit 1 (D104.J fail-closed).
   let driveFailed = false;
   if (drive.kind === "failed") {
     driveFailed = true;
@@ -843,10 +1007,18 @@ export async function runPtyShell(deps: RunPtyShellDeps): Promise<number> {
     displayChildExit(context, drive.exit);
   }
 
-  const close = await closeSessionSafely(deps.session);
+  let interceptionFailed = false;
+  if (interceptionFailure !== null) {
+    interceptionFailed = true;
+    writeStderrSafely(
+      context,
+      `Error tearing down PTY command interception: ${formatErrorMessage(interceptionFailure.error)}\n`,
+    );
+  }
+
   writeStderrSafely(context, close.stderrText);
   const closeFailed = close.exitCode !== 0;
-  return driveFailed || closeFailed ? 1 : 0;
+  return driveFailed || interceptionFailed || closeFailed ? 1 : 0;
 }
 
 // ============================================================================
@@ -1265,6 +1437,8 @@ export function createRunPtyShellDeps(
     resolveHostShell: () => resolveHostInteractiveShell(),
     attachBridge: attachTerminalBridge,
     session: createG3BackedPtyShellSession(sessionArgs),
+    installInterception: (args) =>
+      installBashInterception(createBashInterceptionInstallerDeps(args)),
     cwd: options.cwd,
     spawnEnv: { ...options.env },
     withSignalCleanup: createScopedSignalCleanup(),

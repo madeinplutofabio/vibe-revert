@@ -15,6 +15,8 @@ import {
   SessionAlreadyActiveError,
 } from "@viberevert/core";
 import { describe, expect, it } from "vitest";
+import type { InstalledInterception } from "../src/commands/pty-interception.js";
+import type { BashInterceptionInstallResult } from "../src/commands/pty-interception-installer.js";
 import type {
   PtyDisposable,
   PtyModule,
@@ -747,6 +749,23 @@ function createFakeBridge(
   return { bridge, disposeCount: () => disposeCalls };
 }
 
+/** A usable `installed` result with a cast fake handle (only shellStartup is read). */
+function makeInstalledResult(
+  over: { executable?: string; args?: readonly string[]; dispose?: () => Promise<void> } = {},
+): BashInterceptionInstallResult {
+  return {
+    kind: "installed",
+    handle: {
+      shellStartup: {
+        shellKind: "bash",
+        executable: over.executable ?? "/usr/bin/bash",
+        args: over.args ?? ["--noprofile", "--rcfile", "/tmp/x.rc", "-i"],
+      },
+    } as unknown as InstalledInterception,
+    dispose: over.dispose ?? (async () => {}),
+  };
+}
+
 /** Assemble RunPtyShellDeps with proceed-happy defaults; each test overrides seams. */
 function baseDeps(over: Partial<RunPtyShellDeps> = {}): RunPtyShellDeps {
   return {
@@ -756,6 +775,7 @@ function baseDeps(over: Partial<RunPtyShellDeps> = {}): RunPtyShellDeps {
     resolveHostShell: over.resolveHostShell ?? (() => fakeShell),
     attachBridge: over.attachBridge ?? (() => createFakeBridge().bridge),
     session: over.session ?? createFakeSession().session,
+    installInterception: over.installInterception ?? (async () => makeInstalledResult()),
     cwd: over.cwd ?? "/repo",
     spawnEnv: over.spawnEnv ?? {},
     withSignalCleanup: over.withSignalCleanup ?? identitySignalCleanup,
@@ -904,6 +924,11 @@ describe("runPtyShell -- orchestration (fully injected, no live PTY)", () => {
           return fakeBridge.bridge;
         },
         session: session.session,
+        installInterception: async () =>
+          makeInstalledResult({
+            executable: "/guarded/bash",
+            args: ["--noprofile", "--rcfile", "/priv/hook.rc", "-i"],
+          }),
         cwd: "/work",
         spawnEnv,
       }),
@@ -912,9 +937,10 @@ describe("runPtyShell -- orchestration (fully injected, no live PTY)", () => {
     expect(code).toBe(0);
     expect(spawning.spawnCalls).toHaveLength(1);
     const call = spawning.spawnCalls[0];
-    expect(call?.file).toBe("/bin/bash");
-    expect(call?.args).toEqual(["-i"]);
-    expect(call?.args).not.toBe(fakeShell.args); // copied, not the resolved array
+    expect(call?.file).toBe("/guarded/bash"); // the installed guarded executable
+    expect(call?.file).not.toBe(fakeShell.path); // NOT the resolver shell
+    expect(call?.args).toEqual(["--noprofile", "--rcfile", "/priv/hook.rc", "-i"]);
+    expect(call?.args).not.toBe(fakeShell.args); // resolver args never reach spawn
     expect(call?.options).toEqual({ cwd: "/work", env: { FOO: "bar" }, cols: 80, rows: 24 });
     expect(call?.options?.env).not.toBe(spawnEnv); // env copied
     expect(attachStreams).toBe(ctx.context);
@@ -1252,6 +1278,453 @@ describe("runPtyShell -- orchestration (fully injected, no live PTY)", () => {
       baseDeps({ context: ctx.context, loadPtyModule: async () => spawning.module }),
     );
     expect(spawning.spawnCalls[0]?.options).toEqual({ cwd: "/repo", env: {} });
+  });
+});
+
+describe("runPtyShell -- interception install + spawn authorization (M G4 4e-iv-b)", () => {
+  it("install_failed writes the installer message (single newline), closes, exits 1, never spawns", async () => {
+    const ctx = createFakeContext();
+    const spawning = createSpawningPty();
+    const session = createFakeSession();
+    let attachCalls = 0;
+    const code = await runPtyShell(
+      baseDeps({
+        context: ctx.context,
+        loadPtyModule: async () => spawning.module,
+        attachBridge: () => {
+          attachCalls += 1;
+          return createFakeBridge().bridge;
+        },
+        session: session.session,
+        installInterception: async () => ({
+          kind: "install_failed",
+          reason: "hook_setup_failed",
+          message: "could not install the hook.\nUse `viberevert shell`.",
+        }),
+      }),
+    );
+    expect(code).toBe(1);
+    expect(ctx.stderrText()).toContain("could not install the hook.\nUse `viberevert shell`.\n");
+    expect(attachCalls).toBe(0);
+    expect(spawning.spawnCalls).toHaveLength(0);
+    expect(session.closeCount()).toBe(1);
+  });
+
+  it("a defensive install throw fails closed, closes, exits 1, never spawns", async () => {
+    const ctx = createFakeContext();
+    const spawning = createSpawningPty();
+    const session = createFakeSession();
+    const code = await runPtyShell(
+      baseDeps({
+        context: ctx.context,
+        loadPtyModule: async () => spawning.module,
+        session: session.session,
+        installInterception: async () => {
+          throw new Error("install boom");
+        },
+      }),
+    );
+    expect(code).toBe(1);
+    expect(ctx.stderrText()).toContain(
+      "Unexpected error installing PTY command interception: install boom",
+    );
+    expect(spawning.spawnCalls).toHaveLength(0);
+    expect(session.closeCount()).toBe(1);
+  });
+
+  it("malformed install results fail closed without spawning or disposing", async () => {
+    let badStartupDisposeCalls = 0;
+    const badStartupDispose = async (): Promise<void> => {
+      badStartupDisposeCalls += 1;
+    };
+    const cases: readonly unknown[] = [
+      null,
+      {},
+      { kind: "future_kind" },
+      { kind: "installed", handle: {}, dispose: async () => {} },
+      {
+        kind: "installed",
+        handle: { shellStartup: { executable: "", args: [] } },
+        dispose: badStartupDispose,
+      },
+      {
+        kind: "installed",
+        handle: { shellStartup: { executable: "/b", args: [1, 2] } },
+        dispose: async () => {},
+      },
+    ];
+    for (const bad of cases) {
+      const ctx = createFakeContext();
+      const spawning = createSpawningPty();
+      const session = createFakeSession();
+      const code = await runPtyShell(
+        baseDeps({
+          context: ctx.context,
+          loadPtyModule: async () => spawning.module,
+          session: session.session,
+          installInterception: async () => bad as BashInterceptionInstallResult,
+        }),
+      );
+      expect(code).toBe(1);
+      expect(ctx.stderrText()).toContain(
+        "PTY command interception returned an invalid installation result.",
+      );
+      expect(spawning.spawnCalls).toHaveLength(0);
+      expect(session.closeCount()).toBe(1);
+    }
+    expect(badStartupDisposeCalls).toBe(0);
+  });
+
+  it("a throwing install-result kind getter is invalid, closes, never spawns or disposes", async () => {
+    let disposeCalls = 0;
+    const spawning = createSpawningPty();
+    const session = createFakeSession();
+    const result = {
+      get kind(): string {
+        throw new Error("hostile kind");
+      },
+      dispose: async () => {
+        disposeCalls += 1;
+      },
+    };
+    const code = await runPtyShell(
+      baseDeps({
+        context: createFakeContext().context,
+        loadPtyModule: async () => spawning.module,
+        session: session.session,
+        installInterception: async () => result as unknown as BashInterceptionInstallResult,
+      }),
+    );
+    expect(code).toBe(1);
+    expect(spawning.spawnCalls).toHaveLength(0);
+    expect(disposeCalls).toBe(0);
+    expect(session.closeCount()).toBe(1);
+  });
+
+  it("install_failed with a non-string or throwing message is treated as invalid", async () => {
+    for (const message of [42, undefined] as const) {
+      const ctx = createFakeContext();
+      const session = createFakeSession();
+      const code = await runPtyShell(
+        baseDeps({
+          context: ctx.context,
+          session: session.session,
+          installInterception: async () =>
+            ({ kind: "install_failed", message }) as unknown as BashInterceptionInstallResult,
+        }),
+      );
+      expect(code).toBe(1);
+      expect(ctx.stderrText()).toContain("invalid installation result");
+    }
+    const ctx = createFakeContext();
+    const session = createFakeSession();
+    const code = await runPtyShell(
+      baseDeps({
+        context: ctx.context,
+        session: session.session,
+        installInterception: async () =>
+          ({
+            kind: "install_failed",
+            get message(): string {
+              throw new Error("hostile message");
+            },
+          }) as unknown as BashInterceptionInstallResult,
+      }),
+    );
+    expect(code).toBe(1);
+    expect(ctx.stderrText()).toContain("invalid installation result");
+  });
+
+  it("install_failed appends exactly one trailing newline when the message lacks one", async () => {
+    const ctx = createFakeContext();
+    const session = createFakeSession({ close: { exitCode: 0, stderrText: "" } });
+    const code = await runPtyShell(
+      baseDeps({
+        context: ctx.context,
+        session: session.session,
+        installInterception: async () => ({
+          kind: "install_failed",
+          reason: "hook_setup_failed",
+          message: "failure message",
+        }),
+      }),
+    );
+    expect(code).toBe(1);
+    expect(ctx.stderrText()).toBe("failure message\n");
+  });
+
+  it("install_failed does not double a message that already ends in a newline", async () => {
+    const ctx = createFakeContext();
+    const session = createFakeSession({ close: { exitCode: 0, stderrText: "" } });
+    const code = await runPtyShell(
+      baseDeps({
+        context: ctx.context,
+        session: session.session,
+        installInterception: async () => ({
+          kind: "install_failed",
+          reason: "hook_setup_failed",
+          message: "failure message\n",
+        }),
+      }),
+    );
+    expect(code).toBe(1);
+    expect(ctx.stderrText()).toBe("failure message\n");
+  });
+
+  it("an invalid hostile result still closes the session even when close fails; no spawn, no dispose, exit 1", async () => {
+    const ctx = createFakeContext();
+    const spawning = createSpawningPty();
+    let disposeCalls = 0;
+    const session = createFakeSession({
+      close: { exitCode: 1, stderrText: "distinct close failure\n" },
+    });
+    const result = {
+      get kind(): string {
+        throw new Error("hostile");
+      },
+      dispose: async () => {
+        disposeCalls += 1;
+      },
+    };
+    const code = await runPtyShell(
+      baseDeps({
+        context: ctx.context,
+        loadPtyModule: async () => spawning.module,
+        session: session.session,
+        installInterception: async () => result as unknown as BashInterceptionInstallResult,
+      }),
+    );
+    expect(code).toBe(1);
+    expect(spawning.spawnCalls).toHaveLength(0);
+    expect(disposeCalls).toBe(0);
+    const stderr = ctx.stderrText();
+    const invalidIndex = stderr.indexOf("invalid installation result");
+    const closeIndex = stderr.indexOf("distinct close failure");
+    expect(invalidIndex).toBeGreaterThanOrEqual(0);
+    expect(closeIndex).toBeGreaterThan(invalidIndex);
+    expect(session.closeCount()).toBe(1);
+  });
+
+  it("snapshots + freezes the install inputs: installer sees {shell:{path,kind}} only, commandsPolicy by identity, immune to later pre.shell mutation", async () => {
+    const policy = { guard: [] } as unknown as NonNullable<Config["commands"]>;
+    const shell: ResolvedInteractiveShell = { path: "/bin/bash", args: ["-i"], kind: "bash" };
+    let seen: unknown;
+    const session = createFakeSession({
+      open: { kind: "opened", sessionId: "s", commandsPolicy: policy },
+    });
+    await runPtyShell(
+      baseDeps({
+        context: createFakeContext().context,
+        resolveHostShell: () => shell,
+        session: session.session,
+        installInterception: async (args) => {
+          seen = args;
+          (shell as { path: string }).path = "/evil/bash"; // mutate AFTER the installer saw args
+          return makeInstalledResult();
+        },
+      }),
+    );
+    expect(seen).toEqual({ shell: { path: "/bin/bash", kind: "bash" }, commandsPolicy: policy });
+    expect("args" in (seen as { shell: object }).shell).toBe(false);
+    expect((seen as { commandsPolicy: unknown }).commandsPolicy).toBe(policy); // identity
+    expect(Object.isFrozen(seen)).toBe(true);
+    expect(Object.isFrozen((seen as { shell: object }).shell)).toBe(true);
+  });
+
+  it("runs the FULL teardown order: restore-raw -> kill-child -> interception-dispose -> session-close", async () => {
+    const events: string[] = [];
+    const bridge: TerminalBridge = {
+      waitForExit: () => Promise.resolve({ exitCode: 0, signal: undefined }),
+      dispose: () => {
+        events.push("restore-raw");
+        events.push("kill-child");
+        return { errors: [] };
+      },
+    };
+    const session: PtyShellSession = {
+      open: async () => ({ kind: "opened", sessionId: "s", commandsPolicy: undefined }),
+      close: async () => {
+        events.push("session-close");
+        return { exitCode: 0, stderrText: "" };
+      },
+    };
+    const code = await runPtyShell(
+      baseDeps({
+        context: createFakeContext().context,
+        attachBridge: () => bridge,
+        session,
+        installInterception: async () =>
+          makeInstalledResult({
+            dispose: async () => {
+              events.push("interception-dispose");
+            },
+          }),
+      }),
+    );
+    expect(code).toBe(0);
+    expect(events).toEqual(["restore-raw", "kill-child", "interception-dispose", "session-close"]);
+  });
+
+  it("a failing interception dispose is reported and forces exit 1 (drive still clean)", async () => {
+    const ctx = createFakeContext();
+    const session = createFakeSession();
+    const code = await runPtyShell(
+      baseDeps({
+        context: ctx.context,
+        attachBridge: () => createFakeBridge().bridge,
+        session: session.session,
+        installInterception: async () =>
+          makeInstalledResult({
+            dispose: async () => {
+              throw new Error("dispose boom");
+            },
+          }),
+      }),
+    );
+    expect(code).toBe(1);
+    expect(ctx.stderrText()).toContain("Error tearing down PTY command interception: dispose boom");
+    expect(session.closeCount()).toBe(1);
+  });
+
+  it("combined failures report in precedence order: drive teardown -> interception teardown -> close copy, exit 1", async () => {
+    const ctx = createFakeContext();
+    const bridge = createFakeBridge({
+      disposeResults: [{ errors: [new Error("bridge dispose boom")] }],
+    });
+    const session = createFakeSession({
+      close: { exitCode: 1, stderrText: "distinct close failure\n" },
+    });
+    const code = await runPtyShell(
+      baseDeps({
+        context: ctx.context,
+        attachBridge: () => bridge.bridge,
+        session: session.session,
+        installInterception: async () =>
+          makeInstalledResult({
+            dispose: async () => {
+              throw new Error("interception dispose boom");
+            },
+          }),
+      }),
+    );
+    expect(code).toBe(1);
+    const stderr = ctx.stderrText();
+    const driveIndex = stderr.indexOf("Error tearing down PTY shell:");
+    const interceptionIndex = stderr.indexOf("Error tearing down PTY command interception:");
+    const closeIndex = stderr.indexOf("distinct close failure");
+    expect(driveIndex).toBeGreaterThanOrEqual(0);
+    expect(interceptionIndex).toBeGreaterThan(driveIndex);
+    expect(closeIndex).toBeGreaterThan(interceptionIndex);
+  });
+
+  it("teardown still runs on a spawn failure: interception disposed + session closed, exit 1", async () => {
+    const spawning = createSpawningPty({ spawnThrows: true });
+    const session = createFakeSession();
+    let interceptionDisposed = false;
+    const code = await runPtyShell(
+      baseDeps({
+        context: createFakeContext().context,
+        loadPtyModule: async () => spawning.module,
+        session: session.session,
+        installInterception: async () =>
+          makeInstalledResult({
+            dispose: async () => {
+              interceptionDisposed = true;
+            },
+          }),
+      }),
+    );
+    expect(code).toBe(1);
+    expect(interceptionDisposed).toBe(true);
+    expect(session.closeCount()).toBe(1);
+  });
+
+  it("reads each untrusted result field exactly once and spawns the captured, copied startup", async () => {
+    const reads = { kind: 0, dispose: 0, handle: 0, startup: 0, exec: 0, args: 0 };
+    const disposeFn = async (): Promise<void> => {};
+    const argsValue = ["--noprofile", "--rcfile", "/x", "-i"];
+    const startupObj = {
+      get executable() {
+        reads.exec += 1;
+        return "/g/bash";
+      },
+      get args() {
+        reads.args += 1;
+        return argsValue;
+      },
+    };
+    const handleObj = {
+      get shellStartup() {
+        reads.startup += 1;
+        return startupObj;
+      },
+    };
+    const result = {
+      get kind() {
+        reads.kind += 1;
+        return "installed";
+      },
+      get dispose() {
+        reads.dispose += 1;
+        return disposeFn;
+      },
+      get handle() {
+        reads.handle += 1;
+        return handleObj;
+      },
+    };
+    const spawning = createSpawningPty();
+    const code = await runPtyShell(
+      baseDeps({
+        context: createFakeContext().context,
+        loadPtyModule: async () => spawning.module,
+        session: createFakeSession().session,
+        installInterception: async () => result as unknown as BashInterceptionInstallResult,
+      }),
+    );
+    expect(code).toBe(0);
+    expect(reads).toEqual({ kind: 1, dispose: 1, handle: 1, startup: 1, exec: 1, args: 1 });
+    expect(spawning.spawnCalls[0]?.file).toBe("/g/bash");
+    expect(spawning.spawnCalls[0]?.args).toEqual(["--noprofile", "--rcfile", "/x", "-i"]);
+    // The recorded spawn args are an independent copy: mutating the source afterward
+    // cannot change them (the classifier froze a copy; drivePty copied again). There is
+    // no async window between classify and spawn, so this post-hoc mutation is the
+    // feasible behavioral proof of the snapshot's independence.
+    argsValue.push("INJECTED");
+    expect(spawning.spawnCalls[0]?.args).toEqual(["--noprofile", "--rcfile", "/x", "-i"]);
+    expect(spawning.spawnCalls[0]?.args).not.toBe(argsValue);
+  });
+
+  it("captures the dispose getter's FIRST function once; only that function is disposed", async () => {
+    let disposeReads = 0;
+    let firstCalled = 0;
+    let secondCalled = 0;
+    const first = async (): Promise<void> => {
+      firstCalled += 1;
+    };
+    const second = async (): Promise<void> => {
+      secondCalled += 1;
+    };
+    const result = {
+      kind: "installed",
+      handle: { shellStartup: { shellKind: "bash", executable: "/g/bash", args: ["-i"] } },
+      get dispose() {
+        disposeReads += 1;
+        return disposeReads === 1 ? first : second;
+      },
+    };
+    const code = await runPtyShell(
+      baseDeps({
+        context: createFakeContext().context,
+        attachBridge: () => createFakeBridge().bridge,
+        session: createFakeSession().session,
+        installInterception: async () => result as unknown as BashInterceptionInstallResult,
+      }),
+    );
+    expect(code).toBe(0);
+    expect(disposeReads).toBe(1);
+    expect(firstCalled).toBe(1);
+    expect(secondCalled).toBe(0);
   });
 });
 
