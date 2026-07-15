@@ -33,10 +33,16 @@
 // Always cite the plan/decision lock that motivates the invariant.
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { dirname, extname, join, relative } from "node:path";
+import { dirname, extname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as ts from "typescript";
 import { describe, expect, it } from "vitest";
+
+import {
+  collectModuleReferences,
+  type ModuleReference,
+  moduleExportsSymbol,
+} from "./module-reference-collector.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(HERE, "..", "..", "..");
@@ -118,6 +124,28 @@ function findTsFiles(dir: string): string[] {
     }
   }
   return result;
+}
+
+const TS_FAMILY_EXTS = new Set([".ts", ".tsx", ".mts", ".cts"]);
+const TS_SCAN_IGNORED_DIRS = new Set(["node_modules", "dist", "coverage", ".turbo"]);
+
+/**
+ * Recursively list every TypeScript-family file (.ts/.tsx/.mts/.cts) under `dir`,
+ * skipping generated/vendor directories. Unlike findTsFiles (.ts only), this exists
+ * so the M.8/M.9 universe guard can PROVE no unaudited .tsx/.mts/.cts file hides a
+ * privileged importer that the ScriptKind.TS collector would never parse.
+ */
+function findTypeScriptFamilyFiles(dir: string): string[] {
+  const found: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.isDirectory()) {
+      if (TS_SCAN_IGNORED_DIRS.has(entry.name)) continue;
+      found.push(...findTypeScriptFamilyFiles(join(dir, entry.name)));
+    } else if (entry.isFile() && TS_FAMILY_EXTS.has(extname(entry.name))) {
+      found.push(join(dir, entry.name));
+    }
+  }
+  return found.sort();
 }
 
 interface Offender {
@@ -6792,5 +6820,262 @@ describe("Architectural invariants -- M G4 PTY engine boundaries (shell-pty.ts)"
       enablePtyFlag.test(stripped),
       `${SHELL_PTY_REL} must have no env-flag escape hatch to enable the PTY engine (M G4 Step 3c).`,
     ).toBe(false);
+  });
+});
+
+// =============================================================================
+// M G4 Step 4g -- privileged-surface confinement (D104.M.8 / D104.M.9)
+// =============================================================================
+//
+// The privileged interception primitives must not spread across the codebase:
+//   - createInstalledInterceptionHandle -- the branded "no valid handle => no
+//     spawn" factory (D104.M.8);
+//   - installBashInterception + createBashInterceptionInstallerDeps -- the real
+//     interception install path (D104.M.9).
+// Each is a RUNTIME export minted/consumed by exactly one production module;
+// non-production code (tests + vitest.config.ts) is a pinned, closed set.
+// Enforced with the TS-AST module-reference collector (regex misses aliases/
+// namespace/re-exports). Only a NAMED, RUNTIME, same-module import of the symbol
+// is legitimate -- every other way to reach the defining module (default/
+// side-effect/namespace/re-export/dynamic/require/import-equals, or a type-only /
+// wrong-target named import such as one via a barrel re-exporting the same name)
+// is rejected.
+
+describe("Architectural invariants -- M G4 Step 4g privileged-surface confinement (D104.M.8/M.9)", () => {
+  const CLI_COMMANDS = "packages/cli-commands";
+  const SRC_ROOT = join(REPO_ROOT, CLI_COMMANDS, "src");
+  const TEST_ROOT = join(REPO_ROOT, CLI_COMMANDS, "test");
+  const COMMANDS_DIR = join(SRC_ROOT, "commands");
+
+  const FORBIDDEN_MODULE_ACCESS_KINDS = new Set<string>([
+    "default-import",
+    "side-effect-import",
+    "namespace-import",
+    "named-reexport",
+    "namespace-reexport",
+    "wildcard-reexport",
+    "dynamic-import",
+    "require",
+    "require-resolve",
+    "module-require",
+    "import-equals-require",
+  ]);
+
+  const PRIVILEGED = [
+    {
+      invariant: "D104.M.8",
+      symbol: "createInstalledInterceptionHandle",
+      module: "pty-interception",
+      prodImporters: ["packages/cli-commands/src/commands/pty-interception-installer-bindings.ts"],
+      testImporters: [
+        "packages/cli-commands/test/pty-interception-installer-bindings.test.ts",
+        "packages/cli-commands/test/pty-interception-installer.test.ts",
+        "packages/cli-commands/test/pty-interception.test.ts",
+      ],
+    },
+    {
+      invariant: "D104.M.9",
+      symbol: "installBashInterception",
+      module: "pty-interception-installer",
+      prodImporters: ["packages/cli-commands/src/commands/shell-pty.ts"],
+      testImporters: [
+        "packages/cli-commands/test/pty-interception-installer.test.ts",
+        "packages/cli-commands/test/shell-pty-install-binding.test.ts",
+      ],
+    },
+    {
+      invariant: "D104.M.9",
+      symbol: "createBashInterceptionInstallerDeps",
+      module: "pty-interception-installer-bindings",
+      prodImporters: ["packages/cli-commands/src/commands/shell-pty.ts"],
+      testImporters: [
+        "packages/cli-commands/test/pty-interception-installer-bindings.test.ts",
+        "packages/cli-commands/test/shell-pty-install-binding.test.ts",
+      ],
+    },
+  ] as const;
+
+  const relPath = (abs: string): string => relative(REPO_ROOT, abs).replace(/\\/g, "/");
+
+  const sortRefs = (refs: ModuleReference[]): ModuleReference[] =>
+    refs.sort(
+      (a, b) =>
+        a.file.localeCompare(b.file) ||
+        a.line - b.line ||
+        a.column - b.column ||
+        a.kind.localeCompare(b.kind),
+    );
+
+  // Deterministic: sort files pre-scan, then references by file/line/column/kind.
+  const collectScope = (root: string): ModuleReference[] =>
+    sortRefs(
+      findTsFiles(root)
+        .sort()
+        .flatMap((file) => collectModuleReferences(file)),
+    );
+
+  const srcRefs = collectScope(SRC_ROOT);
+  const testRefs = collectScope(TEST_ROOT);
+
+  // vitest.config.ts is a package-root non-production module NOT under test/, so
+  // collectScope(TEST_ROOT) misses it. Fold it into the non-production surface so a
+  // privileged import placed there is caught by exactly the same checks as a test file.
+  const ROOT_CONFIG = join(REPO_ROOT, CLI_COMMANDS, "vitest.config.ts");
+  const nonProdRefs = sortRefs([...testRefs, ...collectModuleReferences(ROOT_CONFIG)]);
+
+  const targetsModule = (ref: ModuleReference, moduleAbs: string): boolean =>
+    ref.target.kind === "relative" && ref.target.path === moduleAbs;
+
+  // Legitimate access: a NAMED, RUNTIME import of the symbol FROM the defining module.
+  const runtimeNamedImportersOf = (
+    refs: readonly ModuleReference[],
+    symbol: string,
+    moduleAbs: string,
+  ): string[] =>
+    [
+      ...new Set(
+        refs
+          .filter(
+            (ref) =>
+              ref.kind === "named-import" &&
+              ref.originalName === symbol &&
+              !ref.typeOnly &&
+              targetsModule(ref, moduleAbs),
+          )
+          .map((ref) => relPath(ref.file)),
+      ),
+    ].sort();
+
+  // A named import of the symbol that is type-only OR sourced from the wrong module
+  // (e.g. a barrel re-exporting the same name) -- neither is a legitimate binding.
+  const invalidNamedImportsOf = (
+    refs: readonly ModuleReference[],
+    symbol: string,
+    moduleAbs: string,
+  ): string[] =>
+    refs
+      .filter(
+        (ref) =>
+          ref.kind === "named-import" &&
+          ref.originalName === symbol &&
+          (ref.typeOnly || !targetsModule(ref, moduleAbs)),
+      )
+      .map(
+        (ref) =>
+          `${relPath(ref.file)}:${ref.line} [${ref.typeOnly ? "type-only" : "wrong-target"} named import of ${symbol}]`,
+      );
+
+  // Any non-named access to the defining module -- each exposes the symbol.
+  const forbiddenModuleAccessOf = (
+    refs: readonly ModuleReference[],
+    moduleName: string,
+    moduleAbs: string,
+  ): string[] =>
+    refs
+      .filter((ref) => targetsModule(ref, moduleAbs) && FORBIDDEN_MODULE_ACCESS_KINDS.has(ref.kind))
+      .map((ref) => `${relPath(ref.file)}:${ref.line} [${ref.kind}] -> ${moduleName}`);
+
+  const namedReexportsOf = (refs: readonly ModuleReference[], symbol: string): string[] =>
+    refs
+      .filter((ref) => ref.kind === "named-reexport" && ref.originalName === symbol)
+      .map((ref) => `${relPath(ref.file)}:${ref.line} [named-reexport ${symbol}]`);
+
+  for (const p of PRIVILEGED) {
+    const moduleAbs = resolve(COMMANDS_DIR, p.module);
+    const moduleRel = `${CLI_COMMANDS}/src/commands/${p.module}.ts`;
+
+    it(`${p.invariant}: ${p.symbol} is a runtime export minted/consumed only by its approved production module`, () => {
+      // Self-proof: the defining module actually LOCALLY exports the runtime symbol.
+      expect(
+        moduleExportsSymbol(join(REPO_ROOT, moduleRel), p.symbol),
+        `${moduleRel} must locally export a runtime ${p.symbol} (the privileged primitive).`,
+      ).toBe(true);
+
+      // A) Runtime named importers of S in production == the exact approved set (count 1).
+      expect(
+        runtimeNamedImportersOf(srcRefs, p.symbol, moduleAbs),
+        `production runtime named-importers of ${p.symbol} must be exactly its approved set (${p.invariant}).`,
+      ).toEqual([...p.prodImporters].sort());
+      expect(p.prodImporters, "self-check: exactly one approved production owner").toHaveLength(1);
+
+      // B) No type-only or wrong-module named import of S in production.
+      expect(
+        invalidNamedImportsOf(srcRefs, p.symbol, moduleAbs),
+        `every production named import of ${p.symbol} must be a runtime import from ${moduleRel} (${p.invariant}).`,
+      ).toEqual([]);
+
+      // C) No named RE-export of S anywhere in production (symbol-specific alias path).
+      expect(
+        namedReexportsOf(srcRefs, p.symbol),
+        `no production module may re-export/alias ${p.symbol} (${p.invariant}).`,
+      ).toEqual([]);
+
+      // D) No non-named access to the defining MODULE in production.
+      expect(
+        forbiddenModuleAccessOf(srcRefs, p.module, moduleAbs),
+        `only NAMED runtime imports may reach ${moduleRel}; namespace/default/side-effect/dynamic/require/re-export access is forbidden (${p.invariant}).`,
+      ).toEqual([]);
+    });
+
+    it(`${p.invariant}: ${p.symbol} non-production access is the exact pinned named-import set and nothing else`, () => {
+      // Runtime named importers across tests + vitest.config.ts == the pinned set.
+      expect(
+        runtimeNamedImportersOf(nonProdRefs, p.symbol, moduleAbs),
+        `non-production runtime named-importers of ${p.symbol} must be exactly the pinned set (tests/config must not become a secondary privileged surface).`,
+      ).toEqual([...p.testImporters].sort());
+
+      // No type-only / wrong-module named import of S in non-production (never a barrel).
+      expect(
+        invalidNamedImportsOf(nonProdRefs, p.symbol, moduleAbs),
+        `every non-production named import of ${p.symbol} must be a runtime import from ${moduleRel}, never a barrel (${p.invariant}).`,
+      ).toEqual([]);
+
+      // No non-named access to the defining MODULE in non-production either.
+      expect(
+        forbiddenModuleAccessOf(nonProdRefs, p.module, moduleAbs),
+        `non-production code must not reach ${moduleRel} via namespace/default/side-effect/dynamic/require/re-export access (${p.invariant}).`,
+      ).toEqual([]);
+    });
+  }
+
+  it("D104.M.8/M.9: no unresolved dynamic module reference in cli-commands production or non-production", () => {
+    // A non-analyzable dynamic import()/require() cannot be proven confined, so no
+    // audited scope may contain one (fail rather than pretend).
+    const unresolved = [...srcRefs, ...nonProdRefs]
+      .filter((ref) => ref.kind === "unresolved-dynamic-reference")
+      .map((ref) => `${relPath(ref.file)}:${ref.line} [unresolved-dynamic-reference]`);
+    expect(
+      unresolved,
+      "cli-commands production/non-production must contain no non-analyzable dynamic import/require (D104.M.8/M.9).",
+    ).toEqual([]);
+  });
+
+  it("D104.M.8/M.9: the audited universe is exactly src/**.ts + test/**.ts + vitest.config.ts", () => {
+    // The exact importer sets are only trustworthy if the scan covers every
+    // code-bearing TypeScript-family file. srcRefs + nonProdRefs cover src/, test/,
+    // and vitest.config.ts; PROVE nothing else exists, and that no .tsx/.mts/.cts
+    // file exists at all -- the collector parses ScriptKind.TS only, so fail closed
+    // rather than silently ignore an unsupported-extension module.
+    const pkgDir = join(REPO_ROOT, CLI_COMMANDS);
+    const packageTsFamilyFiles = findTypeScriptFamilyFiles(pkgDir);
+
+    const unaudited = packageTsFamilyFiles
+      .filter((file) => {
+        const rel = relative(pkgDir, file).replace(/\\/g, "/");
+        return !(rel === "vitest.config.ts" || rel.startsWith("src/") || rel.startsWith("test/"));
+      })
+      .map(relPath);
+    expect(
+      unaudited,
+      "cli-commands has TypeScript-family files outside the audited src/, test/, and vitest.config.ts; widen the M.8/M.9 audit scope before one can hide a privileged importer.",
+    ).toEqual([]);
+
+    const unsupportedForCollector = packageTsFamilyFiles
+      .filter((file) => extname(file) !== ".ts")
+      .map(relPath);
+    expect(
+      unsupportedForCollector,
+      "M.8/M.9 audits ScriptKind.TS only; add and test collector parser support before introducing .tsx/.mts/.cts files.",
+    ).toEqual([]);
   });
 });
