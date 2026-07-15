@@ -6533,37 +6533,71 @@ describe("Architectural invariants -- M G4 PTY engine boundaries (shell-pty.ts)"
   const SHELL_PTY_REL = "packages/cli-commands/src/commands/shell-pty.ts";
   const SHELL_REL = "packages/cli-commands/src/commands/shell.ts";
 
-  it("D104.M.5 (TEMPORARY, M G4 Step 3d): shell.ts declares --pty but the public path REFUSES and never reaches the engine", () => {
-    // TEMPORARY M G4 Step 3d guard: replaced in Step 4 when the guarded PTY
-    // path is wired. Until then, `viberevert shell --pty` MUST refuse with the
-    // not-enabled copy and MUST NOT import/dispatch the PTY engine -- no
-    // unguarded transparent shell on main (D104.M.5). The engine (shell-pty.ts)
-    // is exercised by tests via a direct import of runPtyShell only.
-    //
-    // Non-regressions (already enforced, not re-duplicated here):
-    //   D104.M.3 -- shell.ts has no node-pty/openpty/conpty: see D103.M.3 above.
-    //   D104.M.4 -- shell-pty.ts routes I/O via injected context: see the
-    //               shell-pty process-stream invariant below.
+  it("D104.M.5 (M G4 Step 4f): shell.ts dispatches the public --pty path to the carved engine (refusal removed)", () => {
+    // Step 4f enables the first public `viberevert shell --pty`: the temporary
+    // not-enabled refusal (Step 3d) is REPLACED by real dispatch to the engine.
+    // shell.ts stays free of native-PTY / interception IMPLEMENTATION (it only
+    // imports + calls the carved engine by name); D103.M.3 separately forbids
+    // node-pty/openpty/conpty and is a non-regression here.
     const stripped = stripTsComments(readSource(SHELL_REL));
 
-    // The --pty flag exists (thin sugar for the "pty" engine model).
+    // The --pty flag still exists (thin sugar for the "pty" engine model).
     expect(
       /Option\.Boolean\(\s*["']--pty["']/.test(stripped),
-      `${SHELL_REL} must declare the --pty flag (M G4 Step 3d).`,
+      `${SHELL_REL} must declare the --pty flag (M G4).`,
     ).toBe(true);
 
-    // ...and the public path refuses with the not-enabled copy.
+    // The temporary not-enabled refusal copy + its constant are GONE.
     expect(
       stripped.includes("PTY mode (--pty) is not enabled yet"),
-      `${SHELL_REL} must refuse the public --pty path with the not-enabled copy (D104.M.5).`,
+      `${SHELL_REL} must NOT retain the not-enabled refusal copy (D104.M.5 replaced in Step 4f).`,
+    ).toBe(false);
+    expect(
+      stripped.includes("PTY_MODE_NOT_ENABLED_MESSAGE"),
+      `${SHELL_REL} must NOT retain the PTY_MODE_NOT_ENABLED_MESSAGE constant (Step 4f).`,
+    ).toBe(false);
+
+    // shell.ts imports BOTH engine entry points from the carved module.
+    expect(
+      /import\s*\{[^}]*\brunPtyShell\b[^}]*\}\s*from\s*["']\.\/shell-pty\.js["']/.test(stripped),
+      `${SHELL_REL} must import runPtyShell from ./shell-pty.js (Step 4f dispatch).`,
+    ).toBe(true);
+    expect(
+      /import\s*\{[^}]*\bcreateRunPtyShellDeps\b[^}]*\}\s*from\s*["']\.\/shell-pty\.js["']/.test(
+        stripped,
+      ),
+      `${SHELL_REL} must import createRunPtyShellDeps from ./shell-pty.js (Step 4f dispatch).`,
     ).toBe(true);
 
-    // ...and it NEVER reaches the engine: no shell-pty import, no runPtyShell,
-    // no createRunPtyShellDeps (all wired only in Step 4).
-    for (const banned of ["shell-pty", "runPtyShell", "createRunPtyShellDeps"]) {
+    // The PTY branch actually CALLS the carved engine (executable code, not a
+    // doc comment): createRunPtyShellDeps(...) is fed straight into runPtyShell(...).
+    expect(
+      /runPtyShell\(\s*createRunPtyShellDeps\(/.test(stripped),
+      `${SHELL_REL} public --pty branch must dispatch runPtyShell(createRunPtyShellDeps(...)) (Step 4f).`,
+    ).toBe(true);
+
+    // The REPL path + the engine dispatch both remain present.
+    expect(
+      stripped.includes("tokenizeShellLine") && /engine\s*===\s*["']pty["']/.test(stripped),
+      `${SHELL_REL} must retain the REPL path and the engine dispatch (Step 4f).`,
+    ).toBe(true);
+
+    // No native-PTY / interception IMPLEMENTATION is copied into shell.ts -- it
+    // only delegates through the two carved-engine entry points above. (Generic
+    // `spawn` is intentionally NOT banned: the REPL spawns children via
+    // node:child_process, D103.)
+    for (const banned of [
+      "node-pty",
+      "openpty",
+      "conpty",
+      "attachTerminalBridge",
+      "loadPtyModule",
+      "installBashInterception",
+      "generateBashInterceptionHook",
+    ]) {
       expect(
         stripped.includes(banned),
-        `${SHELL_REL} must NOT reference "${banned}" -- the public --pty path refuses and never reaches the engine until Step 4 (D104.M.5, TEMPORARY).`,
+        `${SHELL_REL} must NOT copy PTY/interception implementation "${banned}" -- it only dispatches to the engine (D104.M.5 Step 4f).`,
       ).toBe(false);
     }
   });

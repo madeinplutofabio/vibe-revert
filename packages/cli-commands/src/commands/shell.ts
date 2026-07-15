@@ -125,6 +125,7 @@ import { ConcurrentOperationError } from "../locks.js";
 import { EndSessionRaceError, endSessionOperation } from "../operations/end-session.js";
 import { START_LOCK_REL, startSessionOperation } from "../operations/start-session.js";
 import { RuntimeEnvInvalidError, resolveNowForCliTimestamp } from "../runtime-env.js";
+import { createRunPtyShellDeps, runPtyShell } from "./shell-pty.js";
 import { tokenizeShellLine } from "./shell-tokenize.js";
 
 /** Confirmation phrase for commands.require_confirm matches (shared with run; D102.D). */
@@ -141,16 +142,6 @@ const EXIT_WORD = "exit";
  * transparent PTY bridge; the default is the guarded REPL.
  */
 type ShellEngine = "repl" | "pty";
-
-/**
- * Refusal copy for the not-yet-enabled `shell --pty` path (D104.M.5). Until
- * interception lands (Step 4), the public `--pty` path REFUSES and never reaches
- * the PTY engine -- no unguarded transparent shell on main; the engine
- * (shell-pty.ts) is exercised by tests via a direct import of runPtyShell only.
- */
-const PTY_MODE_NOT_ENABLED_MESSAGE =
-  "PTY mode (--pty) is not enabled yet: the transparent PTY bridge is still under development.\n" +
-  "Use `viberevert shell` for the guarded command loop.\n";
 
 /** Result of the D103.G active-session ownership re-check. */
 type SessionOwnership = "ours" | "missing" | "different" | "unknown";
@@ -265,7 +256,7 @@ export class ShellCommand extends Command {
 
   pty = Option.Boolean("--pty", false, {
     description:
-      "Experimental: transparent PTY bridge instead of the guarded REPL (not enabled yet)",
+      "Experimental: transparent Bash PTY with best-effort prompt-level command interception; nested processes may bypass it",
   });
 
   /** True while a child is spawned -- suppresses the TTY SIGINT re-prompt. */
@@ -278,22 +269,36 @@ export class ShellCommand extends Command {
 
   override async execute(): Promise<number> {
     const stderr = this.context.stderr;
+    const task = this.task;
 
-    // M G4 (D104.A / D104.M.5): --pty selects the transparent PTY engine. Until
-    // interception lands (Step 4), the public --pty path REFUSES here -- BEFORE
-    // any --task/repo/config/session work -- and never reaches the PTY engine.
-    // The engine (shell-pty.ts) stays unwired; tests exercise it via a direct
-    // import of runPtyShell only.
-    const engine: ShellEngine = this.pty ? "pty" : "repl";
-    if (engine === "pty") {
-      stderr.write(PTY_MODE_NOT_ENABLED_MESSAGE);
+    // Defensive --task validation (both engines; mirrors StartCommand /
+    // RunCommand). Runs BEFORE engine selection so it is the single validation
+    // authority for the REPL and PTY paths alike, over one captured snapshot.
+    if (task !== undefined && task.trim().length === 0) {
+      stderr.write("--task must not be empty or whitespace-only.\n");
       return 1;
     }
 
-    // Defensive --task validation (mirrors StartCommand / RunCommand).
-    if (this.task !== undefined && this.task.trim().length === 0) {
-      stderr.write("--task must not be empty or whitespace-only.\n");
-      return 1;
+    // M G4 (D104.A): --pty selects the transparent PTY engine (best-effort, with
+    // prompt-level guard interception; Bash only). It dispatches to the carved
+    // engine module, which owns its own gate (real TTY, node-pty, shell resolve),
+    // the session, interception install, and terminal restoration, and fails
+    // CLEARLY when unavailable -- it never silently degrades to the REPL. Nested
+    // processes (scripts, subshells, editors) run outside the prompt-level
+    // interception boundary (documented best-effort caveat). The REPL execution
+    // path below is otherwise unchanged. Host facts are snapshotted once here and
+    // passed by identity into the injected engine deps.
+    const engine: ShellEngine = this.pty ? "pty" : "repl";
+    if (engine === "pty") {
+      const invocationCwd = process.cwd();
+      const invocationEnv = process.env;
+      return runPtyShell(
+        createRunPtyShellDeps(this.context, {
+          cwd: invocationCwd,
+          env: invocationEnv,
+          ...(task !== undefined ? { task } : {}),
+        }),
+      );
     }
 
     const invocationCwd = process.cwd();
@@ -347,7 +352,7 @@ export class ShellCommand extends Command {
         cwd: invocationCwd,
         lockCommand: "viberevert shell",
         loadedConfig,
-        ...(this.task !== undefined ? { task: this.task } : {}),
+        ...(task !== undefined ? { task } : {}),
       });
       sessionId = started.sessionId;
     } catch (err) {
