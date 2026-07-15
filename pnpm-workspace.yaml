@@ -1,2 +1,10 @@
 packages:
   - "packages/*"
+
+# M G4 Step 4f.1 (D104.M.6, corrected 2026-07-15): node-pty is the SOLE
+# third-party dependency pnpm may run lifecycle/build scripts for. It provisions
+# its native binding from an upstream prebuild (Windows/macOS) or an upstream
+# source build (Linux via node-gyp). Do NOT add any other package here without a
+# reviewed native-dependency policy change.
+onlyBuiltDependencies:
+  - "node-pty"

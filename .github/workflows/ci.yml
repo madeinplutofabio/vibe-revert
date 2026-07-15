@@ -16,9 +16,16 @@ concurrency:
 permissions:
   contents: read
 
+# M G4 Step 4f.1 (D104.M.6): node-pty is the sole build-script-approved
+# dependency (pnpm-workspace.yaml onlyBuiltDependencies). Its native binding is
+# provisioned during `pnpm install` -- a source build via node-gyp on Linux
+# (node-pty@1.1.0 ships no Linux prebuild) and a bundled prebuild on Windows.
+# Node is pinned to an EXACT version so the Linux source build uses a fixed
+# runtime/header target; any Node bump must re-run the toolchain, binding,
+# PTY-probe, and live-smoke gates.
 jobs:
   build-and-test:
-    name: Build and test (Linux, Node 22)
+    name: Build and test (Linux, Node 22.23.1)
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
@@ -27,14 +34,42 @@ jobs:
       - name: Enable Corepack (uses runner's system Node; provides pnpm)
         run: corepack enable
 
-      - name: Set up Node 22 with pnpm cache
+      - name: Set up Node 22.23.1 with pnpm cache
         uses: actions/setup-node@v6
         with:
-          node-version: 22
+          node-version: 22.23.1
           cache: pnpm
+
+      - name: Report native build toolchain (Linux source build)
+        run: |
+          node --version
+          pnpm --version
+          python3 --version
+          make --version | head -n 1
+          c++ --version | head -n 1
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Verify node-pty binding
+        working-directory: packages/cli-commands
+        shell: bash
+        run: |
+          node -e '
+            const pkg = require("node-pty/package.json");
+            if (pkg.version !== "1.1.0") {
+              throw new Error("unexpected node-pty version: " + pkg.version);
+            }
+            const mod = require("node-pty");
+            if (typeof mod.spawn !== "function") {
+              throw new Error("node-pty loaded without a callable spawn export");
+            }
+            console.log(
+              "[node-pty binding] PASS: version=" + pkg.version +
+              " spawn=function node=" + process.versions.node +
+              " platform=" + process.platform + " arch=" + process.arch
+            );
+          '
 
       - name: Lint
         run: pnpm lint
@@ -60,14 +95,34 @@ jobs:
       - name: Enable Corepack (uses runner's system Node; provides pnpm)
         run: corepack enable
 
-      - name: Set up Node 22 with pnpm cache
+      - name: Set up Node 22.23.1 with pnpm cache
         uses: actions/setup-node@v6
         with:
-          node-version: 22
+          node-version: 22.23.1
           cache: pnpm
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Verify node-pty binding
+        working-directory: packages/cli-commands
+        shell: bash
+        run: |
+          node -e '
+            const pkg = require("node-pty/package.json");
+            if (pkg.version !== "1.1.0") {
+              throw new Error("unexpected node-pty version: " + pkg.version);
+            }
+            const mod = require("node-pty");
+            if (typeof mod.spawn !== "function") {
+              throw new Error("node-pty loaded without a callable spawn export");
+            }
+            console.log(
+              "[node-pty binding] PASS: version=" + pkg.version +
+              " spawn=function node=" + process.versions.node +
+              " platform=" + process.platform + " arch=" + process.arch
+            );
+          '
 
       - name: Smoke (PowerShell 7+, pwsh)
         run: pwsh -ExecutionPolicy Bypass -File scripts/smoke-test.ps1

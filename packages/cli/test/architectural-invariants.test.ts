@@ -46,6 +46,61 @@ function readSource(relPathFromRepoRoot: string): string {
 }
 
 /**
+ * True if `yaml` declares a top-level key `key:` (mapping or sequence). Anchored
+ * at column 0 with an immediate colon, so `foo:` never matches `fooBar:` and a
+ * `#`-commented line never matches. Used to forbid alternate pnpm build-script
+ * approval mechanisms (D104.M.6).
+ */
+function hasTopLevelYamlKey(yaml: string, key: string): boolean {
+  const re = new RegExp(`^${key}\\s*:`);
+  return yaml.split(/\r?\n/).some((line) => re.test(line));
+}
+
+/** Count top-level `key:` occurrences -- to reject duplicate policy keys (D104.M.6). */
+function topLevelYamlKeyCount(yaml: string, key: string): number {
+  const re = new RegExp(`^${key}\\s*:`);
+  return yaml.split(/\r?\n/).filter((line) => re.test(line)).length;
+}
+
+/**
+ * Read a top-level YAML BLOCK list into its item names. Returns `null` when the
+ * key is absent. THROWS when the key is present but malformed -- inline form,
+ * unexpected indented content, or a bad item line -- so a broken policy file
+ * fails the invariant loudly instead of being read as a partial/misleading
+ * list. The accepted form is intentionally narrow (the canonical block list this
+ * repo uses); blank and `#`-comment lines inside the block are skipped (legal
+ * YAML); a new top-level key or EOF ends the list. No YAML-parser dependency.
+ */
+function readTopLevelYamlList(yaml: string, key: string): string[] | null {
+  const lines = yaml.split(/\r?\n/);
+  const keyRe = new RegExp(`^${key}\\s*:`);
+  const startIdx = lines.findIndex((l) => keyRe.test(l));
+  if (startIdx === -1) return null;
+
+  const afterColon = (lines[startIdx] ?? "").replace(keyRe, "").trim();
+  if (afterColon.length > 0) {
+    // Reject inline form -- only the reviewed block-list representation is
+    // accepted, so there is no miniature YAML parser to trust.
+    throw new Error(`${key} must use the reviewed block-list form in pnpm-workspace.yaml`);
+  }
+
+  // Block form: subsequent indented "- item" lines.
+  const items: string[] = [];
+  for (let i = startIdx + 1; i < lines.length; i++) {
+    const line = lines[i] ?? "";
+    if (/^\s*$/.test(line) || /^\s*#/.test(line)) continue;
+    if (/^\S/.test(line)) break; // new top-level key ends the block
+    const m = /^\s+-\s*(?:"([^"]+)"|'([^']+)'|([^\s#]+))\s*(?:#.*)?$/.exec(line);
+    const name = m?.[1] ?? m?.[2] ?? m?.[3];
+    if (name === undefined) {
+      throw new Error(`Malformed ${key} entry in pnpm-workspace.yaml: ${JSON.stringify(line)}`);
+    }
+    items.push(name);
+  }
+  return items;
+}
+
+/**
  * Recursively find all *.ts files under `dir`. Skips node_modules and
  * dist directories defensively, though they wouldn't contain our source
  * files anyway.
@@ -6338,11 +6393,20 @@ describe("Architectural invariants -- M G3 viberevert shell guarded REPL (D103.M
 //     "node-pty"` / re-export, a side-effect `import "node-pty"`, nor
 //     `require("node-pty")`, so a missing optional dep can never crash
 //     module load / the whole CLI.
-//   - D104.M.6 -- node-pty build scripts are never APPROVED: no
-//     `pnpm.onlyBuiltDependencies` (root package.json) and no
-//     `onlyBuiltDependencies` in pnpm-workspace.yaml. node-pty loads from
-//     bundled prebuilds with build scripts ignored; the "Ignored build
-//     scripts" install warning is expected, not a failure.
+//   - D104.M.6 (corrected, G4 Step 4f.1) -- node-pty is the SOLE third-party
+//     dependency pnpm may run dependency lifecycle/build scripts for. Native
+//     provisioning of the exact manifest-pinned official node-pty@1.1.0,
+//     installed under the frozen lockfile, may use an upstream prebuild
+//     (Windows/macOS) or an upstream source build via node-gyp (Linux --
+//     node-pty@1.1.0 ships no Linux prebuild). Approval is declared in exactly
+//     ONE location (pnpm-workspace.yaml onlyBuiltDependencies: [node-pty]); no
+//     second approval key, and no alternate mechanism (allowBuilds,
+//     dangerouslyAllowAllBuilds, onlyBuiltDependenciesFile, ...), may exist in
+//     the workspace file or any package.json. The enforcing pnpm version is
+//     pinned (packageManager) since these keys' semantics are version-specific.
+//     Provisioning is accepted only when the module loads, exposes a callable
+//     spawn, passes the PTY-allocation probe, and the public live smoke emits
+//     RUN + PASS with no SKIP (CI-enforced, not by this test).
 
 describe("Architectural invariants -- M G4 viberevert shell --pty PTY bridge (D104.M)", () => {
   const PTY_LOADER_REL = "packages/cli-commands/src/commands/pty-loader.ts";
@@ -6407,30 +6471,120 @@ describe("Architectural invariants -- M G4 viberevert shell --pty PTY bridge (D1
     ).toBe(false);
   });
 
-  it("D104.M.6: node-pty build scripts are never approved -- no onlyBuiltDependencies / approve-builds", () => {
-    // Decided B (2026-07-08): node-pty ships bundled prebuilds and its build
-    // scripts stay IGNORED. The repo must not approve them via pnpm's
-    // onlyBuiltDependencies (package.json `pnpm` field OR pnpm-workspace.yaml)
-    // or `pnpm approve-builds`. The "Ignored build scripts" install warning is
-    // expected and acceptable; approving a build script is the regression.
+  it("D104.M.6: node-pty is the SOLE build-script-approved dependency -- exact 1.1.0, single approval location, pnpm pinned (corrected, G4 Step 4f.1)", () => {
+    // Corrected 2026-07-15 (WSL Linux spike): official node-pty@1.1.0 ships NO
+    // Linux prebuild, so Linux provisions its native binding from an upstream
+    // source build via node-gyp; Windows/macOS use bundled prebuilds. Either
+    // path is permitted ONLY for the exact manifest-pinned official node-pty,
+    // installed under the frozen lockfile. node-pty is the sole THIRD-PARTY
+    // dependency pnpm may run lifecycle/build scripts for, declared in exactly
+    // one policy location. The former "no build-script approval" rule and the
+    // "node-gyp fallback must fail CI" idea are dropped -- the durable gate is
+    // approved package identity + a loadable, functioning binding (CI-enforced
+    // by the binding + PTY-probe + live-smoke gates), not "no compilation". The
+    // WSL evidence lives in the plan/decision record, not this normative
+    // invariant.
+    //
+    // The package-manager version is part of this security boundary: pnpm can
+    // express build-script approval through several settings (onlyBuiltDependencies,
+    // onlyBuiltDependenciesFile, allowBuilds, dangerouslyAllowAllBuilds, ...) whose
+    // semantics can change across majors. A pnpm version change REQUIRES
+    // re-reviewing these lifecycle-script policy keys and rerunning the install,
+    // binding-load, allocation-probe, and live-smoke gates.
+    const APPROVAL_KEY = "onlyBuiltDependencies";
+    // Every pnpm build-script setting OTHER than the single approval key -- none
+    // may appear in pnpm-workspace.yaml or any package.json `pnpm` field, so
+    // approval has one source of truth and no bypass (esp.
+    // dangerouslyAllowAllBuilds) can widen it.
+    const FORBIDDEN_BUILD_KEYS = [
+      "allowBuilds",
+      "neverBuiltDependencies",
+      "ignoredBuiltDependencies",
+      "onlyBuiltDependenciesFile",
+      "dangerouslyAllowAllBuilds",
+    ] as const;
+
+    // (0) The reviewed pnpm version is pinned; its build-approval semantics are
+    //     what this invariant is written against.
     const rootPkg = JSON.parse(readSource("package.json"));
     expect(
-      rootPkg.pnpm?.onlyBuiltDependencies,
-      "Root package.json must NOT set pnpm.onlyBuiltDependencies -- node-pty build scripts stay unapproved (D104.M.6).",
-    ).toBeUndefined();
+      rootPkg.packageManager,
+      "Root package.json packageManager must pin the reviewed pnpm version enforcing D104.M.6 (pnpm@10.29.3); a pnpm change requires re-reviewing the build-script policy keys and rerunning the provisioning gates.",
+    ).toBe("pnpm@10.29.3");
 
-    // pnpm 10 also reads build-script policy from pnpm-workspace.yaml; guard
-    // that location too (raw substring is enough -- no YAML parser needed).
-    let workspaceYaml = "";
-    try {
-      workspaceYaml = readFileSync(join(REPO_ROOT, "pnpm-workspace.yaml"), "utf8");
-    } catch {
-      workspaceYaml = "";
-    }
+    // (a) cli-commands pins node-pty EXACTLY to 1.1.0 under optionalDependencies
+    //     (an accidental range or workspace override must not satisfy the gate).
+    const OWNER_REL = "packages/cli-commands/package.json";
+    const ownerPkg = JSON.parse(readSource(OWNER_REL));
     expect(
-      workspaceYaml.includes("onlyBuiltDependencies"),
-      "pnpm-workspace.yaml must NOT set onlyBuiltDependencies -- node-pty build scripts stay unapproved (D104.M.6).",
-    ).toBe(false);
+      ownerPkg.optionalDependencies?.["node-pty"],
+      `${OWNER_REL} must pin node-pty EXACTLY to 1.1.0 under optionalDependencies (D104.M.6).`,
+    ).toBe("1.1.0");
+
+    // (b) pnpm-workspace.yaml approves EXACTLY [node-pty] and nothing else, in a
+    //     single onlyBuiltDependencies key (a duplicate key could broaden
+    //     approval past what the first occurrence shows).
+    const workspaceYaml = readFileSync(join(REPO_ROOT, "pnpm-workspace.yaml"), "utf8");
+    // The manifest enumeration in (d) walks exactly one level below packages/;
+    // that is only complete while the workspace layout stays packages/*. Enforce
+    // it so a future nested-workspace glob fails HERE instead of silently leaving
+    // new manifests un-inspected.
+    expect(
+      readTopLevelYamlList(workspaceYaml, "packages"),
+      "pnpm-workspace.yaml packages must remain exactly [packages/*] while D104.M.6 enumerates manifests one level below packages/; update the invariant if the workspace layout changes.",
+    ).toEqual(["packages/*"]);
+    expect(
+      topLevelYamlKeyCount(workspaceYaml, APPROVAL_KEY),
+      `pnpm-workspace.yaml must declare ${APPROVAL_KEY} exactly once (D104.M.6).`,
+    ).toBe(1);
+    const approved = readTopLevelYamlList(workspaceYaml, APPROVAL_KEY);
+    expect(
+      approved,
+      `pnpm-workspace.yaml must declare ${APPROVAL_KEY} -- the SINGLE build-script-approval location (D104.M.6).`,
+    ).not.toBeNull();
+    expect(
+      approved,
+      `pnpm-workspace.yaml ${APPROVAL_KEY} must be EXACTLY [node-pty] and nothing else -- no other third-party dependency may run lifecycle/build scripts (D104.M.6).`,
+    ).toEqual(["node-pty"]);
+
+    // (c) No ALTERNATE workspace-level approval mechanism -- including the newer
+    //     allowBuilds map and the dangerouslyAllowAllBuilds escape hatch -- may
+    //     exist alongside the one approval key.
+    for (const forbiddenKey of FORBIDDEN_BUILD_KEYS) {
+      expect(
+        hasTopLevelYamlKey(workspaceYaml, forbiddenKey),
+        `pnpm-workspace.yaml must NOT declare ${forbiddenKey}; build approval has one source of truth: ${APPROVAL_KEY}: [node-pty] (D104.M.6).`,
+      ).toBe(false);
+    }
+
+    // (d) No SECOND approval location in any manifest. Neither the root manifest
+    //     nor any workspace manifest may carry a pnpm build-script key (the
+    //     approval key OR any forbidden alternative) -- one source of truth, so a
+    //     future contributor cannot add a shadow approval while leaving the
+    //     expected one intact.
+    //
+    //     Enumeration mirrors the current workspace pattern packages/*, which is
+    //     ENFORCED in (b) -- a layout change fails this test until this
+    //     enumeration is updated to match.
+    const manifestRels = ["package.json"];
+    for (const entry of readdirSync(join(REPO_ROOT, "packages"))) {
+      manifestRels.push(`packages/${entry}/package.json`);
+    }
+    for (const rel of manifestRels) {
+      let raw: string;
+      try {
+        raw = readFileSync(join(REPO_ROOT, rel), "utf8");
+      } catch {
+        continue; // directory entry without a package.json
+      }
+      const pkg = JSON.parse(raw);
+      for (const key of [APPROVAL_KEY, ...FORBIDDEN_BUILD_KEYS]) {
+        expect(
+          pkg.pnpm?.[key],
+          `${rel} must NOT set pnpm.${key}; dependency build policy lives ONLY in pnpm-workspace.yaml (D104.M.6).`,
+        ).toBeUndefined();
+      }
+    }
   });
 
   it("D104.M.7: net imports are confined to pty-interception-transport.ts within cli-commands/src", () => {
