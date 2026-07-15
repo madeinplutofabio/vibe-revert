@@ -157,13 +157,15 @@ __viberevert_ic_debug_trap() {
     if __vr_escaped=$(__viberevert_ic_json_escape "$__vr_line" 2>/dev/null); then
       local __vr_request='{"protocolVersion":${protocolVersion},"nonce":"'"$__viberevert_ic_nonce"'","id":"'"$__vr_id"'","rawLine":"'"$__vr_escaped"'"}'
       local __vr_expected='{"protocolVersion":${protocolVersion},"id":"'"$__vr_id"'","kind":"allow"}'
-      local __vr_fd
       local __vr_decision=
-      if exec {__vr_fd}<>"/dev/tcp/127.0.0.1/$__viberevert_ic_port" 2>/dev/null; then
-        if printf '%s\\n' "$__vr_request" >&"$__vr_fd" 2>/dev/null && IFS= read -r -t "$__viberevert_ic_timeout" __vr_decision <&"$__vr_fd" 2>/dev/null && [[ "$__vr_decision" == "$__vr_expected" ]]; then
-          __vr_status=0
-        fi
-        exec {__vr_fd}>&- 2>/dev/null
+      __vr_decision=$(
+        exec {__vr_fd}<>"/dev/tcp/127.0.0.1/$__viberevert_ic_port" 2>/dev/null &&
+          printf '%s\\n' "$__vr_request" >&"$__vr_fd" 2>/dev/null &&
+          IFS= read -r -t "$__viberevert_ic_timeout" __vr_reply <&"$__vr_fd" 2>/dev/null &&
+          printf '%s' "$__vr_reply"
+      )
+      if [[ "$__vr_decision" == "$__vr_expected" ]]; then
+        __vr_status=0
       fi
     fi
   fi

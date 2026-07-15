@@ -105,18 +105,30 @@ describe("generateBashInterceptionHook — the decision is fail-closed", () => {
   });
 
   it("requires BOTH a successful read AND an exact allow match before running (status 0)", () => {
-    expect(hook).toContain('printf \'%s\\n\' "$__vr_request" >&"$__vr_fd" 2>/dev/null');
+    // The request is written, then the reply read -- chained with && inside the
+    // command substitution, so any write/read failure short-circuits to an empty
+    // decision (fail-closed skip). The read uses the injected timeout.
+    expect(hook).toContain('printf \'%s\\n\' "$__vr_request" >&"$__vr_fd" 2>/dev/null &&');
     expect(hook).toContain(
-      'IFS= read -r -t "$__viberevert_ic_timeout" __vr_decision <&"$__vr_fd" 2>/dev/null',
+      'IFS= read -r -t "$__viberevert_ic_timeout" __vr_reply <&"$__vr_fd" 2>/dev/null &&',
     );
-    expect(hook).toContain('[[ "$__vr_decision" == "$__vr_expected" ]]');
-    expect(hook).toContain('2>/dev/null && IFS= read -r -t "$__viberevert_ic_timeout"');
-    expect(hook).toContain('2>/dev/null && [[ "$__vr_decision" == "$__vr_expected" ]]');
+    // The captured decision must byte-match the expected allow before status 0.
+    expect(hook).toContain("__vr_decision=$(");
+    expect(hook).toContain('if [[ "$__vr_decision" == "$__vr_expected" ]]; then');
     expect(hook).toContain("__vr_status=0");
   });
 
-  it("closes the channel FD after use", () => {
-    expect(hook).toContain("exec {__vr_fd}>&- 2>/dev/null");
+  it("confines the channel FD to a subshell so it closes on exit (no prompt-corrupting `exec` close)", () => {
+    // The round-trip runs inside a command substitution: the socket FD is opened
+    // there and closed automatically when the subshell exits. There is NO
+    // persistent `exec {fd}>&-` in the interactive shell -- `exec` fd ops in the
+    // DEBUG trap corrupted readline and leaked descriptors (runtime regression:
+    // pty-interception-hook-live.test.ts).
+    const substIndex = hook.indexOf("__vr_decision=$(");
+    const openIndex = hook.indexOf('exec {__vr_fd}<>"/dev/tcp/127.0.0.1/$__viberevert_ic_port"');
+    expect(substIndex).toBeGreaterThanOrEqual(0);
+    expect(openIndex).toBeGreaterThan(substIndex);
+    expect(hook).not.toContain("exec {__vr_fd}>&-");
   });
 
   it("dials the channel by validated port variable, never the raw endpoint string", () => {
