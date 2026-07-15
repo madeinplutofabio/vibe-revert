@@ -154,24 +154,38 @@ function createFakePty(
 function createFakeStreams(
   opts: {
     initialRaw?: boolean;
+    initialFlowing?: boolean | null;
     columns?: number;
     rows?: number;
     stdoutWriteThrows?: boolean;
     setRawModeThrowsOnTrue?: boolean;
     setRawModeThrowsOnFalse?: boolean;
+    pauseThrows?: boolean;
+    onDataThrows?: boolean;
   } = {},
 ) {
   const setRawModeCalls: boolean[] = [];
   const stdoutWrites: string[] = [];
+  // A single ordered log of stdin lifecycle events, so teardown ORDER (not just
+  // occurrence) is assertable: raw:<mode> / on:data / remove:data / pause.
+  const stdinLifecycle: string[] = [];
   let stdinRemoved = 0;
   let stdoutRemoved = 0;
   let dataListener: ((data: Buffer | string) => void) | undefined;
   let resizeListener: (() => void) | undefined;
+  // TTY flow state: null = never engaged, false = paused, true = flowing.
+  // `on("data")` resumes (-> true); pause() -> false.
+  let flowing: boolean | null = opts.initialFlowing ?? null;
+  let pauseCalls = 0;
 
   const streams: PtyBridgeStreams = {
     stdin: {
       isRaw: opts.initialRaw ?? false,
+      get readableFlowing() {
+        return flowing;
+      },
       setRawMode: (mode) => {
+        stdinLifecycle.push(`raw:${mode}`);
         setRawModeCalls.push(mode);
         if (opts.setRawModeThrowsOnTrue && mode) {
           throw new Error("setRawMode(true) failed");
@@ -181,10 +195,24 @@ function createFakeStreams(
         }
       },
       on: (_event, listener) => {
+        stdinLifecycle.push("on:data");
+        if (opts.onDataThrows) {
+          throw new Error("stdin.on(data) failed");
+        }
         dataListener = listener;
+        flowing = true;
       },
       removeListener: () => {
+        stdinLifecycle.push("remove:data");
         stdinRemoved += 1;
+      },
+      pause: () => {
+        stdinLifecycle.push("pause");
+        pauseCalls += 1;
+        if (opts.pauseThrows) {
+          throw new Error("stdin.pause failed");
+        }
+        flowing = false;
       },
     },
     stdout: {
@@ -211,8 +239,11 @@ function createFakeStreams(
     streams,
     setRawModeCalls,
     stdoutWrites,
+    stdinLifecycle,
     stdinRemovedCount: () => stdinRemoved,
     stdoutRemovedCount: () => stdoutRemoved,
+    pauseCount: () => pauseCalls,
+    isFlowing: () => flowing,
     emitStdinData: (data: Buffer | string) => dataListener?.(data),
     emitResize: () => resizeListener?.(),
   };
@@ -482,6 +513,110 @@ describe("attachTerminalBridge -- raw passthrough + D104.I teardown", () => {
     expect(streams.setRawModeCalls).toEqual([true, true]);
   });
 
+  it("returns stdin to paused on dispose before exit (remove listener -> pause -> restore raw)", () => {
+    const pty = createFakePty();
+    const streams = createFakeStreams({ initialRaw: false, columns: 80, rows: 24 });
+    const bridge = attachTerminalBridge(streams.streams, pty.pty);
+    expect(streams.isFlowing()).toBe(true); // on("data") resumed it
+
+    const result = bridge.dispose();
+
+    expect(result.errors).toEqual([]);
+    expect(streams.pauseCount()).toBe(1);
+    expect(streams.isFlowing()).toBe(false);
+    // ORDER: stop input delivery, then pause, then restore raw.
+    expect(streams.stdinLifecycle.slice(-3)).toEqual(["remove:data", "pause", "raw:false"]);
+  });
+
+  it("returns stdin to paused when the child exits naturally (auto-dispose)", () => {
+    const pty = createFakePty();
+    const streams = createFakeStreams({ initialRaw: false, columns: 80, rows: 24 });
+    attachTerminalBridge(streams.streams, pty.pty);
+    expect(streams.isFlowing()).toBe(true);
+
+    pty.emitExit({ exitCode: 0 });
+
+    expect(streams.pauseCount()).toBe(1);
+    expect(streams.isFlowing()).toBe(false);
+  });
+
+  it("pauses stdin exactly once across repeated disposal (idempotent)", () => {
+    const pty = createFakePty();
+    const streams = createFakeStreams({ initialRaw: false, columns: 80, rows: 24 });
+    const bridge = attachTerminalBridge(streams.streams, pty.pty);
+
+    bridge.dispose();
+    bridge.dispose();
+    bridge.dispose();
+
+    expect(streams.pauseCount()).toBe(1);
+    expect(streams.stdinRemovedCount()).toBe(1);
+    expect(streams.isFlowing()).toBe(false);
+  });
+
+  it("continues teardown when stdin.pause() throws, aggregating the error and still restoring raw", () => {
+    const pty = createFakePty();
+    const streams = createFakeStreams({
+      initialRaw: false,
+      columns: 80,
+      rows: 24,
+      pauseThrows: true,
+    });
+    const bridge = attachTerminalBridge(streams.streams, pty.pty);
+
+    const result = bridge.dispose();
+
+    expect(result.errors).toHaveLength(1);
+    expect((result.errors[0] as Error).message).toBe("stdin.pause failed");
+    // Cleanup continued PAST the throw, in order: pause attempted, then raw restored.
+    expect(streams.stdinLifecycle).toContain("pause");
+    expect(streams.stdinLifecycle.indexOf("raw:false")).toBeGreaterThan(
+      streams.stdinLifecycle.indexOf("pause"),
+    );
+    expect(streams.stdinRemovedCount()).toBe(1);
+    expect(streams.setRawModeCalls).toEqual([true, false]);
+    expect(pty.killCount()).toBe(1); // dispose before exit -> kill
+  });
+
+  it("does not pause stdin it did not resume (already flowing at attach)", () => {
+    const pty = createFakePty();
+    const streams = createFakeStreams({
+      initialRaw: false,
+      initialFlowing: true,
+      columns: 80,
+      rows: 24,
+    });
+    const bridge = attachTerminalBridge(streams.streams, pty.pty);
+
+    bridge.dispose();
+
+    // The bridge did not cause the resume, so it leaves the caller's flow alone.
+    expect(streams.pauseCount()).toBe(0);
+  });
+
+  it("does not pause stdin when data-listener attachment fails before the bridge resumes it", () => {
+    const pty = createFakePty();
+    const streams = createFakeStreams({
+      initialRaw: false,
+      initialFlowing: false,
+      columns: 80,
+      rows: 24,
+      onDataThrows: true,
+    });
+
+    expect(() => attachTerminalBridge(streams.streams, pty.pty)).toThrow("stdin.on(data) failed");
+
+    // Ownership was never claimed, so teardown must NOT pause it.
+    expect(streams.pauseCount()).toBe(0);
+    expect(streams.isFlowing()).toBe(false);
+    // Partial-startup rollback still runs its contract: raw restored, child killed,
+    // and no subscription disposals (onData/onExit were never reached).
+    expect(streams.setRawModeCalls).toEqual([true, false]);
+    expect(pty.killCount()).toBe(1);
+    expect(pty.dataDisposeCount()).toBe(0);
+    expect(pty.exitDisposeCount()).toBe(0);
+  });
+
   it("dispose before exit settles the fallback and kills the child", async () => {
     const pty = createFakePty();
     const streams = createFakeStreams({ initialRaw: false, columns: 80, rows: 24 });
@@ -630,6 +765,7 @@ function createFakeContext(opts: { columns?: number; rows?: number; stderrThrows
       setRawMode: () => undefined,
       on: () => undefined,
       removeListener: () => undefined,
+      pause: () => undefined,
     },
     stdout: {
       // Omit dims when undefined (exactOptionalPropertyTypes): absent, not

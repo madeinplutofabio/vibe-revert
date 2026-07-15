@@ -357,9 +357,16 @@ describe("viberevert shell --pty -- live PTY round-trip (M G4 Step 4f release ga
           );
         }
 
-        // Phase 4: exit cleanly (no force-kill needed), exit code 0.
+        // Phase 4: the CLI PROCESS itself exits after PTY teardown -- proves no
+        // handle (flowing stdin, node-pty, interception server/socket) survives
+        // teardown to block clipanion's natural (process.exit-free) drain.
         child.write("exit\r");
-        await waitFor(() => exitEvent !== undefined, EXIT_DEADLINE_MS, "clean exit", diag);
+        await waitFor(
+          () => exitEvent !== undefined,
+          EXIT_DEADLINE_MS,
+          "CLI process exit after PTY teardown",
+          diag,
+        );
         expect(exitEvent?.exitCode).toBe(0);
 
         // Final: no fail-closed copy / REPL fallback surfaced anywhere in the run.

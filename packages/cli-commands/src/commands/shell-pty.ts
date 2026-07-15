@@ -318,9 +318,14 @@ export interface TerminalBridge {
 export interface PtyBridgeStreams {
   readonly stdin: {
     readonly isRaw?: boolean;
+    // Flow state at attach: null = never engaged (paused), false = paused, true =
+    // already flowing. The bridge returns stdin to paused on teardown ONLY when it
+    // resumed a not-already-flowing stream, so it never pauses a caller-owned flow.
+    readonly readableFlowing?: boolean | null;
     setRawMode(mode: boolean): void;
     on(event: "data", listener: (data: Buffer | string) => void): void;
     removeListener(event: "data", listener: (data: Buffer | string) => void): void;
+    pause(): void;
   };
   readonly stdout: {
     readonly columns?: number;
@@ -378,6 +383,10 @@ export function attachTerminalBridge(streams: PtyBridgeStreams, pty: PtyProcess)
   // toggle that throws is still rolled back.
   let rawRestoreNeeded = false;
   let previousRaw = false;
+  // True only when the bridge moved stdin from non-flowing to flowing (its own
+  // `on("data")`); teardown then pauses it back. If stdin was already flowing at
+  // attach, the bridge does not own that lifecycle and leaves it alone.
+  let bridgeResumedStdin = false;
   let onStdinData: ((data: Buffer | string) => void) | undefined;
   let onResize: (() => void) | undefined;
   let dataSub: PtyDisposable | undefined;
@@ -402,16 +411,22 @@ export function attachTerminalBridge(streams: PtyBridgeStreams, pty: PtyProcess)
       settleExit(DISPOSE_FALLBACK_EXIT);
     }
 
-    // Explicit teardown order: raw mode FIRST (most important), then listeners,
-    // then subscriptions, then kill LAST. Each step is guarded by whether it was
-    // actually wired and run best-effort by runCleanups.
+    // Explicit teardown order for stdin: stop input delivery (remove the data
+    // listener) FIRST, then return stdin to paused (a flowing TTY stdin left
+    // resumed keeps Node alive and blocks the CLI's natural exit), then restore raw
+    // mode. Then resize, subscriptions, and kill LAST. Each step is guarded by
+    // whether it was wired and run best-effort by runCleanups, so a throw in one
+    // step (e.g. pause) never skips the rest.
     const ordered: (() => void)[] = [];
-    if (rawRestoreNeeded) {
-      ordered.push(() => stdin.setRawMode(previousRaw));
-    }
     const stdinHandler = onStdinData;
     if (stdinHandler !== undefined) {
       ordered.push(() => stdin.removeListener("data", stdinHandler));
+    }
+    if (bridgeResumedStdin) {
+      ordered.push(() => stdin.pause());
+    }
+    if (rawRestoreNeeded) {
+      ordered.push(() => stdin.setRawMode(previousRaw));
     }
     const resizeHandler = onResize;
     if (resizeHandler !== undefined) {
@@ -458,7 +473,14 @@ export function attachTerminalBridge(streams: PtyBridgeStreams, pty: PtyProcess)
         failBridge(error);
       }
     };
+    // Observe flow state, ATTEMPT attachment, and only after it succeeds record that
+    // the bridge owns the resulting resume. If `on("data")` throws, ownership is
+    // never claimed (bridgeResumedStdin stays false), so the startup-failure
+    // rollback will not pause a stream the bridge never resumed. An absent
+    // readableFlowing counts as not-flowing (the narrower CLI-owned-stdin contract).
+    const stdinWasAlreadyFlowing = stdin.readableFlowing === true;
     stdin.on("data", onStdinData);
+    bridgeResumedStdin = !stdinWasAlreadyFlowing;
 
     dataSub = pty.onData((data) => {
       if (disposed) {
