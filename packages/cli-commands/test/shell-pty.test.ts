@@ -16,7 +16,9 @@ import {
 } from "@viberevert/core";
 import { describe, expect, it } from "vitest";
 import type { InstalledInterception } from "../src/commands/pty-interception.js";
+import type { AuditAcceptedCommand } from "../src/commands/pty-interception-audit.js";
 import type { BashInterceptionInstallResult } from "../src/commands/pty-interception-installer.js";
+import type { AuditGateFailureReason } from "../src/commands/pty-interception-service.js";
 import type {
   PtyDisposable,
   PtyModule,
@@ -25,6 +27,7 @@ import type {
 } from "../src/commands/pty-loader.js";
 import {
   attachTerminalBridge,
+  createAuditGateFailureSummary,
   createG3BackedPtyShellSession,
   createRunPtyShellDeps,
   createScopedSignalCleanup,
@@ -843,7 +846,14 @@ function createFakeSession(
       if (opts.openThrows !== undefined) {
         throw opts.openThrows;
       }
-      return opts.open ?? { kind: "opened", sessionId: "sess-1", commandsPolicy: undefined };
+      return (
+        opts.open ?? {
+          kind: "opened",
+          sessionId: "sess-1",
+          commandsPolicy: undefined,
+          auditAcceptedCommand: async () => ({ ok: true }),
+        }
+      );
     },
     close: async () => {
       closeCalls += 1;
@@ -1645,8 +1655,14 @@ describe("runPtyShell -- interception install + spawn authorization (M G4 4e-iv-
     const policy = { guard: [] } as unknown as NonNullable<Config["commands"]>;
     const shell: ResolvedInteractiveShell = { path: "/bin/bash", args: ["-i"], kind: "bash" };
     let seen: unknown;
+    const auditHook: AuditAcceptedCommand = async () => ({ ok: true });
     const session = createFakeSession({
-      open: { kind: "opened", sessionId: "s", commandsPolicy: policy },
+      open: {
+        kind: "opened",
+        sessionId: "s",
+        commandsPolicy: policy,
+        auditAcceptedCommand: auditHook,
+      },
     });
     await runPtyShell(
       baseDeps({
@@ -1660,9 +1676,18 @@ describe("runPtyShell -- interception install + spawn authorization (M G4 4e-iv-
         },
       }),
     );
-    expect(seen).toEqual({ shell: { path: "/bin/bash", kind: "bash" }, commandsPolicy: policy });
+    // toEqual stays EXACT: the installer sees these fields and no others.
+    expect(seen).toEqual({
+      shell: { path: "/bin/bash", kind: "bash" },
+      commandsPolicy: policy,
+      auditAcceptedCommand: expect.any(Function),
+      recordAuditGateFailure: expect.any(Function),
+    });
     expect("args" in (seen as { shell: object }).shell).toBe(false);
     expect((seen as { commandsPolicy: unknown }).commandsPolicy).toBe(policy); // identity
+    // The SESSION's gate is threaded to the installer by identity -- never wrapped
+    // or re-created, so the installed service audits against this exact session.
+    expect((seen as { auditAcceptedCommand: unknown }).auditAcceptedCommand).toBe(auditHook);
     expect(Object.isFrozen(seen)).toBe(true);
     expect(Object.isFrozen((seen as { shell: object }).shell)).toBe(true);
   });
@@ -1678,7 +1703,12 @@ describe("runPtyShell -- interception install + spawn authorization (M G4 4e-iv-
       },
     };
     const session: PtyShellSession = {
-      open: async () => ({ kind: "opened", sessionId: "s", commandsPolicy: undefined }),
+      open: async () => ({
+        kind: "opened",
+        sessionId: "s",
+        commandsPolicy: undefined,
+        auditAcceptedCommand: async () => ({ ok: true }),
+      }),
       close: async () => {
         events.push("session-close");
         return { exitCode: 0, stderrText: "" };
@@ -1886,6 +1916,8 @@ function makeSessionOps(
     startSessionOperation: over.startSessionOperation ?? (async () => ({ sessionId: "sess_1" })),
     endSessionOperation: over.endSessionOperation ?? (async () => undefined),
     loadActiveSessionLock: over.loadActiveSessionLock ?? (async () => null),
+    appendCommandsLogEntry: over.appendCommandsLogEntry ?? (async () => undefined),
+    resolveNow: over.resolveNow ?? (() => "2026-07-16T00:00:00Z"),
   };
 }
 
@@ -2135,6 +2167,7 @@ describe("createG3BackedPtyShellSession -- open refusals (byte-identical G3 copy
       kind: "opened",
       sessionId: "sess_after_retry",
       commandsPolicy: undefined,
+      auditAcceptedCommand: expect.any(Function),
     });
   });
 
@@ -2182,6 +2215,7 @@ describe("createG3BackedPtyShellSession -- open success + one-shot", () => {
       kind: "opened",
       sessionId: "sess_new",
       commandsPolicy: undefined,
+      auditAcceptedCommand: expect.any(Function),
     });
     expect(recorded).toEqual({
       cwd: "/repo",
@@ -2228,11 +2262,13 @@ describe("createG3BackedPtyShellSession -- open success + one-shot", () => {
       kind: "opened",
       sessionId: "sess_1",
       commandsPolicy: undefined,
+      auditAcceptedCommand: expect.any(Function),
     });
     expect(await session.open()).toEqual({
       kind: "opened",
       sessionId: "sess_1",
       commandsPolicy: undefined,
+      auditAcceptedCommand: expect.any(Function),
     });
     expect(startCalls).toBe(1);
     await session.close();
@@ -2292,7 +2328,13 @@ describe("createG3BackedPtyShellSession -- config load + policy surfacing (M G4 
     }
     expect(opened.sessionId).toBe("sess_x");
     expect(opened.commandsPolicy).toBe(policy); // surfaced by identity
-    expect(Object.keys(opened).sort()).toEqual(["commandsPolicy", "kind", "sessionId"]);
+    expect(typeof opened.auditAcceptedCommand).toBe("function"); // the session-backed gate
+    expect(Object.keys(opened).sort()).toEqual([
+      "auditAcceptedCommand",
+      "commandsPolicy",
+      "kind",
+      "sessionId",
+    ]);
   });
 
   it("primary path: ConfigNotFoundError from the loader maps to the exact copy without starting", async () => {
@@ -2484,6 +2526,7 @@ describe("createG3BackedPtyShellSession -- config load + policy surfacing (M G4 
       kind: "opened",
       sessionId: "sess_ok",
       commandsPolicy: undefined,
+      auditAcceptedCommand: expect.any(Function),
     });
     expect(loadCalls).toBe(2);
     expect(startCalls).toBe(1);
@@ -2515,7 +2558,12 @@ describe("createG3BackedPtyShellSession -- config load + policy surfacing (M G4 
     const second = await session.open();
     expect(loadCalls).toBe(1);
     expect(startCalls).toBe(1);
-    expect(second).toEqual({ kind: "opened", sessionId: "sess_1", commandsPolicy: policy });
+    expect(second).toEqual({
+      kind: "opened",
+      sessionId: "sess_1",
+      commandsPolicy: policy,
+      auditAcceptedCommand: expect.any(Function),
+    });
     if (second.kind === "opened") {
       expect(second.commandsPolicy).toBe(policy);
     }
@@ -2548,6 +2596,7 @@ describe("createG3BackedPtyShellSession -- config load + policy surfacing (M G4 
       kind: "opened",
       sessionId: "sess_ok",
       commandsPolicy: undefined,
+      auditAcceptedCommand: expect.any(Function),
     });
     expect(loadCalls).toBe(2);
     expect(startCalls).toBe(1);
@@ -2959,5 +3008,440 @@ describe("createRunPtyShellDeps", () => {
     expect(typeof deps.withSignalCleanup).toBe("function");
     expect(typeof deps.session.open).toBe("function");
     expect(typeof deps.session.close).toBe("function");
+  });
+});
+
+describe("createG3BackedPtyShellSession -- accepted-command audit gate (M G4 Step 5c)", () => {
+  const REPO = "/repo";
+
+  /** The exact commands.log append contract, derived from the real ops seam so it cannot drift. */
+  type CommandsLogAppendInput = Parameters<G3BackedPtyShellSessionOps["appendCommandsLogEntry"]>[0];
+
+  interface AuditProbe {
+    audit: AuditAcceptedCommand;
+    appends: () => readonly CommandsLogAppendInput[];
+    events: () => readonly string[];
+  }
+
+  async function openAuditProbe(
+    over: Partial<G3BackedPtyShellSessionOps> = {},
+  ): Promise<AuditProbe> {
+    const appends: CommandsLogAppendInput[] = [];
+    const events: string[] = [];
+    const session = createG3BackedPtyShellSession({
+      cwd: "/work/tree",
+      ops: makeSessionOps({
+        resolveRepoRoot: () => REPO,
+        startSessionOperation: async () => ({ sessionId: "sess_1" }),
+        loadActiveSessionLock: async () => {
+          events.push("load-lock");
+          return { session_id: "sess_1" };
+        },
+        resolveNow: () => {
+          events.push("resolve-now");
+          return "2026-07-16T00:00:00Z";
+        },
+        appendCommandsLogEntry: async (input) => {
+          events.push("append");
+          appends.push(input);
+        },
+        ...over,
+      }),
+    });
+    const opened = await session.open();
+    if (opened.kind !== "opened") {
+      throw new Error("expected opened");
+    }
+    return { audit: opened.auditAcceptedCommand, appends: () => appends, events: () => events };
+  }
+
+  it("appends ONE entry at the command's own resolved cwd, then allows", async () => {
+    const probe = await openAuditProbe();
+    await expect(probe.audit({ rawLine: "npm test", cwd: "/repo/packages/core" })).resolves.toEqual(
+      {
+        ok: true,
+      },
+    );
+    // The command's OWN prompt-time cwd -- not the session's initial directory.
+    expect(probe.appends()).toEqual([
+      {
+        repoRoot: REPO,
+        sessionId: "sess_1",
+        at: "2026-07-16T00:00:00Z",
+        cwd: "packages/core",
+        argv: ["npm test"],
+      },
+    ]);
+  });
+
+  it("orders the prerequisite: ownership read -> timestamp -> append (exactly once)", async () => {
+    const probe = await openAuditProbe();
+    await probe.audit({ rawLine: "ls", cwd: REPO });
+    expect(probe.events()).toEqual(["load-lock", "resolve-now", "append"]);
+    expect(probe.appends()).toHaveLength(1);
+  });
+
+  it('sanitizes the recorded line and records the repo root as "."', async () => {
+    const esc = String.fromCharCode(0x1b);
+    const probe = await openAuditProbe();
+    await probe.audit({ rawLine: `${esc}[31mls${esc}[0m`, cwd: REPO });
+    expect(probe.appends()).toEqual([expect.objectContaining({ cwd: ".", argv: ["ls"] })]);
+  });
+
+  it("short-circuits an empty / control-only line BEFORE cwd, ownership, clock, or append", async () => {
+    // Every downstream dependency THROWS if touched, and the cwd is invalid: a
+    // no-op line must be released without any of them being consulted.
+    const probe = await openAuditProbe({
+      loadActiveSessionLock: async () => {
+        throw new Error("must not read lock");
+      },
+      resolveNow: () => {
+        throw new Error("must not resolve time");
+      },
+      appendCommandsLogEntry: async () => {
+        throw new Error("must not append");
+      },
+    });
+    await expect(probe.audit({ rawLine: "", cwd: "not-an-absolute-path" })).resolves.toEqual({
+      ok: true,
+    });
+    await expect(
+      probe.audit({ rawLine: String.fromCharCode(0x07), cwd: "not-an-absolute-path" }),
+    ).resolves.toEqual({ ok: true });
+    expect(probe.appends()).toEqual([]);
+  });
+
+  it("resolves a FRESH timestamp for each appended command", async () => {
+    let call = 0;
+    const probe = await openAuditProbe({
+      resolveNow: () => {
+        call += 1;
+        return `time-${call}`;
+      },
+    });
+    await probe.audit({ rawLine: "echo one", cwd: REPO });
+    await probe.audit({ rawLine: "echo two", cwd: REPO });
+    expect(probe.appends()).toEqual([
+      expect.objectContaining({ at: "time-1", argv: ["echo one"] }),
+      expect.objectContaining({ at: "time-2", argv: ["echo two"] }),
+    ]);
+  });
+
+  it("builds an INDEPENDENT append input for each command (no shared mutable state)", async () => {
+    let call = 0;
+    const probe = await openAuditProbe({
+      resolveNow: () => {
+        call += 1;
+        return `time-${call}`;
+      },
+    });
+    await probe.audit({ rawLine: "echo one", cwd: "/repo/a" });
+    await probe.audit({ rawLine: "echo two", cwd: "/repo/b" });
+
+    const appends = probe.appends();
+    expect(appends).toHaveLength(2);
+    const [first, second] = appends;
+    if (first === undefined || second === undefined) {
+      throw new Error("expected two appends");
+    }
+    expect(first).not.toBe(second);
+    expect(first.argv).not.toBe(second.argv);
+    // The FIRST entry is unchanged after the second audit: a later optimization
+    // reusing a mutable input/array would corrupt prior audit records.
+    expect(first).toEqual({
+      repoRoot: REPO,
+      sessionId: "sess_1",
+      at: "time-1",
+      cwd: "a",
+      argv: ["echo one"],
+    });
+    expect(second).toEqual({
+      repoRoot: REPO,
+      sessionId: "sess_1",
+      at: "time-2",
+      cwd: "b",
+      argv: ["echo two"],
+    });
+  });
+
+  it("rejects an invalid cwd BEFORE any ownership or filesystem work", async () => {
+    const probe = await openAuditProbe();
+    await expect(probe.audit({ rawLine: "ls", cwd: "relative/dir" })).resolves.toEqual({
+      ok: false,
+      reason: "cwd_invalid",
+    });
+    expect(probe.events()).toEqual([]);
+  });
+
+  it("rejects a cwd outside the repo", async () => {
+    const probe = await openAuditProbe();
+    await expect(probe.audit({ rawLine: "ls", cwd: "/elsewhere" })).resolves.toEqual({
+      ok: false,
+      reason: "cwd_outside_repo",
+    });
+    expect(probe.events()).toEqual([]);
+  });
+
+  it("fails closed when the session lock is gone", async () => {
+    const probe = await openAuditProbe({ loadActiveSessionLock: async () => null });
+    await expect(probe.audit({ rawLine: "ls", cwd: REPO })).resolves.toEqual({
+      ok: false,
+      reason: "session_missing",
+    });
+    expect(probe.appends()).toEqual([]);
+  });
+
+  it("fails closed when the session was replaced", async () => {
+    const probe = await openAuditProbe({
+      loadActiveSessionLock: async () => ({ session_id: "sess_other" }),
+    });
+    await expect(probe.audit({ rawLine: "ls", cwd: REPO })).resolves.toEqual({
+      ok: false,
+      reason: "session_changed",
+    });
+    expect(probe.appends()).toEqual([]);
+  });
+
+  it("fails closed when the lock read throws", async () => {
+    const probe = await openAuditProbe({
+      loadActiveSessionLock: async () => {
+        throw new Error("io");
+      },
+    });
+    await expect(probe.audit({ rawLine: "ls", cwd: REPO })).resolves.toEqual({
+      ok: false,
+      reason: "session_read_failed",
+    });
+    expect(probe.appends()).toEqual([]);
+  });
+
+  it("fails closed when the append throws", async () => {
+    const probe = await openAuditProbe({
+      appendCommandsLogEntry: async () => {
+        throw new Error("disk full");
+      },
+    });
+    await expect(probe.audit({ rawLine: "ls", cwd: REPO })).resolves.toEqual({
+      ok: false,
+      reason: "append_failed",
+    });
+  });
+
+  it("maps a clock failure to append_failed (timestamping is part of the append)", async () => {
+    const probe = await openAuditProbe({
+      resolveNow: () => {
+        throw new Error("clock");
+      },
+    });
+    await expect(probe.audit({ rawLine: "ls", cwd: REPO })).resolves.toEqual({
+      ok: false,
+      reason: "append_failed",
+    });
+    expect(probe.appends()).toEqual([]);
+  });
+});
+
+describe("runPtyShell -- audit diagnostics summary (M G4 Step 5c)", () => {
+  it("writes NO audit summary when no accepted command failed its prerequisite", async () => {
+    const ctx = createFakeContext();
+    const code = await runPtyShell(
+      baseDeps({
+        context: ctx.context,
+        installInterception: async () => makeInstalledResult(),
+      }),
+    );
+    expect(code).toBe(0);
+    expect(ctx.stderrWriteCount()).toBe(0);
+  });
+
+  it("writes the summary only AFTER the full ordered teardown (raw mode restored)", async () => {
+    const events: string[] = [];
+    const bridge: TerminalBridge = {
+      waitForExit: () => Promise.resolve({ exitCode: 0, signal: undefined }),
+      dispose: () => {
+        events.push("restore-raw");
+        events.push("kill-child");
+        return { errors: [] };
+      },
+    };
+    const context: PtyShellContext = {
+      ...createFakeContext().context,
+      stderr: {
+        write: (data) => {
+          if (data.includes("audit prerequisite")) {
+            events.push("audit-summary");
+          }
+        },
+      },
+    };
+    const session: PtyShellSession = {
+      open: async () => ({
+        kind: "opened",
+        sessionId: "s",
+        commandsPolicy: undefined,
+        auditAcceptedCommand: async () => ({ ok: true }),
+      }),
+      close: async () => {
+        events.push("session-close");
+        return { exitCode: 0, stderrText: "" };
+      },
+    };
+    const code = await runPtyShell(
+      baseDeps({
+        context,
+        attachBridge: () => bridge,
+        session,
+        // The service records a gate failure DURING the run, as the real one would.
+        installInterception: async (args) => {
+          args.recordAuditGateFailure("session_changed");
+          return makeInstalledResult({
+            dispose: async () => {
+              events.push("interception-dispose");
+            },
+          });
+        },
+      }),
+    );
+    expect(code).toBe(0);
+    // The established teardown order, with the diagnostic strictly last: the
+    // terminal is restored (and every teardown step done) before the summary is
+    // written, so it can never corrupt a raw-mode terminal.
+    expect(events).toEqual([
+      "restore-raw",
+      "kill-child",
+      "interception-dispose",
+      "session-close",
+      "audit-summary",
+    ]);
+  });
+
+  it("a THROWING stderr during the summary changes neither teardown nor the exit code", async () => {
+    const events: string[] = [];
+    const bridge: TerminalBridge = {
+      // Non-zero child exit: DISPLAYED, not propagated (D104.G) -- its display
+      // write also throws here, and must still not become a wrapper failure.
+      waitForExit: () => Promise.resolve({ exitCode: 7, signal: undefined }),
+      dispose: () => {
+        events.push("bridge-dispose");
+        return { errors: [] };
+      },
+    };
+    const session: PtyShellSession = {
+      open: async () => ({
+        kind: "opened",
+        sessionId: "s",
+        commandsPolicy: undefined,
+        auditAcceptedCommand: async () => ({ ok: true }),
+      }),
+      close: async () => {
+        events.push("session-close");
+        return { exitCode: 0, stderrText: "" };
+      },
+    };
+    const code = await runPtyShell(
+      baseDeps({
+        context: createFakeContext({ stderrThrows: true }).context,
+        attachBridge: () => bridge,
+        session,
+        installInterception: async (args) => {
+          args.recordAuditGateFailure("append_failed");
+          return makeInstalledResult({
+            dispose: async () => {
+              events.push("interception-dispose");
+            },
+          });
+        },
+      }),
+    );
+    // Best-effort diagnostics: a failing sink must not turn a clean run into a
+    // wrapper failure (0, not 1), and every teardown step still ran.
+    expect(code).toBe(0);
+    expect(events).toEqual(["bridge-dispose", "interception-dispose", "session-close"]);
+  });
+
+  it("a THROWING stderr does not MASK a real teardown failure either", async () => {
+    const session: PtyShellSession = {
+      open: async () => ({
+        kind: "opened",
+        sessionId: "s",
+        commandsPolicy: undefined,
+        auditAcceptedCommand: async () => ({ ok: true }),
+      }),
+      // A genuinely failing close must still surface as 1 even though the audit
+      // summary's write throws -- the sink cannot flip the computed result either way.
+      close: async () => ({ exitCode: 1, stderrText: "close failed\n" }),
+    };
+    const code = await runPtyShell(
+      baseDeps({
+        context: createFakeContext({ stderrThrows: true }).context,
+        session,
+        installInterception: async (args) => {
+          args.recordAuditGateFailure("append_failed");
+          return makeInstalledResult();
+        },
+      }),
+    );
+    expect(code).toBe(1);
+  });
+});
+
+describe("createAuditGateFailureSummary -- bounded audit diagnostics (M G4 Step 5b/5c)", () => {
+  it("returns null with no failures (nothing is ever written)", () => {
+    expect(createAuditGateFailureSummary().format()).toBeNull();
+  });
+
+  it("renders singular grammar for exactly one failure", () => {
+    const summary = createAuditGateFailureSummary();
+    summary.record("append_failed");
+    expect(summary.format()).toBe(
+      "Note: 1 accepted PTY command was not released because its audit prerequisite failed (append_failed).\n",
+    );
+  });
+
+  it("renders plural grammar, the exact total, and each reason ONCE", () => {
+    const summary = createAuditGateFailureSummary();
+    summary.record("session_changed");
+    summary.record("session_changed");
+    summary.record("append_failed");
+    expect(summary.format()).toBe(
+      "Note: 3 accepted PTY commands were not released because their audit prerequisite failed (session_changed, append_failed).\n",
+    );
+  });
+
+  it("renders reasons in CANONICAL order, not insertion order", () => {
+    const summary = createAuditGateFailureSummary();
+    summary.record("audit_hook_threw");
+    summary.record("append_failed");
+    summary.record("cwd_invalid");
+    expect(summary.format()).toContain("(cwd_invalid, append_failed, audit_hook_threw)");
+  });
+
+  it("renders EVERY known reason (an independent list pins the rank map)", () => {
+    const all: readonly AuditGateFailureReason[] = [
+      "cwd_invalid",
+      "cwd_outside_repo",
+      "session_missing",
+      "session_changed",
+      "session_read_failed",
+      "append_failed",
+      "audit_hook_threw",
+    ];
+    const summary = createAuditGateFailureSummary();
+    for (const reason of all) {
+      summary.record(reason);
+    }
+    expect(summary.format()).toContain(
+      "(cwd_invalid, cwd_outside_repo, session_missing, session_changed, session_read_failed, append_failed, audit_hook_threw)",
+    );
+  });
+
+  it("aggregates 10,000 failures into an exact count and unique canonical reasons", () => {
+    const summary = createAuditGateFailureSummary();
+    for (let i = 0; i < 10_000; i += 1) {
+      summary.record(i % 2 === 0 ? "cwd_invalid" : "append_failed");
+    }
+    expect(summary.format()).toBe(
+      "Note: 10000 accepted PTY commands were not released because their audit prerequisite failed (cwd_invalid, append_failed).\n",
+    );
   });
 });

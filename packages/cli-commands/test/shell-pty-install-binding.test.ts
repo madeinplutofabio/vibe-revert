@@ -35,6 +35,8 @@ describe("createRunPtyShellDeps installInterception real binding (M G4 4e-iv-b)"
     const args = {
       shell: { path: "/bin/bash", kind: "bash" as const },
       commandsPolicy: undefined,
+      auditAcceptedCommand: async () => ({ ok: true }) as const,
+      recordAuditGateFailure: () => undefined,
     };
     await deps.installInterception(args);
 

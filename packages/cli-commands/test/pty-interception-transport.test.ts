@@ -131,6 +131,8 @@ describe("createLoopbackInterceptionTransport (M G4 Step 4b-iii-b)", () => {
       sessionNonce: "session-nonce",
       commandsPolicy: undefined,
       evaluateCommandPolicy: () => ({ kind: "allow", normalized: "echo hi" }),
+      auditAcceptedCommand: () => Promise.resolve({ ok: true }),
+      recordAuditGateFailure: () => undefined,
     });
     cleanups.push(() => service.stop());
 
@@ -141,7 +143,13 @@ describe("createLoopbackInterceptionTransport (M G4 Step 4b-iii-b)", () => {
     const responseP = readFirstLine(client);
     writeLine(
       client,
-      JSON.stringify({ protocolVersion: 1, nonce: "session-nonce", id: "r1", rawLine: "echo hi" }),
+      JSON.stringify({
+        protocolVersion: 1,
+        nonce: "session-nonce",
+        id: "r1",
+        rawLine: "echo hi",
+        cwd: "/repo",
+      }),
     );
 
     expect(JSON.parse(await responseP)).toEqual({ protocolVersion: 1, id: "r1", kind: "allow" });

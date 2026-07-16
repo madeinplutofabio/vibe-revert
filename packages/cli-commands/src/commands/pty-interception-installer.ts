@@ -8,8 +8,10 @@ import type {
   InterceptionInstallFailureReason,
   InterceptionShellStartup,
 } from "./pty-interception.js";
+import type { AuditAcceptedCommand } from "./pty-interception-audit.js";
 import type { BashInterceptionHookParams } from "./pty-interception-hook.js";
 import type {
+  AuditGateFailureReason,
   InterceptionService,
   InterceptionServiceDeps,
   InterceptionServiceTransport,
@@ -131,6 +133,14 @@ export interface InstallBashInterceptionDeps {
     transport: InterceptionServiceTransport,
     deps: InterceptionServiceDeps,
   ) => Promise<InterceptionService>;
+  /**
+   * The session-backed accepted-command audit gate (Step 5c). REQUIRED: the
+   * service cannot emit an allow without it, so an unaudited allow path is
+   * unconstructable. Passed through unchanged -- this layer never invents one.
+   */
+  readonly auditAcceptedCommand: AuditAcceptedCommand;
+  /** Best-effort SYNCHRONOUS sink for audit-gate failures (Step 5b). */
+  readonly recordAuditGateFailure: (reason: AuditGateFailureReason) => void;
   readonly materializeHook: (hookScript: string) => Promise<MaterializedInterceptionHook>;
   /** The 4a branded-handle factory, injected so a fake can force handle_setup_failed. */
   readonly createHandle: (fields: {
@@ -246,6 +256,8 @@ function snapshotDependencies(deps: InstallBashInterceptionDeps): DependencySnap
     const createService = deps.createService;
     const materializeHook = deps.materializeHook;
     const createHandle = deps.createHandle;
+    const auditAcceptedCommand = deps.auditAcceptedCommand;
+    const recordAuditGateFailure = deps.recordAuditGateFailure;
     if (
       typeof evaluateCommandPolicy !== "function" ||
       typeof generateNonce !== "function" ||
@@ -253,7 +265,9 @@ function snapshotDependencies(deps: InstallBashInterceptionDeps): DependencySnap
       typeof generateHook !== "function" ||
       typeof createService !== "function" ||
       typeof materializeHook !== "function" ||
-      typeof createHandle !== "function"
+      typeof createHandle !== "function" ||
+      typeof auditAcceptedCommand !== "function" ||
+      typeof recordAuditGateFailure !== "function"
     ) {
       return undefined;
     }
@@ -268,6 +282,8 @@ function snapshotDependencies(deps: InstallBashInterceptionDeps): DependencySnap
       createService,
       materializeHook,
       createHandle,
+      auditAcceptedCommand,
+      recordAuditGateFailure,
       reportDiagnostic,
     };
   } catch {
@@ -328,6 +344,8 @@ export async function installBashInterception(
     createService,
     materializeHook,
     createHandle,
+    auditAcceptedCommand,
+    recordAuditGateFailure,
     reportDiagnostic,
   } = snapshot;
 
@@ -428,6 +446,8 @@ export async function installBashInterception(
       sessionNonce: nonce,
       commandsPolicy,
       evaluateCommandPolicy,
+      auditAcceptedCommand,
+      recordAuditGateFailure,
     });
     const stopFn = readProp(readyService, "stop");
     if (typeof stopFn !== "function") {

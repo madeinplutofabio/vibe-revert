@@ -30,6 +30,12 @@
  *      once stop begins, no newly accepted connection is served AND no in-flight
  *      read that resolves after stop is answered) and fails closed on
  *      read-timeout / peer-close / any error.
+ *   4. AUDIT GATE (Step 5b, D104.F/H/L): every `allow` passes through a REQUIRED
+ *      accepted-command audit hook BEFORE its frame is emitted; a `{ ok: false }`
+ *      hook, a thrown hook, or a shutdown that wins the post-await race all yield
+ *      NO frame (fail closed). Every gate failure is centrally recorded. An audit
+ *      entry may therefore exist for a command that never executed -- it is an
+ *      accepted-command audit ATTEMPT, not proof of execution.
  */
 
 import type { CommandPolicyDecision, CommandsPolicyConfig } from "../command-guard.js";
@@ -39,6 +45,13 @@ import {
   type InterceptionRequest,
   PTY_INTERCEPTION_PROTOCOL_VERSION,
 } from "./pty-interception.js";
+import {
+  type AcceptedCommandAuditInput,
+  type AuditAcceptedCommand,
+  type AuditAcceptedCommandFailureReason,
+  type AuditAcceptedCommandResult,
+  PTY_INTERCEPTION_MAX_CWD_LENGTH,
+} from "./pty-interception-audit.js";
 
 /** Outcome of parsing untrusted wire bytes into a request envelope. */
 export type ParseInterceptionRequestResult =
@@ -54,10 +67,12 @@ function isNonBlankString(value: unknown): value is string {
  * Parse untrusted wire bytes into an InterceptionRequest ENVELOPE, or a
  * `malformed` result. NEVER throws for hostile input. Validates ONLY the
  * envelope shape -- a non-array object, protocolVersion === 1, nonce/id non-blank
- * strings, rawLine a string (which MAY be empty) -- and normalizes NOTHING
- * (rawLine is preserved byte-for-byte; nonce/id kept as-is; extra fields are
- * ignored). Command semantics, the nonce VALUE, and policy are NOT checked here
- * (that is decideInterception).
+ * strings, rawLine a string (which MAY be empty), cwd a non-empty string within
+ * the hard size bound -- and normalizes NOTHING: the parsed string values are
+ * preserved EXACTLY (never trimmed, normalized, sanitized, or substituted), and
+ * extra fields are ignored. Command semantics, the nonce VALUE, policy, and cwd
+ * PATH semantics are NOT checked here (that is decideInterception and the audit
+ * gate's resolveAuditedCwd).
  */
 export function parseInterceptionRequest(raw: string): ParseInterceptionRequestResult {
   const malformed: ParseInterceptionRequestResult = {
@@ -82,6 +97,7 @@ export function parseInterceptionRequest(raw: string): ParseInterceptionRequestR
     nonce?: unknown;
     id?: unknown;
     rawLine?: unknown;
+    cwd?: unknown;
   };
   if (obj.protocolVersion !== PTY_INTERCEPTION_PROTOCOL_VERSION) {
     return malformed;
@@ -92,8 +108,20 @@ export function parseInterceptionRequest(raw: string): ParseInterceptionRequestR
   if (typeof obj.rawLine !== "string") {
     return malformed;
   }
+  // cwd: ENVELOPE only -- present, a string, non-empty, within the hard size
+  // bound. Its SEMANTICS (absolute POSIX, control/bidi-free, well-formed UTF-16,
+  // inside the repo) are the audit gate's job (resolveAuditedCwd ->
+  // cwd_invalid / cwd_outside_repo), which re-applies the bound defensively.
+  if (
+    typeof obj.cwd !== "string" ||
+    obj.cwd.length === 0 ||
+    obj.cwd.length > PTY_INTERCEPTION_MAX_CWD_LENGTH
+  ) {
+    return malformed;
+  }
 
-  // Preserve the original values (rawLine byte-for-byte; nonce/id kept as-is).
+  // Preserve the parsed string values exactly; do not trim, normalize, sanitize,
+  // or substitute rawLine or cwd at the protocol boundary.
   return {
     kind: "ok",
     request: {
@@ -101,6 +129,7 @@ export function parseInterceptionRequest(raw: string): ParseInterceptionRequestR
       nonce: obj.nonce,
       id: obj.id,
       rawLine: obj.rawLine,
+      cwd: obj.cwd,
     },
   };
 }
@@ -175,12 +204,49 @@ export function encodeDecisionFrame(decision: InterceptionDecision): string {
   return `${JSON.stringify(decision)}\n`;
 }
 
-/** Injected facts for the service decision (reused verbatim from the core). */
-export type InterceptionServiceDeps = DecideInterceptionDeps;
+/**
+ * Why the service's accepted-command audit gate failed. Recorded at the LAST
+ * reliable observation point -- including a hook that threw before returning a
+ * reason.
+ */
+export type AuditGateFailureReason = AuditAcceptedCommandFailureReason | "audit_hook_threw";
 
-/** What to do with one connection after reading its request line. */
+/**
+ * Injected facts for the service: the decision core PLUS the REQUIRED accepted-
+ * command audit gate and its failure recorder. The gate runs on EVERY allow
+ * before the frame is emitted -- no service can emit an allow without it (Step
+ * 5b, D104.F/H/L). `ok:false` OR a throwing hook => NO frame, close connection
+ * (fail-closed, D104.J); every failure is recorded via `recordAuditGateFailure`.
+ */
+export interface InterceptionServiceDeps extends DecideInterceptionDeps {
+  readonly auditAcceptedCommand: AuditAcceptedCommand;
+  /**
+   * Best-effort, SYNCHRONOUS diagnostic sink for a gate failure (a returned
+   * `{ ok: false }` reason or a thrown hook). Returns void, so a wired recorder
+   * (5c) MUST be synchronous -- a buffered/immediate sink, NOT async durable
+   * logging, whose returned promise this contract would ignore and whose own
+   * failure could then go unobserved. It never affects the fail-closed decision.
+   * A transport (send) failure AFTER a successful audit is NOT reported here --
+   * only audit failures are (append_failed / session_* / audit_hook_threw).
+   */
+  readonly recordAuditGateFailure: (reason: AuditGateFailureReason) => void;
+}
+
+/**
+ * What to do with one connection after reading its request line. An `allow`
+ * carries the AUDIT INPUT (the raw line + the prompt-time cwd bound to it in the
+ * same nonce/id request) so the service can run the REQUIRED audit gate before
+ * emitting the frame (Step 5b, D104.F); a `block` frame is sent directly (blocks
+ * are never audited); `close` sends nothing. The audit input is scoped to `allow`
+ * -- the only path that needs it -- so no contradictory outcome is representable.
+ */
 export type InterceptionFrameOutcome =
-  | { readonly kind: "respond"; readonly frame: string }
+  | {
+      readonly kind: "allow";
+      readonly frame: string;
+      readonly auditInput: AcceptedCommandAuditInput;
+    }
+  | { readonly kind: "block"; readonly frame: string }
   | { readonly kind: "close" };
 
 /**
@@ -188,14 +254,15 @@ export type InterceptionFrameOutcome =
  * handed to `parseInterceptionRequest` byte-for-byte (no trimming; CRLF /
  * max-line cap / byte accumulation are the transport's job, 4b-iii). A malformed
  * envelope -> `close` with NO frame (it has no id, so it must never yield an
- * InterceptionDecision). A well-formed envelope -> `decideInterception` -> one
- * encoded decision frame (allow OR block, always id-bearing). The decide + encode
- * run inside one try so that ANY misbehaviour -- including an (impossible) encode
- * failure -- fails closed as `close`, never an escape from the loop.
+ * InterceptionDecision). A well-formed envelope -> `decideInterception` -> an
+ * `allow` (carrying the raw line for the audit gate) or a `block` outcome, each
+ * with its id-bearing encoded frame. The decide + encode run inside one try so
+ * that ANY misbehaviour -- including an (impossible) encode failure -- fails
+ * closed as `close`, never an escape from the loop. Takes ONLY the decision deps.
  */
 export function handleRequestLine(
   line: string,
-  deps: InterceptionServiceDeps,
+  deps: DecideInterceptionDeps,
 ): InterceptionFrameOutcome {
   const parsed = parseInterceptionRequest(line);
   if (parsed.kind === "malformed") {
@@ -203,7 +270,14 @@ export function handleRequestLine(
   }
   try {
     const decision = decideInterception(parsed.request, deps);
-    return { kind: "respond", frame: encodeDecisionFrame(decision) };
+    if (decision.kind === "allow") {
+      return {
+        kind: "allow",
+        frame: encodeDecisionFrame(decision),
+        auditInput: { rawLine: parsed.request.rawLine, cwd: parsed.request.cwd },
+      };
+    }
+    return { kind: "block", frame: encodeDecisionFrame(decision) };
   } catch {
     // decideInterception is already fail-closed and encoding a plain decision
     // cannot throw; this is a final backstop so no serialization bug can escape
@@ -314,12 +388,73 @@ async function failClosedTeardown(
 }
 
 /**
- * Serve ONE connection: read a single request, respond with its decision frame
- * or (on malformed / timeout / closed / read error) close with NO frame, then
- * always close. Never throws -- every port call is guarded so the accept loop
- * cannot be broken by a misbehaving transport (fail closed). Re-checks
- * state.stopped AFTER the read so a frame that arrives just as stop() begins is
- * NOT answered -- no decision may be emitted once teardown has started.
+ * Record an audit-gate failure, swallowing a throwing recorder (best-effort
+ * diagnostics must never break the fail-closed path).
+ */
+function recordAuditGateFailureSafely(
+  deps: InterceptionServiceDeps,
+  reason: AuditGateFailureReason,
+): void {
+  try {
+    deps.recordAuditGateFailure(reason);
+  } catch {
+    // Diagnostics are best-effort; a failing recorder must not affect teardown.
+  }
+}
+
+/**
+ * Run the REQUIRED audit gate for an accepted command (Step 5b). Returns `true`
+ * ONLY when the hook reports `ok` -- it completed the accepted-command audit
+ * prerequisite, so the allow frame may be emitted: a meaningful line has passed
+ * the session-ownership re-check and been appended, while an empty/control-only
+ * (no-op) line may succeed WITHOUT an entry (5c). A `{ ok: false }` result OR a
+ * throwing hook is an audit failure -> record the distinct reason (the service
+ * catch is the last reliable observation point) and return `false` -> the caller
+ * sends no frame and closes (fail-closed, D104.J).
+ */
+async function runAuditGate(
+  deps: InterceptionServiceDeps,
+  input: AcceptedCommandAuditInput,
+): Promise<boolean> {
+  let result: AuditAcceptedCommandResult;
+  try {
+    result = await deps.auditAcceptedCommand(input);
+  } catch {
+    recordAuditGateFailureSafely(deps, "audit_hook_threw");
+    return false;
+  }
+  if (!result.ok) {
+    recordAuditGateFailureSafely(deps, result.reason);
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Send one response frame, swallowing any error (a failed send => the hook reads
+ * EOF and fails closed).
+ */
+async function sendFrameQuietly(
+  connection: InterceptionServiceConnection,
+  frame: string,
+): Promise<void> {
+  try {
+    await connection.send(frame);
+  } catch {
+    // A failed send delivers no decision; the hook reads EOF and fails closed.
+  }
+}
+
+/**
+ * Serve ONE connection: read a single request, then respond with its decision
+ * frame or (on malformed / timeout / closed / read error) close with NO frame,
+ * always closing. Never throws -- every port call is guarded so a misbehaving
+ * transport cannot break the accept loop (fail closed). Re-checks state.stopped
+ * AFTER the read so a frame arriving as stop() begins is NOT answered, and AGAIN
+ * after the awaited audit gate so a shutdown that wins that race blocks the allow
+ * frame -- no decision may be emitted once teardown has started. An `allow` is
+ * emitted ONLY after the required audit gate reports `ok`; a `block` is sent
+ * directly (blocks are never audited).
  */
 async function serveConnection(
   connection: InterceptionServiceConnection,
@@ -336,13 +471,16 @@ async function serveConnection(
 
   if (!state.stopped && read?.kind === "frame") {
     const outcome = handleRequestLine(read.line, deps);
-    if (outcome.kind === "respond") {
-      try {
-        await connection.send(outcome.frame);
-      } catch {
-        // A failed send delivers no decision; the hook reads EOF and fails
-        // closed. Nothing to do but close.
+    if (outcome.kind === "allow") {
+      // The gate awaits (ownership re-check + append); afterwards the SERVICE
+      // re-checks stopped so a shutdown that won the race blocks the frame -- the
+      // command is then audited-but-not-executed, which is the safer outcome.
+      const cleared = await runAuditGate(deps, outcome.auditInput);
+      if (cleared && !state.stopped) {
+        await sendFrameQuietly(connection, outcome.frame);
       }
+    } else if (outcome.kind === "block" && !state.stopped) {
+      await sendFrameQuietly(connection, outcome.frame);
     }
   }
 

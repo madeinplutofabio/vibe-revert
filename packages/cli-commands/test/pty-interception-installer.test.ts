@@ -15,6 +15,7 @@ import {
   type InterceptionChannelRef,
   type InterceptionInstallFailureReason,
 } from "../src/commands/pty-interception.js";
+import type { AuditAcceptedCommand } from "../src/commands/pty-interception-audit.js";
 import {
   type BashInterceptionInstallFailureCause,
   type InstallBashInterceptionDeps,
@@ -37,6 +38,8 @@ interface Rec {
   serviceSessionNonce: string | undefined;
   serviceCommandsPolicy: CommandsPolicyConfig | undefined;
   serviceEvaluate: unknown;
+  serviceAudit: unknown;
+  serviceRecordFailure: unknown;
   serviceTransport: unknown;
   handleFields: unknown;
 }
@@ -51,6 +54,8 @@ function makeDeps(overrides: Partial<Record<keyof InstallBashInterceptionDeps, u
     serviceSessionNonce: undefined,
     serviceCommandsPolicy: undefined,
     serviceEvaluate: undefined,
+    serviceAudit: undefined,
+    serviceRecordFailure: undefined,
     serviceTransport: undefined,
     handleFields: undefined,
   };
@@ -87,11 +92,15 @@ function makeDeps(overrides: Partial<Record<keyof InstallBashInterceptionDeps, u
     bump("evaluateCommandPolicy");
     return { kind: "allow" } as CommandPolicyDecision;
   };
+  const auditAcceptedCommand: AuditAcceptedCommand = async () => ({ ok: true });
+  const recordAuditGateFailure = (): void => undefined;
 
   const base: InstallBashInterceptionDeps = {
     shell: { path: "/usr/bin/bash", kind: "bash" as ShellKind },
     commandsPolicy,
     evaluateCommandPolicy,
+    auditAcceptedCommand,
+    recordAuditGateFailure,
     generateNonce: () => {
       bump("generateNonce");
       return "noncenonce";
@@ -111,6 +120,8 @@ function makeDeps(overrides: Partial<Record<keyof InstallBashInterceptionDeps, u
       rec.serviceSessionNonce = d.sessionNonce;
       rec.serviceCommandsPolicy = d.commandsPolicy;
       rec.serviceEvaluate = d.evaluateCommandPolicy;
+      rec.serviceAudit = d.auditAcceptedCommand;
+      rec.serviceRecordFailure = d.recordAuditGateFailure;
       return service as unknown as InterceptionService;
     },
     materializeHook: async () => {
@@ -131,7 +142,16 @@ function makeDeps(overrides: Partial<Record<keyof InstallBashInterceptionDeps, u
   return {
     deps,
     rec,
-    resources: { transport, channel, service, materialized, commandsPolicy, evaluateCommandPolicy },
+    resources: {
+      transport,
+      channel,
+      service,
+      materialized,
+      commandsPolicy,
+      evaluateCommandPolicy,
+      auditAcceptedCommand,
+      recordAuditGateFailure,
+    },
   };
 }
 
@@ -309,6 +329,8 @@ describe("installBashInterception — dependency snapshot is fail-closed (channe
     "createService",
     "materializeHook",
     "createHandle",
+    "auditAcceptedCommand",
+    "recordAuditGateFailure",
   ] as const)("non-function %s", async (key) => {
     const { deps, rec } = makeDeps({ [key]: "not a function" });
     expectDependencyRefusal(await installBashInterception(deps));
@@ -324,6 +346,8 @@ describe("installBashInterception — dependency snapshot is fail-closed (channe
     "createService",
     "materializeHook",
     "createHandle",
+    "auditAcceptedCommand",
+    "recordAuditGateFailure",
     "reportDiagnostic",
   ] as const)("throwing getter on phase-2 dependency %s (supported bash)", async (key) => {
     const { deps, rec } = makeDeps();
@@ -567,12 +591,16 @@ describe("installBashInterception — snapshot / one-read / isolation", () => {
     expect(rec.hookNonce).toBe(rec.serviceSessionNonce);
   });
 
-  it("the created transport + the exact policy/evaluator objects reach the service by identity", async () => {
+  it("the created transport + the exact policy/evaluator/audit objects reach the service by identity", async () => {
     const { deps, rec, resources } = makeDeps();
     await installBashInterception(deps);
     expect(rec.serviceTransport).toBe(resources.transport);
     expect(rec.serviceCommandsPolicy).toBe(resources.commandsPolicy);
     expect(rec.serviceEvaluate).toBe(resources.evaluateCommandPolicy);
+    // The installer is a pure threading layer for these session-owned callbacks;
+    // it must not substitute or wrap them.
+    expect(rec.serviceAudit).toBe(resources.auditAcceptedCommand);
+    expect(rec.serviceRecordFailure).toBe(resources.recordAuditGateFailure);
   });
 
   it("reads the channel endpoint and the rc path exactly once each", async () => {

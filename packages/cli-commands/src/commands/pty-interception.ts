@@ -69,6 +69,9 @@
  *
  * Every request and decision carries `protocolVersion` (currently 1) so future
  * multiline / confirm / shell additions cannot silently desync an old hook.
+ * v1 is INTERNAL and UNRELEASED (M G4 has not shipped): the request's `cwd` was
+ * added while COMPLETING v1, not as a change to an already-published shape. Any
+ * request/decision change after first release MUST bump the version.
  */
 
 /** The interception wire-protocol version (bumped on any request/decision change). */
@@ -129,6 +132,16 @@ export interface InterceptionRequest {
   // NOT shell-expanded by VibeRevert, NOT parsed by VibeRevert, and NOT a
   // child-process transcript.
   readonly rawLine: string;
+  /**
+   * The shell's LOGICAL prompt-time working directory (`$PWD` for Bash v1),
+   * captured and bound into the SAME nonce/id request as `rawLine`. An
+   * interactive shell can `cd`, so the session's initial directory would be a
+   * FALSE audit record: the parent must record where the command actually ran,
+   * and the binding prevents pairing a command with the wrong directory.
+   * UNTRUSTED protocol data -- the parent validates and lexically contains it
+   * (resolveAuditedCwd) and fails closed rather than substituting another cwd.
+   */
+  readonly cwd: string;
 }
 
 /** The parent's verdict for one request: allow, or block with a decision reason. */

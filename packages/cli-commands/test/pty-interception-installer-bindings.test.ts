@@ -12,6 +12,7 @@ import { describe, expect, it } from "vitest";
 import type { CommandsPolicyConfig } from "../src/command-guard.js";
 import { evaluateCommandPolicy } from "../src/command-guard.js";
 import { createInstalledInterceptionHandle } from "../src/commands/pty-interception.js";
+import type { AuditAcceptedCommand } from "../src/commands/pty-interception-audit.js";
 import { generateBashInterceptionHook } from "../src/commands/pty-interception-hook.js";
 import { materializeBashHook } from "../src/commands/pty-interception-hook-materializer.js";
 import {
@@ -38,6 +39,8 @@ function makeArgs(
   return {
     shell: { path: "/usr/bin/bash", kind: "bash" as ShellKind },
     commandsPolicy: undefined,
+    auditAcceptedCommand: async () => ({ ok: true }),
+    recordAuditGateFailure: () => undefined,
     ...overrides,
   };
 }
@@ -84,6 +87,8 @@ describe("createBashInterceptionInstallerDeps — production wiring", () => {
     const deps = createBashInterceptionInstallerDeps({
       shell: shellWithArgs as CreateBashInterceptionInstallerDepsArgs["shell"],
       commandsPolicy: undefined,
+      auditAcceptedCommand: async () => ({ ok: true }),
+      recordAuditGateFailure: () => undefined,
     });
     expect("args" in deps.shell).toBe(false);
     expect(deps.shell).toEqual({ path: "/usr/bin/bash", kind: "bash" });
@@ -101,6 +106,18 @@ describe("createBashInterceptionInstallerDeps — production wiring", () => {
     const deps = createBashInterceptionInstallerDeps(makeArgs({ commandsPolicy: policy }));
     expect(deps.commandsPolicy).toBe(policy);
     expect(Object.isFrozen(policy)).toBe(false);
+  });
+
+  it("passes both audit callbacks through by identity, never wrapped or invented", () => {
+    const auditAcceptedCommand: AuditAcceptedCommand = async () => ({ ok: true });
+    const recordAuditGateFailure = (): void => undefined;
+    const deps = createBashInterceptionInstallerDeps(
+      makeArgs({ auditAcceptedCommand, recordAuditGateFailure }),
+    );
+    // These are session-owned callbacks. This bindings layer is a pure conduit and
+    // must pass their exact identities through without substitution or wrapping.
+    expect(deps.auditAcceptedCommand).toBe(auditAcceptedCommand);
+    expect(deps.recordAuditGateFailure).toBe(recordAuditGateFailure);
   });
 
   it("omits reportDiagnostic when absent, and preserves it by identity when supplied", () => {

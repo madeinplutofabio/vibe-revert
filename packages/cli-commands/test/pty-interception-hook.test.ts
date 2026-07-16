@@ -154,7 +154,7 @@ describe("generateBashInterceptionHook — self-tamper hard-block patterns", () 
 describe("generateBashInterceptionHook — wire protocol from the shared constant", () => {
   it("builds the request and expected-allow frames at the shared protocol version", () => {
     const version = PTY_INTERCEPTION_PROTOCOL_VERSION;
-    const requestFrame = `local __vr_request='{"protocolVersion":${version},"nonce":"'"$__viberevert_ic_nonce"'","id":"'"$__vr_id"'","rawLine":"'"$__vr_escaped"'"}'`;
+    const requestFrame = `local __vr_request='{"protocolVersion":${version},"nonce":"'"$__viberevert_ic_nonce"'","id":"'"$__vr_id"'","rawLine":"'"$__vr_escaped"'","cwd":"'"$__vr_cwd"'"}'`;
     const expectedFrame = `local __vr_expected='{"protocolVersion":${version},"id":"'"$__vr_id"'","kind":"allow"}'`;
     expect(hook).toContain(requestFrame);
     expect(hook).toContain(expectedFrame);
@@ -162,6 +162,32 @@ describe("generateBashInterceptionHook — wire protocol from the shared constan
 
   it("emits the protocol version from the shared constant (no literal drift)", () => {
     expect(hook).toContain(`"protocolVersion":${PTY_INTERCEPTION_PROTOCOL_VERSION},`);
+  });
+
+  it("captures the prompt-time cwd through the SAME reviewed JSON escaper, nounset-safe", () => {
+    // $PWD is bash's LOGICAL prompt-time cwd; it is escaped by the same reviewed
+    // encoder as $BASH_COMMAND (a directory name may hold quotes, backslashes,
+    // spaces, or newlines) and read nounset-safe.
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: bash parameter expansion, not a JS template literal
+    expect(hook).toContain('__vr_cwd=$(__viberevert_ic_json_escape "${PWD-}" 2>/dev/null)');
+    // Only the ESCAPED variable reaches the request JSON.
+    expect(hook).toContain(`"cwd":"'"$__vr_cwd"'"`);
+  });
+
+  it("never interpolates a raw $PWD into the request JSON", () => {
+    const start = hook.indexOf("local __vr_request=");
+    expect(start).toBeGreaterThanOrEqual(0);
+    const requestLine = hook.slice(start, hook.indexOf("\n", start));
+    expect(requestLine).not.toContain("$PWD");
+    expect(requestLine).toContain('"cwd":"\'"$__vr_cwd"\'"');
+  });
+
+  it("fails closed (skip) when EITHER the command or the cwd escape fails", () => {
+    // Both escapes are chained with && inside ONE `if`, so a failure of either
+    // leaves __vr_status at its skip default (1) and no request is ever sent.
+    expect(hook).toContain(
+      'if __vr_escaped=$(__viberevert_ic_json_escape "$__vr_line" 2>/dev/null) &&',
+    );
   });
 
   it("derives the request id from the shell PID and monotonic sequence", () => {

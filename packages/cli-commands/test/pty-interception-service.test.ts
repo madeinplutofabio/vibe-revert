@@ -19,6 +19,13 @@ import {
   PTY_INTERCEPTION_PROTOCOL_VERSION,
 } from "../src/commands/pty-interception.js";
 import {
+  type AcceptedCommandAuditInput,
+  type AuditAcceptedCommand,
+  type AuditAcceptedCommandResult,
+  PTY_INTERCEPTION_MAX_CWD_LENGTH,
+} from "../src/commands/pty-interception-audit.js";
+import {
+  type AuditGateFailureReason,
   createInterceptionService,
   type DecideInterceptionDeps,
   decideInterception,
@@ -26,6 +33,7 @@ import {
   handleRequestLine,
   type InterceptionConnectionRead,
   type InterceptionServiceConnection,
+  type InterceptionServiceDeps,
   type InterceptionServiceTransport,
   parseInterceptionRequest,
 } from "../src/commands/pty-interception-service.js";
@@ -36,6 +44,7 @@ function makeRequest(over: Partial<InterceptionRequest> = {}): InterceptionReque
     nonce: "session-nonce",
     id: "req-1",
     rawLine: "echo hi",
+    cwd: "/repo/pkg",
     ...over,
   };
 }
@@ -49,12 +58,77 @@ function makeDecideDeps(over: Partial<DecideInterceptionDeps> = {}): DecideInter
   };
 }
 
+function makeServiceDeps(over: Partial<InterceptionServiceDeps> = {}): InterceptionServiceDeps {
+  return {
+    ...makeDecideDeps(),
+    auditAcceptedCommand: () => Promise.resolve({ ok: true }),
+    recordAuditGateFailure: () => undefined,
+    ...over,
+  };
+}
+
+interface ControllableAudit {
+  readonly auditAcceptedCommand: AuditAcceptedCommand;
+  entered: () => boolean;
+  receivedInputs: () => readonly AcceptedCommandAuditInput[];
+  readonly whenEntered: Promise<void>;
+  resolve: (result: AuditAcceptedCommandResult) => void;
+}
+
+/**
+ * An audit hook the test drives deterministically: `auditAcceptedCommand`
+ * records the raw line + entry (resolving `whenEntered`) and parks until the
+ * test calls `resolve()`. Lets a test prove the frame is not sent until the gate
+ * completes, and that the SERVICE re-checks `stopped` AFTER the awaited gate --
+ * with no reliance on microtask-flush counts. Fails loudly on misuse (resolve
+ * before entry, or a second invocation) so a broken setup cannot hang silently.
+ */
+function makeControllableAudit(): ControllableAudit {
+  let entered = false;
+  let signalEntered: (() => void) | undefined;
+  const whenEntered = new Promise<void>((resolve) => {
+    signalEntered = resolve;
+  });
+  const received: AcceptedCommandAuditInput[] = [];
+  let release: ((result: AuditAcceptedCommandResult) => void) | undefined;
+  return {
+    auditAcceptedCommand: (input) => {
+      if (release !== undefined) {
+        return Promise.reject(new Error("audit gate invoked more than once"));
+      }
+      entered = true;
+      received.push(input);
+      signalEntered?.();
+      return new Promise<AuditAcceptedCommandResult>((resolve) => {
+        release = resolve;
+      });
+    },
+    entered: () => entered,
+    receivedInputs: () => received,
+    whenEntered,
+    resolve: (result) => {
+      if (release === undefined) {
+        throw new Error("audit gate has not been entered");
+      }
+      const currentRelease = release;
+      release = undefined;
+      currentRelease(result);
+    },
+  };
+}
+
 describe("parseInterceptionRequest (M G4 Step 4b-i)", () => {
   it("accepts a well-formed envelope, keeping only the core fields", () => {
-    const raw = JSON.stringify({ protocolVersion: 1, nonce: "n", id: "r1", rawLine: "echo hi" });
+    const raw = JSON.stringify({
+      protocolVersion: 1,
+      nonce: "n",
+      id: "r1",
+      rawLine: "echo hi",
+      cwd: "/repo/a",
+    });
     expect(parseInterceptionRequest(raw)).toEqual({
       kind: "ok",
-      request: { protocolVersion: 1, nonce: "n", id: "r1", rawLine: "echo hi" },
+      request: { protocolVersion: 1, nonce: "n", id: "r1", rawLine: "echo hi", cwd: "/repo/a" },
     });
   });
 
@@ -64,28 +138,36 @@ describe("parseInterceptionRequest (M G4 Step 4b-i)", () => {
       nonce: "n",
       id: "r1",
       rawLine: "echo hi",
+      cwd: "/repo/a",
       future: "ignored",
     });
     expect(parseInterceptionRequest(raw)).toEqual({
       kind: "ok",
-      request: { protocolVersion: 1, nonce: "n", id: "r1", rawLine: "echo hi" },
+      request: { protocolVersion: 1, nonce: "n", id: "r1", rawLine: "echo hi", cwd: "/repo/a" },
     });
   });
 
   it("accepts an empty rawLine (an empty prompt-line observation)", () => {
-    const raw = JSON.stringify({ protocolVersion: 1, nonce: "n", id: "r1", rawLine: "" });
+    const raw = JSON.stringify({
+      protocolVersion: 1,
+      nonce: "n",
+      id: "r1",
+      rawLine: "",
+      cwd: "/repo/a",
+    });
     expect(parseInterceptionRequest(raw)).toEqual({
       kind: "ok",
-      request: { protocolVersion: 1, nonce: "n", id: "r1", rawLine: "" },
+      request: { protocolVersion: 1, nonce: "n", id: "r1", rawLine: "", cwd: "/repo/a" },
     });
   });
 
-  it("preserves rawLine byte-for-byte (no trim / normalize)", () => {
+  it("preserves rawLine exactly (no trim / normalize)", () => {
     const raw = JSON.stringify({
       protocolVersion: 1,
       nonce: "n",
       id: "r1",
       rawLine: "  ls  -la  ",
+      cwd: "/repo/a",
     });
     const result = parseInterceptionRequest(raw);
     expect(result.kind).toBe("ok");
@@ -100,11 +182,50 @@ describe("parseInterceptionRequest (M G4 Step 4b-i)", () => {
       nonce: " nonce ",
       id: " req-1 ",
       rawLine: "echo hi",
+      cwd: "/repo/a",
     });
     expect(parseInterceptionRequest(raw)).toEqual({
       kind: "ok",
-      request: { protocolVersion: 1, nonce: " nonce ", id: " req-1 ", rawLine: "echo hi" },
+      request: {
+        protocolVersion: 1,
+        nonce: " nonce ",
+        id: " req-1 ",
+        rawLine: "echo hi",
+        cwd: "/repo/a",
+      },
     });
+  });
+
+  it("preserves an unusual cwd EXACTLY (no trim/normalize -- semantics are the gate's job)", () => {
+    const cwd = "  /repo/a/../b  ";
+    const raw = JSON.stringify({ protocolVersion: 1, nonce: "n", id: "r1", rawLine: "x", cwd });
+    const result = parseInterceptionRequest(raw);
+    expect(result.kind).toBe("ok");
+    if (result.kind === "ok") {
+      // Identical to the sent value. The audit gate's resolveAuditedCwd later
+      // rejects it because the string is not an absolute POSIX path as received;
+      // neither layer trims.
+      expect(result.request.cwd).toBe(cwd);
+    }
+  });
+
+  it("preserves a cwd with escaped quotes/backslashes exactly as JSON.parse produced it", () => {
+    const cwd = '/repo/quoted"dir\\name';
+    const raw = JSON.stringify({ protocolVersion: 1, nonce: "n", id: "r1", rawLine: "x", cwd });
+    const result = parseInterceptionRequest(raw);
+    expect(result.kind).toBe("ok");
+    if (result.kind === "ok") {
+      expect(result.request.cwd).toBe(cwd);
+    }
+  });
+
+  it("accepts cwd exactly at the parser size bound", () => {
+    const cwd = `/${"a".repeat(PTY_INTERCEPTION_MAX_CWD_LENGTH - 1)}`;
+    expect(cwd.length).toBe(PTY_INTERCEPTION_MAX_CWD_LENGTH);
+    const result = parseInterceptionRequest(
+      JSON.stringify({ protocolVersion: 1, nonce: "n", id: "r1", rawLine: "x", cwd }),
+    );
+    expect(result.kind).toBe("ok");
   });
 
   const rawRejects: [string, string][] = [
@@ -122,16 +243,36 @@ describe("parseInterceptionRequest (M G4 Step 4b-i)", () => {
     });
   });
 
+  // Every fixture carries a VALID cwd except the cwd cases themselves, so each
+  // isolates exactly the defect it names (a missing cwd would otherwise make them
+  // malformed for the wrong reason, and they would pass even if their intended
+  // check were deleted).
   const objRejects: [string, unknown][] = [
-    ["wrong protocolVersion", { protocolVersion: 2, nonce: "n", id: "r1", rawLine: "x" }],
-    ["missing protocolVersion", { nonce: "n", id: "r1", rawLine: "x" }],
-    ["missing nonce", { protocolVersion: 1, id: "r1", rawLine: "x" }],
-    ["whitespace nonce", { protocolVersion: 1, nonce: "   ", id: "r1", rawLine: "x" }],
-    ["non-string nonce", { protocolVersion: 1, nonce: 5, id: "r1", rawLine: "x" }],
-    ["missing id", { protocolVersion: 1, nonce: "n", rawLine: "x" }],
-    ["whitespace id", { protocolVersion: 1, nonce: "n", id: "  ", rawLine: "x" }],
-    ["missing rawLine", { protocolVersion: 1, nonce: "n", id: "r1" }],
-    ["non-string rawLine", { protocolVersion: 1, nonce: "n", id: "r1", rawLine: 7 }],
+    [
+      "wrong protocolVersion",
+      { protocolVersion: 2, nonce: "n", id: "r1", rawLine: "x", cwd: "/r" },
+    ],
+    ["missing protocolVersion", { nonce: "n", id: "r1", rawLine: "x", cwd: "/r" }],
+    ["missing nonce", { protocolVersion: 1, id: "r1", rawLine: "x", cwd: "/r" }],
+    ["whitespace nonce", { protocolVersion: 1, nonce: "   ", id: "r1", rawLine: "x", cwd: "/r" }],
+    ["non-string nonce", { protocolVersion: 1, nonce: 5, id: "r1", rawLine: "x", cwd: "/r" }],
+    ["missing id", { protocolVersion: 1, nonce: "n", rawLine: "x", cwd: "/r" }],
+    ["whitespace id", { protocolVersion: 1, nonce: "n", id: "  ", rawLine: "x", cwd: "/r" }],
+    ["missing rawLine", { protocolVersion: 1, nonce: "n", id: "r1", cwd: "/r" }],
+    ["non-string rawLine", { protocolVersion: 1, nonce: "n", id: "r1", rawLine: 7, cwd: "/r" }],
+    ["missing cwd", { protocolVersion: 1, nonce: "n", id: "r1", rawLine: "x" }],
+    ["non-string cwd", { protocolVersion: 1, nonce: "n", id: "r1", rawLine: "x", cwd: 7 }],
+    ["empty cwd", { protocolVersion: 1, nonce: "n", id: "r1", rawLine: "x", cwd: "" }],
+    [
+      "oversized cwd",
+      {
+        protocolVersion: 1,
+        nonce: "n",
+        id: "r1",
+        rawLine: "x",
+        cwd: `/${"a".repeat(PTY_INTERCEPTION_MAX_CWD_LENGTH)}`,
+      },
+    ],
   ];
   it.each(objRejects)("rejects %s as malformed_request", (_label, obj) => {
     expect(parseInterceptionRequest(JSON.stringify(obj))).toEqual({
@@ -494,10 +635,14 @@ describe("encodeDecisionFrame (M G4 Step 4b-ii)", () => {
 });
 
 describe("handleRequestLine (M G4 Step 4b-ii)", () => {
-  it("responds with an allow frame for a non-matching command, echoing id", () => {
-    const outcome = handleRequestLine(requestLine({ id: "r1" }), makeDecideDeps());
-    expect(outcome.kind).toBe("respond");
-    if (outcome.kind === "respond") {
+  it("returns an allow outcome for a non-matching command, carrying the frame + audit input", () => {
+    const outcome = handleRequestLine(
+      requestLine({ id: "r1", rawLine: "echo hi", cwd: "/repo/pkg" }),
+      makeDecideDeps(),
+    );
+    expect(outcome.kind).toBe("allow");
+    if (outcome.kind === "allow") {
+      expect(outcome.auditInput).toEqual({ rawLine: "echo hi", cwd: "/repo/pkg" });
       expect(decodeFrame(outcome.frame)).toEqual({ protocolVersion: 1, id: "r1", kind: "allow" });
     }
   });
@@ -509,8 +654,8 @@ describe("handleRequestLine (M G4 Step 4b-ii)", () => {
         evaluateCommandPolicy: () => ({ kind: "guard", entry: "rm -rf /", normalized: "rm -rf /" }),
       }),
     );
-    expect(outcome.kind).toBe("respond");
-    if (outcome.kind === "respond") {
+    expect(outcome.kind).toBe("block");
+    if (outcome.kind === "block") {
       expect(decodeFrame(outcome.frame)).toEqual({
         protocolVersion: 1,
         id: "r2",
@@ -531,8 +676,8 @@ describe("handleRequestLine (M G4 Step 4b-ii)", () => {
         }),
       }),
     );
-    expect(outcome.kind).toBe("respond");
-    if (outcome.kind === "respond") {
+    expect(outcome.kind).toBe("block");
+    if (outcome.kind === "block") {
       expect(decodeFrame(outcome.frame)).toEqual({
         protocolVersion: 1,
         id: "r3",
@@ -547,8 +692,8 @@ describe("handleRequestLine (M G4 Step 4b-ii)", () => {
       requestLine({ nonce: "wrong", id: "r4" }),
       makeDecideDeps({ sessionNonce: "session-nonce" }),
     );
-    expect(outcome.kind).toBe("respond");
-    if (outcome.kind === "respond") {
+    expect(outcome.kind).toBe("block");
+    if (outcome.kind === "block") {
       expect(decodeFrame(outcome.frame)).toEqual({
         protocolVersion: 1,
         id: "r4",
@@ -567,8 +712,8 @@ describe("handleRequestLine (M G4 Step 4b-ii)", () => {
         },
       }),
     );
-    expect(outcome.kind).toBe("respond");
-    if (outcome.kind === "respond") {
+    expect(outcome.kind).toBe("block");
+    if (outcome.kind === "block") {
       expect(decodeFrame(outcome.frame)).toEqual({
         protocolVersion: 1,
         id: "r5",
@@ -586,8 +731,8 @@ describe("handleRequestLine (M G4 Step 4b-ii)", () => {
           null as unknown as ReturnType<DecideInterceptionDeps["evaluateCommandPolicy"]>,
       }),
     );
-    expect(outcome.kind).toBe("respond");
-    if (outcome.kind === "respond") {
+    expect(outcome.kind).toBe("block");
+    if (outcome.kind === "block") {
       expect(decodeFrame(outcome.frame)).toEqual({
         protocolVersion: 1,
         id: "r6",
@@ -607,8 +752,8 @@ describe("handleRequestLine (M G4 Step 4b-ii)", () => {
           >,
       }),
     );
-    expect(outcome.kind).toBe("respond");
-    if (outcome.kind === "respond") {
+    expect(outcome.kind).toBe("block");
+    if (outcome.kind === "block") {
       expect(decodeFrame(outcome.frame)).toEqual({
         protocolVersion: 1,
         id: "r7",
@@ -628,11 +773,11 @@ describe("handleRequestLine (M G4 Step 4b-ii)", () => {
     expect(handleRequestLine(line, makeDecideDeps())).toEqual({ kind: "close" });
   });
 
-  it("never throws on hostile input (returns respond or close)", () => {
+  it("never throws on hostile input (returns allow, block, or close)", () => {
     const hostile = ["", "\u0000", "{", "999", '"str"', "null", "[1,2,3]"];
     for (const line of hostile) {
       const outcome = handleRequestLine(line, makeDecideDeps());
-      expect(["respond", "close"]).toContain(outcome.kind);
+      expect(["allow", "block", "close"]).toContain(outcome.kind);
     }
   });
 });
@@ -641,7 +786,7 @@ describe("createInterceptionService (M G4 Step 4b-ii)", () => {
   it("serves a well-formed request: sends the decision frame, then closes", async () => {
     const conn = makeFakeConnection({ read: { kind: "frame", line: requestLine({ id: "r1" }) } });
     const { transport, closeCalls } = makeFakeTransport({ connections: [conn.connection] });
-    const service = createInterceptionService(transport, makeDecideDeps());
+    const service = createInterceptionService(transport, makeServiceDeps());
 
     await service.done;
 
@@ -658,7 +803,7 @@ describe("createInterceptionService (M G4 Step 4b-ii)", () => {
       sendThrows: true, // would reject if the service ever tried to respond
     });
     const { transport } = makeFakeTransport({ connections: [conn.connection] });
-    const service = createInterceptionService(transport, makeDecideDeps());
+    const service = createInterceptionService(transport, makeServiceDeps());
 
     await service.done; // resolves; a stray send() never happens
 
@@ -675,7 +820,7 @@ describe("createInterceptionService (M G4 Step 4b-ii)", () => {
   it.each(nonFrameReads)("closes with no frame when the read is %s", async (_label, read) => {
     const conn = makeFakeConnection({ read, sendThrows: true });
     const { transport } = makeFakeTransport({ connections: [conn.connection] });
-    const service = createInterceptionService(transport, makeDecideDeps());
+    const service = createInterceptionService(transport, makeServiceDeps());
 
     await service.done;
 
@@ -689,7 +834,7 @@ describe("createInterceptionService (M G4 Step 4b-ii)", () => {
       sendThrows: true,
     });
     const { transport } = makeFakeTransport({ connections: [conn.connection] });
-    const service = createInterceptionService(transport, makeDecideDeps());
+    const service = createInterceptionService(transport, makeServiceDeps());
 
     await service.done;
 
@@ -707,7 +852,7 @@ describe("createInterceptionService (M G4 Step 4b-ii)", () => {
     const { transport } = makeFakeTransport({
       connections: [first.connection, second.connection],
     });
-    const service = createInterceptionService(transport, makeDecideDeps());
+    const service = createInterceptionService(transport, makeServiceDeps());
 
     await service.done;
 
@@ -717,7 +862,7 @@ describe("createInterceptionService (M G4 Step 4b-ii)", () => {
 
   it("resolves done when accept returns null with no connection (ALSO-4)", async () => {
     const { transport, closeCalls } = makeFakeTransport({ connections: [] });
-    const service = createInterceptionService(transport, makeDecideDeps());
+    const service = createInterceptionService(transport, makeServiceDeps());
 
     await service.done; // resolves with no connection served, no teardown needed
 
@@ -729,7 +874,7 @@ describe("createInterceptionService (M G4 Step 4b-ii)", () => {
       connections: [],
       blockWhenDrained: true,
     });
-    const service = createInterceptionService(transport, makeDecideDeps());
+    const service = createInterceptionService(transport, makeServiceDeps());
 
     expect(acceptCalls()).toBe(1); // accept() was called synchronously on creation
 
@@ -741,7 +886,7 @@ describe("createInterceptionService (M G4 Step 4b-ii)", () => {
       connections: [],
       blockWhenDrained: true,
     });
-    const service = createInterceptionService(transport, makeDecideDeps());
+    const service = createInterceptionService(transport, makeServiceDeps());
 
     const first = service.stop();
     const second = service.stop();
@@ -759,7 +904,7 @@ describe("createInterceptionService (M G4 Step 4b-ii)", () => {
       blockWhenDrained: true,
       closeThrows: true,
     });
-    const service = createInterceptionService(transport, makeDecideDeps());
+    const service = createInterceptionService(transport, makeServiceDeps());
 
     await expect(service.stop()).resolves.toBeUndefined();
     await expect(service.done).resolves.toBeUndefined();
@@ -776,7 +921,7 @@ describe("createInterceptionService (M G4 Step 4b-ii)", () => {
       connections: [conn.connection],
       blockWhenDrained: true,
     });
-    const service = createInterceptionService(transport, makeDecideDeps());
+    const service = createInterceptionService(transport, makeServiceDeps());
 
     // stop() synchronously, before the loop resumes from its first accept.
     await service.stop();
@@ -792,7 +937,7 @@ describe("createInterceptionService (M G4 Step 4b-ii)", () => {
       connections: [conn.connection],
       blockWhenDrained: true,
     });
-    const service = createInterceptionService(transport, makeDecideDeps());
+    const service = createInterceptionService(transport, makeServiceDeps());
 
     await flushMicrotasks(); // let accept -> serveConnection park in the hung read
 
@@ -809,7 +954,7 @@ describe("createInterceptionService (M G4 Step 4b-ii)", () => {
       connections: [conn.connection],
       blockWhenDrained: true,
     });
-    const service = createInterceptionService(transport, makeDecideDeps());
+    const service = createInterceptionService(transport, makeServiceDeps());
 
     await flushMicrotasks(); // loop parks in the deferred read
 
@@ -826,7 +971,7 @@ describe("createInterceptionService (M G4 Step 4b-ii)", () => {
 
   it("stops the loop without retrying when accept() throws (no hot loop)", async () => {
     const { transport, acceptCalls, closeCalls } = makeFakeTransport({ acceptThrowsAt: 0 });
-    const service = createInterceptionService(transport, makeDecideDeps());
+    const service = createInterceptionService(transport, makeServiceDeps());
 
     await service.done;
 
@@ -839,11 +984,230 @@ describe("createInterceptionService (M G4 Step 4b-ii)", () => {
       acceptThrowsAt: 0,
       closeThrows: true,
     });
-    const service = createInterceptionService(transport, makeDecideDeps());
+    const service = createInterceptionService(transport, makeServiceDeps());
 
     await expect(service.done).resolves.toBeUndefined();
 
     expect(acceptCalls()).toBe(1);
     expect(closeCalls()).toBe(1);
+  });
+});
+
+describe("createInterceptionService -- accepted-command audit gate (M G4 Step 5b)", () => {
+  it("waits for the audit gate before sending an allow frame (audit-before-send ordering)", async () => {
+    const audit = makeControllableAudit();
+    const conn = makeFakeConnection({
+      read: {
+        kind: "frame",
+        line: requestLine({ id: "r1", rawLine: "echo hi", cwd: "/repo/pkg" }),
+      },
+    });
+    const { transport } = makeFakeTransport({ connections: [conn.connection] });
+    const service = createInterceptionService(
+      transport,
+      makeServiceDeps({ auditAcceptedCommand: audit.auditAcceptedCommand }),
+    );
+
+    await audit.whenEntered;
+    expect(conn.sendCalls()).toBe(0); // no frame until the gate completes
+    // the EXACT bound {rawLine, cwd} reached the gate
+    expect(audit.receivedInputs()).toEqual([{ rawLine: "echo hi", cwd: "/repo/pkg" }]);
+
+    audit.resolve({ ok: true });
+    await service.done;
+
+    expect(conn.sendCalls()).toBe(1);
+    expect(decodeFrame(conn.sent()[0] ?? "")).toEqual({
+      protocolVersion: 1,
+      id: "r1",
+      kind: "allow",
+    });
+  });
+
+  it("does NOT run the audit gate for a block, and sends the block frame", async () => {
+    let auditCalls = 0;
+    const conn = makeFakeConnection({ read: { kind: "frame", line: requestLine({ id: "r2" }) } });
+    const { transport } = makeFakeTransport({ connections: [conn.connection] });
+    const service = createInterceptionService(
+      transport,
+      makeServiceDeps({
+        evaluateCommandPolicy: () => ({ kind: "guard", entry: "rm -rf /", normalized: "rm -rf /" }),
+        auditAcceptedCommand: () => {
+          auditCalls += 1;
+          return Promise.resolve({ ok: true });
+        },
+      }),
+    );
+
+    await service.done;
+
+    expect(auditCalls).toBe(0);
+    expect(decodeFrame(conn.sent()[0] ?? "")).toEqual({
+      protocolVersion: 1,
+      id: "r2",
+      kind: "block",
+      reason: "blocked_by_policy",
+    });
+  });
+
+  it("does NOT run the audit gate for a malformed request", async () => {
+    let auditCalls = 0;
+    const conn = makeFakeConnection({
+      read: { kind: "frame", line: "not json at all" },
+      sendThrows: true,
+    });
+    const { transport } = makeFakeTransport({ connections: [conn.connection] });
+    const service = createInterceptionService(
+      transport,
+      makeServiceDeps({
+        auditAcceptedCommand: () => {
+          auditCalls += 1;
+          return Promise.resolve({ ok: true });
+        },
+      }),
+    );
+
+    await service.done;
+
+    expect(auditCalls).toBe(0);
+    expect(conn.sendCalls()).toBe(0);
+  });
+
+  it("fails closed on an audit ok:false: records the reason, sends no frame, closes", async () => {
+    let auditCalls = 0;
+    const recorded: AuditGateFailureReason[] = [];
+    const conn = makeFakeConnection({
+      read: { kind: "frame", line: requestLine() },
+      sendThrows: true,
+    });
+    const { transport } = makeFakeTransport({ connections: [conn.connection] });
+    const service = createInterceptionService(
+      transport,
+      makeServiceDeps({
+        auditAcceptedCommand: () => {
+          auditCalls += 1;
+          return Promise.resolve({ ok: false, reason: "session_changed" });
+        },
+        recordAuditGateFailure: (reason) => recorded.push(reason),
+      }),
+    );
+
+    await service.done;
+
+    expect(auditCalls).toBe(1);
+    expect(conn.sendCalls()).toBe(0);
+    expect(conn.sent()).toHaveLength(0);
+    expect(recorded).toEqual(["session_changed"]);
+    expect(conn.closeCalls()).toBeGreaterThanOrEqual(1);
+  });
+
+  it("fails closed when the audit hook throws: records audit_hook_threw, no frame", async () => {
+    let auditCalls = 0;
+    const recorded: AuditGateFailureReason[] = [];
+    const conn = makeFakeConnection({
+      read: { kind: "frame", line: requestLine() },
+      sendThrows: true,
+    });
+    const { transport } = makeFakeTransport({ connections: [conn.connection] });
+    const service = createInterceptionService(
+      transport,
+      makeServiceDeps({
+        auditAcceptedCommand: () => {
+          auditCalls += 1;
+          return Promise.reject(new Error("hook blew up"));
+        },
+        recordAuditGateFailure: (reason) => recorded.push(reason),
+      }),
+    );
+
+    await service.done;
+
+    expect(auditCalls).toBe(1);
+    expect(conn.sendCalls()).toBe(0);
+    expect(recorded).toEqual(["audit_hook_threw"]);
+    expect(conn.closeCalls()).toBeGreaterThanOrEqual(1);
+  });
+
+  it("audit success then a send failure closes with NO audit diagnostic (transport != audit failure)", async () => {
+    let auditCalls = 0;
+    const recorded: AuditGateFailureReason[] = [];
+    const conn = makeFakeConnection({
+      read: { kind: "frame", line: requestLine() },
+      sendThrows: true,
+    });
+    const { transport } = makeFakeTransport({ connections: [conn.connection] });
+    const service = createInterceptionService(
+      transport,
+      makeServiceDeps({
+        auditAcceptedCommand: () => {
+          auditCalls += 1;
+          return Promise.resolve({ ok: true });
+        },
+        recordAuditGateFailure: (reason) => recorded.push(reason),
+      }),
+    );
+
+    await service.done;
+
+    expect(auditCalls).toBe(1); // gate ran once, no retry
+    expect(conn.sendCalls()).toBe(1); // it tried to send the allow frame
+    expect(conn.sent()).toHaveLength(0); // send threw -> nothing on the wire
+    expect(recorded).toEqual([]); // audit SUCCEEDED -> no audit-failure diagnostic
+    expect(conn.closeCalls()).toBeGreaterThanOrEqual(1);
+  });
+
+  it("a throwing recordAuditGateFailure does not weaken the fail-closed close", async () => {
+    const conn = makeFakeConnection({
+      read: { kind: "frame", line: requestLine() },
+      sendThrows: true,
+    });
+    const { transport } = makeFakeTransport({ connections: [conn.connection] });
+    const service = createInterceptionService(
+      transport,
+      makeServiceDeps({
+        auditAcceptedCommand: () => Promise.resolve({ ok: false, reason: "append_failed" }),
+        recordAuditGateFailure: () => {
+          throw new Error("recorder blew up");
+        },
+      }),
+    );
+
+    await expect(service.done).resolves.toBeUndefined();
+    expect(conn.sendCalls()).toBe(0);
+    expect(conn.closeCalls()).toBeGreaterThanOrEqual(1);
+  });
+
+  it("stop() entered but before the audit resolves -> no allow frame (post-await stopped check)", async () => {
+    const audit = makeControllableAudit();
+    const recorded: AuditGateFailureReason[] = [];
+    const conn = makeFakeConnection({
+      read: { kind: "frame", line: requestLine() },
+      sendThrows: true,
+    });
+    const { transport } = makeFakeTransport({
+      connections: [conn.connection],
+      blockWhenDrained: true,
+    });
+    const service = createInterceptionService(
+      transport,
+      makeServiceDeps({
+        auditAcceptedCommand: audit.auditAcceptedCommand,
+        recordAuditGateFailure: (reason) => recorded.push(reason),
+      }),
+    );
+
+    await audit.whenEntered;
+    expect(audit.entered()).toBe(true);
+
+    // stop() sets state.stopped SYNCHRONOUSLY; only THEN does the audit resolve ok.
+    const stopping = service.stop();
+    audit.resolve({ ok: true });
+    await stopping;
+    await service.done;
+
+    expect(audit.receivedInputs()).toHaveLength(1); // gate entered exactly once, no retry
+    expect(conn.sendCalls()).toBe(0);
+    expect(recorded).toEqual([]); // audit SUCCEEDED; a shutdown-blocked send is NOT an audit failure
+    expect(conn.closeCalls()).toBeGreaterThanOrEqual(1);
   });
 });

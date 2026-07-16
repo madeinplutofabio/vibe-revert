@@ -84,6 +84,7 @@
  */
 
 import {
+  appendCommandsLogEntry,
   type Config,
   ConfigNotFoundError,
   ConfigParseError,
@@ -101,13 +102,19 @@ import { truncateIdForDisplay } from "../format.js";
 import { ConcurrentOperationError } from "../locks.js";
 import { EndSessionRaceError, endSessionOperation } from "../operations/end-session.js";
 import { START_LOCK_REL, startSessionOperation } from "../operations/start-session.js";
-import { RuntimeEnvInvalidError } from "../runtime-env.js";
+import { RuntimeEnvInvalidError, resolveNowForCliTimestamp } from "../runtime-env.js";
 import { createHostExecutablePathResolver } from "./executable-probe.js";
+import {
+  type AuditAcceptedCommand,
+  buildAuditedCommandArgv,
+  resolveAuditedCwd,
+} from "./pty-interception-audit.js";
 import {
   type BashInterceptionInstallResult,
   installBashInterception,
 } from "./pty-interception-installer.js";
 import { createBashInterceptionInstallerDeps } from "./pty-interception-installer-bindings.js";
+import type { AuditGateFailureReason } from "./pty-interception-service.js";
 import type { PtyDisposable, PtyModule, PtyProcess, PtySpawnOptions } from "./pty-loader.js";
 import { loadPtyModule } from "./pty-loader.js";
 import {
@@ -541,12 +548,86 @@ export interface PtyShellContext extends PtyBridgeStreams {
   readonly stderr: { write(data: string): void };
 }
 
+/**
+ * Canonical rank for rendering audit-gate failure reasons. The summary must not
+ * depend on the order failures happened to be recorded (service connections can
+ * complete concurrently), so reasons are rendered by this fixed rank. `satisfies
+ * Record<AuditGateFailureReason, number>` makes the map EXHAUSTIVE by
+ * construction: a future reason omitted here -- or an unknown key -- fails to
+ * typecheck, so a reason can never be silently dropped from the summary.
+ */
+const AUDIT_GATE_FAILURE_REASON_RANK = {
+  cwd_invalid: 0,
+  cwd_outside_repo: 1,
+  session_missing: 2,
+  session_changed: 3,
+  session_read_failed: 4,
+  append_failed: 5,
+  audit_hook_threw: 6,
+} as const satisfies Record<AuditGateFailureReason, number>;
+
+/**
+ * One-line summary written AFTER terminal restoration: the exact total plus the
+ * UNIQUE reasons in canonical order. NEVER includes a raw command line. Returns
+ * null when there is nothing to report. A post-audit transport (send) failure is
+ * NOT an audit failure and is never reported here.
+ */
+function formatAuditGateFailureSummary(
+  count: number,
+  reasons: ReadonlySet<AuditGateFailureReason>,
+): string | null {
+  if (count === 0) {
+    return null;
+  }
+  const orderedReasons = [...reasons].sort(
+    (left, right) => AUDIT_GATE_FAILURE_REASON_RANK[left] - AUDIT_GATE_FAILURE_REASON_RANK[right],
+  );
+  const singular = count === 1;
+  return (
+    `Note: ${count} accepted PTY ${singular ? "command was" : "commands were"} ` +
+    `not released because ${singular ? "its" : "their"} audit prerequisite ` +
+    `failed (${orderedReasons.join(", ")}).\n`
+  );
+}
+
+/**
+ * Bounded aggregator for audit-gate failures: an exact count plus the finite set
+ * of distinct reasons -- CONSTANT space, so a long-lived shell that repeatedly
+ * fails the gate cannot grow it. The state is private: a caller cannot bump the
+ * count without recording the reason, nor mutate the reason set, and `format()`
+ * sees a coherent snapshot.
+ */
+export interface AuditGateFailureSummary {
+  record(reason: AuditGateFailureReason): void;
+  format(): string | null;
+}
+
+export function createAuditGateFailureSummary(): AuditGateFailureSummary {
+  let count = 0;
+  const reasons = new Set<AuditGateFailureReason>();
+  return {
+    record(reason) {
+      count += 1;
+      reasons.add(reason);
+    },
+    format() {
+      return formatAuditGateFailureSummary(count, reasons);
+    },
+  };
+}
+
 /** Outcome of opening the one PTY session (the port RETURNS copy, never writes it). */
 export type PtyShellSessionOpen =
   | {
       readonly kind: "opened";
       readonly sessionId: string;
       readonly commandsPolicy: CommandsPolicyConfig | undefined;
+      /**
+       * The session-backed accepted-command audit gate: only the session knows
+       * its own repoRoot/sessionId, so it owns the ownership re-check + append.
+       * `runPtyShell` threads it into the interception install (Step 5c).
+       */
+      readonly auditAcceptedCommand: AuditAcceptedCommand;
     }
   | { readonly kind: "refused"; readonly exitCode: number; readonly stderrText: string };
 
@@ -591,6 +672,10 @@ export interface RunPtyShellDeps {
   readonly installInterception: (args: {
     readonly shell: { readonly path: string; readonly kind: ShellKind };
     readonly commandsPolicy: CommandsPolicyConfig | undefined;
+    /** The session-backed gate: no allow may be emitted without it (Step 5b/5c). */
+    readonly auditAcceptedCommand: AuditAcceptedCommand;
+    /** Best-effort SYNCHRONOUS audit-gate failure sink (buffered; summarized at teardown). */
+    readonly recordAuditGateFailure: (reason: AuditGateFailureReason) => void;
   }) => Promise<BashInterceptionInstallResult>;
   /** Working directory for the spawned PTY (`process.cwd()` in prod). */
   readonly cwd: string;
@@ -900,6 +985,9 @@ function displayChildExit(context: PtyShellContext, exit: PtyExitResult): void {
  */
 export async function runPtyShell(deps: RunPtyShellDeps): Promise<number> {
   const { context } = deps;
+  // Bounded audit-gate diagnostics for this run (constant space; summarized once
+  // after teardown). Declared up front so the install seam can record into it.
+  const auditFailures = createAuditGateFailureSummary();
 
   // The gate catches loader throws, but `hasInteractiveTty` / `resolveHostShell`
   // are injected and could throw -- runPtyShell is the outer boundary, so wrap
@@ -949,6 +1037,10 @@ export async function runPtyShell(deps: RunPtyShellDeps): Promise<number> {
   const installArgs = Object.freeze({
     shell: Object.freeze({ path: pre.shell.path, kind: pre.shell.kind }),
     commandsPolicy: opened.commandsPolicy,
+    auditAcceptedCommand: opened.auditAcceptedCommand,
+    recordAuditGateFailure: (reason: AuditGateFailureReason): void => {
+      auditFailures.record(reason);
+    },
   });
 
   let rawInstallResult: unknown;
@@ -1039,6 +1131,17 @@ export async function runPtyShell(deps: RunPtyShellDeps): Promise<number> {
   }
 
   writeStderrSafely(context, close.stderrText);
+
+  // Audit diagnostics LAST: every teardown step is done (bridge dispose restored
+  // raw mode + removed/paused stdin, interception disposed, session closed), so
+  // no service can still be recording and the terminal is safe to write to.
+  // Snapshot ONCE into an immutable string; best-effort -- a failing sink must
+  // change neither teardown nor the exit code, and nothing here echoes a command.
+  const auditSummary = auditFailures.format();
+  if (auditSummary !== null) {
+    writeStderrSafely(context, auditSummary);
+  }
+
   const closeFailed = close.exitCode !== 0;
   return driveFailed || interceptionFailed || closeFailed ? 1 : 0;
 }
@@ -1131,6 +1234,16 @@ export interface G3BackedPtyShellSessionOps {
   readonly loadActiveSessionLock: (
     repoRoot: string,
   ) => Promise<{ readonly session_id: string } | null>;
+  /** Core's single commands.log writer (D103.M.5) -- the audit append (Step 5c). */
+  readonly appendCommandsLogEntry: (input: {
+    readonly repoRoot: string;
+    readonly sessionId: string;
+    readonly at: string;
+    readonly cwd: string;
+    readonly argv: readonly string[];
+  }) => Promise<void>;
+  /** A FRESH audit timestamp per accepted command (deterministic under the test env). */
+  readonly resolveNow: () => string;
 }
 
 /** Real host binding of the session operations. */
@@ -1140,6 +1253,8 @@ const REAL_G3_SESSION_OPS: G3BackedPtyShellSessionOps = {
   startSessionOperation,
   endSessionOperation,
   loadActiveSessionLock,
+  appendCommandsLogEntry,
+  resolveNow: resolveNowForCliTimestamp,
 };
 
 /** Args for the G3-backed session adapter (ops default to the real host ops). */
@@ -1179,11 +1294,68 @@ export function createG3BackedPtyShellSession(
   const ops = args.ops ?? REAL_G3_SESSION_OPS;
   let state: SessionState = { kind: "not_opened" };
 
+  /**
+   * The session-backed accepted-command audit gate (Step 5c, D104.F/H/L). Order:
+   * sanitize -> no-op short-circuit -> validate/resolve the UNTRUSTED prompt-time
+   * cwd -> re-read the lock -> verify ownership -> append -- so a no-op line does
+   * NO filesystem or ownership work, and a meaningful command is never appended
+   * with an unvalidated cwd, with the ownership check immediately before the
+   * append. Every failure is a DISTINCT reason and fails closed (the service then
+   * emits no allow frame). A bad repoRoot makes resolveAuditedCwd THROW -- our
+   * bug, surfaced by the service's gate catch as audit_hook_threw, never blamed
+   * on the shell.
+   */
+  const buildAuditHook =
+    (repoRoot: string, sessionId: string): AuditAcceptedCommand =>
+    async ({ rawLine, cwd: reportedCwd }) => {
+      const argv = buildAuditedCommandArgv(rawLine);
+      if (argv === null) {
+        // Empty / control-only: allow execution, record nothing (core's argv[0]
+        // must be non-empty), and do no ownership/filesystem work.
+        return { ok: true };
+      }
+      const resolvedCwd = resolveAuditedCwd(reportedCwd, repoRoot);
+      if (!resolvedCwd.ok) {
+        return { ok: false, reason: resolvedCwd.reason };
+      }
+      let lock: { readonly session_id: string } | null;
+      try {
+        lock = await ops.loadActiveSessionLock(repoRoot);
+      } catch {
+        return { ok: false, reason: "session_read_failed" };
+      }
+      if (lock === null) {
+        return { ok: false, reason: "session_missing" };
+      }
+      if (lock.session_id !== sessionId) {
+        return { ok: false, reason: "session_changed" };
+      }
+      try {
+        // Timestamp resolution is part of constructing the append, so a clock
+        // failure is append_failed rather than an escaping throw.
+        await ops.appendCommandsLogEntry({
+          repoRoot,
+          sessionId,
+          at: ops.resolveNow(),
+          cwd: resolvedCwd.repoRelCwd,
+          argv,
+        });
+      } catch {
+        return { ok: false, reason: "append_failed" };
+      }
+      return { ok: true };
+    };
+
   const open = async (): Promise<PtyShellSessionOpen> => {
     if (state.kind === "opened") {
       // One-shot: a repeat open returns the already-open session (no re-start,
       // no config reload) -- the policy captured at start is returned verbatim.
-      return { kind: "opened", sessionId: state.sessionId, commandsPolicy: state.commandsPolicy };
+      return {
+        kind: "opened",
+        sessionId: state.sessionId,
+        commandsPolicy: state.commandsPolicy,
+        auditAcceptedCommand: buildAuditHook(state.repoRoot, state.sessionId),
+      };
     }
     if (state.kind === "closed") {
       return {
@@ -1267,7 +1439,12 @@ export function createG3BackedPtyShellSession(
     // Commit the opened state ONLY after startSessionOperation succeeds; any
     // earlier refusal left `state` untouched (not_opened), so a retry is possible.
     state = { kind: "opened", repoRoot, sessionId, commandsPolicy };
-    return { kind: "opened", sessionId, commandsPolicy };
+    return {
+      kind: "opened",
+      sessionId,
+      commandsPolicy,
+      auditAcceptedCommand: buildAuditHook(repoRoot, sessionId),
+    };
   };
 
   const close = async (): Promise<PtyShellSessionClose> => {

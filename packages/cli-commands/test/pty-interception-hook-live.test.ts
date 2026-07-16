@@ -23,13 +23,14 @@
 // Gated: POSIX + node-pty loadable + host shell resolves to Bash. Windows / no
 // node-pty / non-Bash environments skip (the guarded PTY is Bash-only).
 
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { PTY_INTERCEPTION_PROTOCOL_VERSION } from "../src/commands/pty-interception.js";
+import { resolveAuditedCwd } from "../src/commands/pty-interception-audit.js";
 import { generateBashInterceptionHook } from "../src/commands/pty-interception-hook.js";
 import { loadPtyModule, type PtyModule, type PtyProcess } from "../src/commands/pty-loader.js";
 import { resolveHostInteractiveShell } from "../src/commands/shell-pty.js";
@@ -67,20 +68,46 @@ function occurrences(text: string, needle: string): number {
   return text.split(needle).length - 1;
 }
 
+interface RecordedRequest {
+  readonly id: string;
+  readonly rawLine: string;
+  readonly cwd: string;
+}
+
+interface AllowParentOptions {
+  /**
+   * OPT-IN: when set, the parent applies the REAL cwd validator against this repo
+   * root and sends NO decision frame when it rejects. Omitted (the default) keeps
+   * the established blanket-allow behavior every other live-hook test relies on.
+   */
+  readonly validateCwdAgainst?: string;
+}
+
 interface AllowParent {
   readonly port: number;
+  requests: () => readonly RecordedRequest[];
+  /**
+   * Decision-frame write ATTEMPTS, incremented immediately BEFORE the write -- an
+   * attempt whose callback never runs (socket closed first) still counts, so
+   * "zero attempts" really proves the reject branch never tried to emit a frame,
+   * rather than merely that no write completed.
+   */
+  decisionFrameWriteAttempts: () => number;
   close(): Promise<void>;
 }
 
 /**
  * A minimal loopback "allow" parent: connection-per-request, reads one framed
- * request line, replies EXACTLY ONCE with the byte-exact allow decision for that
- * id, closes. Tracks live sockets so cleanup can destroy any lingering
- * connection before awaiting server close (a failed hook exchange must not hang
- * afterEach).
+ * request line, records it, replies EXACTLY ONCE with the byte-exact allow
+ * decision for that id, closes. Tracks live sockets so cleanup can destroy any
+ * lingering connection before awaiting server close (a failed hook exchange must
+ * not hang afterEach). With `validateCwdAgainst` it instead applies the REAL cwd
+ * validator and closes with NO frame when the cwd is rejected.
  */
-function startAllowParent(): Promise<AllowParent> {
+function startAllowParent(options: AllowParentOptions = {}): Promise<AllowParent> {
   const sockets = new Set<Socket>();
+  const recorded: RecordedRequest[] = [];
+  let decisionFrameWriteAttempts = 0;
   const server = createServer((socket: Socket) => {
     sockets.add(socket);
     socket.once("close", () => sockets.delete(socket));
@@ -99,14 +126,37 @@ function startAllowParent(): Promise<AllowParent> {
       replied = true;
       const line = buf.slice(0, nl);
       let id = "";
+      let cwd = "";
       try {
-        const rawId = (JSON.parse(line) as { id?: unknown }).id;
-        if (typeof rawId === "string") {
-          id = rawId;
+        const parsed = JSON.parse(line) as { id?: unknown; rawLine?: unknown; cwd?: unknown };
+        if (typeof parsed.id === "string") {
+          id = parsed.id;
         }
+        cwd = typeof parsed.cwd === "string" ? parsed.cwd : "";
+        recorded.push({
+          id,
+          rawLine: typeof parsed.rawLine === "string" ? parsed.rawLine : "",
+          cwd,
+        });
       } catch {
         // malformed request -> empty id -> mismatched allow -> hook skips (safe)
       }
+      // OPT-IN cwd validation. A rejected cwd -- or a validator that THROWS (a
+      // harness-config problem) -- closes with NO frame, identically; no
+      // exception may escape this server callback.
+      if (options.validateCwdAgainst !== undefined) {
+        let accepted = false;
+        try {
+          accepted = resolveAuditedCwd(cwd, options.validateCwdAgainst).ok;
+        } catch {
+          accepted = false;
+        }
+        if (!accepted) {
+          socket.end();
+          return;
+        }
+      }
+      decisionFrameWriteAttempts += 1;
       socket.end(
         `{"protocolVersion":${PTY_INTERCEPTION_PROTOCOL_VERSION},"id":"${id}","kind":"allow"}\n`,
       );
@@ -125,6 +175,8 @@ function startAllowParent(): Promise<AllowParent> {
       }
       resolveStart({
         port: addr.port,
+        requests: () => recorded,
+        decisionFrameWriteAttempts: () => decisionFrameWriteAttempts,
         close: () =>
           new Promise<void>((resolveClose) => {
             for (const socket of sockets) {
@@ -419,6 +471,127 @@ describe("interception hook -- interactive prompt + descriptor lifecycle (M G4 S
         child.write("exit\r");
         const finalExit = await childExit;
         expect(finalExit.exitCode).toBe(0);
+      } finally {
+        dataSub.dispose();
+        if (exitEvent === undefined) {
+          try {
+            child.kill();
+          } catch {
+            // best-effort cleanup only
+          }
+        }
+        await awaitCleanupExit(childExit);
+      }
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    "frames a newline-containing cwd as ONE protocol line, and never allows the invalid cwd",
+    async (ctx) => {
+      const host = await resolveHostBash();
+      if (host === null) {
+        ctx.skip();
+        return;
+      }
+
+      rcDir = await mkdtemp(join(tmpdir(), "vr-hook-cwd-"));
+      // A directory whose NAME contains a real newline (legal on POSIX, and
+      // impossible to type into `cd`, so the PTY is spawned directly inside it).
+      const newlineDir = join(rcDir, `nl${String.fromCharCode(0x0a)}dir`);
+      await mkdir(newlineDir);
+      // Bash sets $PWD from getcwd() at startup, which is PHYSICAL (e.g. macOS
+      // /tmp -> /private/tmp). Compare + validate against realpath'd paths so
+      // containment is satisfied and the NEWLINE is the sole rejection cause.
+      const expectedCwd = await realpath(newlineDir);
+      const activeParent = await startAllowParent({ validateCwdAgainst: await realpath(rcDir) });
+      parent = activeParent;
+
+      const hook = generateBashInterceptionHook({
+        nonce: NONCE,
+        endpoint: `127.0.0.1:${activeParent.port}`,
+      });
+      const rcPath = join(rcDir, "hook.rc");
+      await writeFile(rcPath, `PS1='${PROMPT}'\nPROMPT_COMMAND=\n${hook}`, { mode: 0o600 });
+
+      const child = host.pty.spawn(host.bashPath, ["--noprofile", "--rcfile", rcPath, "-i"], {
+        name: "xterm-color",
+        cols: 80,
+        rows: 24,
+        cwd: newlineDir,
+        env: { ...process.env, SHELL: host.bashPath },
+      });
+
+      const childExit = waitForPtyExit(child, EXIT_BACKSTOP_MS);
+      let exitEvent: { exitCode: number; signal: number | undefined } | undefined;
+      void childExit.then(
+        (event) => {
+          exitEvent = event;
+        },
+        () => {
+          // backstop/kill: surfaced by the per-phase deadlines, not here
+        },
+      );
+
+      let output = "";
+      let truncated = false;
+      const dataSub = child.onData((chunk) => {
+        output += chunk;
+        if (output.length > MAX_OUTPUT_CHARS) {
+          output = output.slice(-MAX_OUTPUT_CHARS);
+          truncated = true;
+        }
+      });
+      const diag = (): string =>
+        `${truncated ? `[output truncated to last ${MAX_OUTPUT_CHARS} chars]\n` : ""}${output}`;
+
+      try {
+        await waitFor(
+          () => output.includes(PROMPT) || exitEvent !== undefined,
+          PROMPT_DEADLINE_MS,
+          "initial guarded prompt",
+          diag,
+        );
+        if (!output.includes(PROMPT)) {
+          throw new Error(
+            `child exited (code ${exitEvent?.exitCode}) before the guarded prompt.\n${diag()}`,
+          );
+        }
+
+        child.write(`${MARKER_CMD}\r`);
+        await waitFor(
+          () => activeParent.requests().length >= 1 || exitEvent !== undefined,
+          COMMAND_DEADLINE_MS,
+          "the hook's interception request",
+          diag,
+        );
+
+        // ONE well-formed protocol line: the newline was escaped INSIDE the JSON
+        // string (never splitting the frame) and survives parsing as a real newline.
+        const received = activeParent.requests();
+        expect(received).toHaveLength(1);
+        expect(received[0]?.cwd).toBe(expectedCwd);
+        expect(received[0]?.cwd.includes("\n")).toBe(true);
+        expect(received[0]?.rawLine).toBe(MARKER_CMD);
+
+        // THE SECURITY ASSERTION: the reject branch never even ATTEMPTED a frame
+        // (proved directly, not inferred from the missing marker -- a malformed or
+        // block frame would also stop execution while breaking this contract).
+        expect(activeParent.decisionFrameWriteAttempts()).toBe(0);
+
+        // No frame -> the hook reads EOF -> fails closed: the command must NOT
+        // execute, and the shell must stay usable (prompt returns).
+        await waitFor(
+          () => occurrences(output, PROMPT) >= 2 || exitEvent !== undefined,
+          SECOND_PROMPT_DEADLINE_MS,
+          "returned prompt after the skipped command",
+          diag,
+        );
+        expect(output).not.toContain(MARKER_OUT);
+
+        child.write("exit\r");
+        const finalExit = await childExit;
+        expect(finalExit.exitCode).toBe(0); // natural teardown, not force-killed
       } finally {
         dataSub.dispose();
         if (exitEvent === undefined) {

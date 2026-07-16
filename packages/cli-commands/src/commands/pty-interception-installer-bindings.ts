@@ -5,13 +5,17 @@ import { randomBytes } from "node:crypto";
 
 import { type CommandsPolicyConfig, evaluateCommandPolicy } from "../command-guard.js";
 import { createInstalledInterceptionHandle } from "./pty-interception.js";
+import type { AuditAcceptedCommand } from "./pty-interception-audit.js";
 import { generateBashInterceptionHook } from "./pty-interception-hook.js";
 import { materializeBashHook } from "./pty-interception-hook-materializer.js";
 import type {
   InstallBashInterceptionDeps,
   InterceptionInstallDiagnostic,
 } from "./pty-interception-installer.js";
-import { createInterceptionService } from "./pty-interception-service.js";
+import {
+  type AuditGateFailureReason,
+  createInterceptionService,
+} from "./pty-interception-service.js";
 import { createLoopbackInterceptionTransport } from "./pty-interception-transport.js";
 import type { ShellKind } from "./shell-resolver.js";
 
@@ -39,6 +43,14 @@ export interface CreateBashInterceptionInstallerDepsArgs {
   readonly shell: { readonly path: string; readonly kind: ShellKind };
   /** The exact validated policy snapshot from session-open (passed through by identity). */
   readonly commandsPolicy: CommandsPolicyConfig | undefined;
+  /**
+   * The session-backed accepted-command audit gate (Step 5c), passed through by
+   * IDENTITY. Required: only the session can re-check its own ownership and
+   * append, so this layer never invents or wraps one.
+   */
+  readonly auditAcceptedCommand: AuditAcceptedCommand;
+  /** Best-effort SYNCHRONOUS audit-gate failure sink, passed through by identity. */
+  readonly recordAuditGateFailure: (reason: AuditGateFailureReason) => void;
   /** Optional sanitized diagnostic sink, passed through unchanged (never invented here). */
   readonly reportDiagnostic?: (diagnostic: InterceptionInstallDiagnostic) => void;
 }
@@ -97,6 +109,8 @@ export function createBashInterceptionInstallerDepsWithBindings(
   const shellPath = inputShell.path;
   const shellKind = inputShell.kind;
   const commandsPolicy = args.commandsPolicy;
+  const auditAcceptedCommand = args.auditAcceptedCommand;
+  const recordAuditGateFailure = args.recordAuditGateFailure;
   const reportDiagnostic = args.reportDiagnostic;
 
   const generateNonce = (): string => generateRandomBytes(NONCE_BYTES).toString("base64url");
@@ -107,6 +121,8 @@ export function createBashInterceptionInstallerDepsWithBindings(
     shell,
     commandsPolicy,
     evaluateCommandPolicy,
+    auditAcceptedCommand,
+    recordAuditGateFailure,
     generateNonce,
     createTransport,
     generateHook,

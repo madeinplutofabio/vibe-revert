@@ -153,9 +153,10 @@ __viberevert_ic_debug_trap() {
   else
     __viberevert_ic_seq=$(( \${__viberevert_ic_seq:-0} + 1 ))
     local __vr_id="$$-$__viberevert_ic_seq"
-    local __vr_escaped
-    if __vr_escaped=$(__viberevert_ic_json_escape "$__vr_line" 2>/dev/null); then
-      local __vr_request='{"protocolVersion":${protocolVersion},"nonce":"'"$__viberevert_ic_nonce"'","id":"'"$__vr_id"'","rawLine":"'"$__vr_escaped"'"}'
+    local __vr_escaped __vr_cwd
+    if __vr_escaped=$(__viberevert_ic_json_escape "$__vr_line" 2>/dev/null) &&
+      __vr_cwd=$(__viberevert_ic_json_escape "\${PWD-}" 2>/dev/null); then
+      local __vr_request='{"protocolVersion":${protocolVersion},"nonce":"'"$__viberevert_ic_nonce"'","id":"'"$__vr_id"'","rawLine":"'"$__vr_escaped"'","cwd":"'"$__vr_cwd"'"}'
       local __vr_expected='{"protocolVersion":${protocolVersion},"id":"'"$__vr_id"'","kind":"allow"}'
       local __vr_decision=
       __vr_decision=$(

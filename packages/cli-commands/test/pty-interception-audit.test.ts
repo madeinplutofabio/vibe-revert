@@ -15,6 +15,8 @@ import { describe, expect, it } from "vitest";
 import {
   buildAuditedCommandArgv,
   PTY_INTERCEPTION_AUDIT_MAX_LINE_LENGTH,
+  PTY_INTERCEPTION_MAX_CWD_LENGTH,
+  resolveAuditedCwd,
   sanitizeInterceptedCommandLine,
 } from "../src/commands/pty-interception-audit.js";
 
@@ -324,5 +326,172 @@ describe("buildAuditedCommandArgv -- D104.H representation", () => {
     expect(command.length).toBeGreaterThan(0);
     expect(hasControlCode(command)).toBe(false);
     expect(command.includes(RLO)).toBe(false);
+  });
+});
+
+describe("resolveAuditedCwd -- untrusted prompt-time cwd (lexical, matching run)", () => {
+  const REPO = "/repo";
+
+  it('resolves the repo root itself to "."', () => {
+    expect(resolveAuditedCwd("/repo", REPO)).toEqual({ ok: true, repoRelCwd: "." });
+  });
+
+  it('resolves a trailing-slash root to "." (posix.relative normalization)', () => {
+    expect(resolveAuditedCwd("/repo/", "/repo/")).toEqual({ ok: true, repoRelCwd: "." });
+  });
+
+  it("resolves a nested directory to its repo-relative POSIX path", () => {
+    expect(resolveAuditedCwd("/repo/packages/core", REPO)).toEqual({
+      ok: true,
+      repoRelCwd: "packages/core",
+    });
+  });
+
+  it("normalizes in-repo `.` / `..` segments", () => {
+    expect(resolveAuditedCwd("/repo/a/../b", REPO)).toEqual({ ok: true, repoRelCwd: "b" });
+    expect(resolveAuditedCwd("/repo/./a", REPO)).toEqual({ ok: true, repoRelCwd: "a" });
+  });
+
+  it("rejects a NORMALIZED escape as cwd_outside_repo", () => {
+    expect(resolveAuditedCwd("/repo/a/../../outside", REPO)).toEqual({
+      ok: false,
+      reason: "cwd_outside_repo",
+    });
+  });
+
+  it("rejects a sibling that merely shares the repo path prefix", () => {
+    expect(resolveAuditedCwd("/repo-other", REPO)).toEqual({
+      ok: false,
+      reason: "cwd_outside_repo",
+    });
+    expect(resolveAuditedCwd("/repo-other/pkg", REPO)).toEqual({
+      ok: false,
+      reason: "cwd_outside_repo",
+    });
+  });
+
+  it("rejects a parent or unrelated absolute root", () => {
+    expect(resolveAuditedCwd("/", REPO)).toEqual({ ok: false, reason: "cwd_outside_repo" });
+    expect(resolveAuditedCwd("/etc", REPO)).toEqual({ ok: false, reason: "cwd_outside_repo" });
+  });
+
+  it("accepts spaces, quotes, backslashes, Unicode, and a leading dash", () => {
+    expect(resolveAuditedCwd("/repo/my dir", REPO)).toEqual({ ok: true, repoRelCwd: "my dir" });
+    expect(resolveAuditedCwd(`/repo/it's "quoted"`, REPO)).toEqual({
+      ok: true,
+      repoRelCwd: `it's "quoted"`,
+    });
+    expect(resolveAuditedCwd("/repo/back\\slash", REPO)).toEqual({
+      ok: true,
+      repoRelCwd: "back\\slash",
+    });
+    expect(resolveAuditedCwd(`/repo/${CAFE}/${JP}`, REPO)).toEqual({
+      ok: true,
+      repoRelCwd: `${CAFE}/${JP}`,
+    });
+    expect(resolveAuditedCwd("/repo/-dash", REPO)).toEqual({ ok: true, repoRelCwd: "-dash" });
+  });
+
+  it("accepts a valid supplementary (astral) character", () => {
+    expect(resolveAuditedCwd(`/repo/${EMOJI}`, REPO)).toEqual({ ok: true, repoRelCwd: EMOJI });
+  });
+
+  it("accepts a symlink-LOOKING lexical path (no realpath -- consistent with run)", () => {
+    expect(resolveAuditedCwd("/repo/link/to/pkg", REPO)).toEqual({
+      ok: true,
+      repoRelCwd: "link/to/pkg",
+    });
+  });
+
+  it("rejects an empty or non-absolute-POSIX cwd as cwd_invalid", () => {
+    expect(resolveAuditedCwd("", REPO)).toEqual({ ok: false, reason: "cwd_invalid" });
+    expect(resolveAuditedCwd("relative/dir", REPO)).toEqual({ ok: false, reason: "cwd_invalid" });
+    expect(resolveAuditedCwd("C:\\repo", REPO)).toEqual({ ok: false, reason: "cwd_invalid" });
+  });
+
+  it("rejects a cwd containing ANY C0/DEL/C1 control code", () => {
+    // ALL_CONTROL_CODES is the full set of individual control characters; each is
+    // one code unit, so iterating by code point visits exactly one control each.
+    for (const ch of ALL_CONTROL_CODES) {
+      expect(resolveAuditedCwd(`/repo/a${ch}b`, REPO)).toEqual({
+        ok: false,
+        reason: "cwd_invalid",
+      });
+    }
+  });
+
+  it("rejects a cwd containing U+2028 / U+2029 (not C0/C1, still line-breaking)", () => {
+    for (const cp of [0x2028, 0x2029]) {
+      expect(resolveAuditedCwd(`/repo/a${String.fromCodePoint(cp)}b`, REPO)).toEqual({
+        ok: false,
+        reason: "cwd_invalid",
+      });
+    }
+  });
+
+  it("rejects a cwd containing any declared bidi/directional control", () => {
+    for (const bidi of ALL_BIDI_CONTROLS) {
+      expect(resolveAuditedCwd(`/repo/a${bidi}b`, REPO)).toEqual({
+        ok: false,
+        reason: "cwd_invalid",
+      });
+    }
+  });
+
+  it("rejects a cwd containing a lone surrogate (high or low)", () => {
+    expect(resolveAuditedCwd(`/repo/${String.fromCharCode(0xd800)}`, REPO)).toEqual({
+      ok: false,
+      reason: "cwd_invalid",
+    });
+    expect(resolveAuditedCwd(`/repo/${String.fromCharCode(0xdc00)}`, REPO)).toEqual({
+      ok: false,
+      reason: "cwd_invalid",
+    });
+  });
+
+  it("accepts exactly the length cap and rejects cap + 1", () => {
+    const base = "/repo/";
+    const pad = "a".repeat(PTY_INTERCEPTION_MAX_CWD_LENGTH - base.length);
+    const exact = `${base}${pad}`;
+    expect(exact.length).toBe(PTY_INTERCEPTION_MAX_CWD_LENGTH);
+    expect(resolveAuditedCwd(exact, REPO)).toEqual({ ok: true, repoRelCwd: pad });
+    expect(resolveAuditedCwd(`${exact}a`, REPO)).toEqual({ ok: false, reason: "cwd_invalid" });
+  });
+
+  it("honors an explicit maxLength", () => {
+    expect(resolveAuditedCwd("/repo/abc", REPO, { maxLength: 9 })).toEqual({
+      ok: true,
+      repoRelCwd: "abc",
+    });
+    expect(resolveAuditedCwd("/repo/abcd", REPO, { maxLength: 9 })).toEqual({
+      ok: false,
+      reason: "cwd_invalid",
+    });
+  });
+
+  it("THROWS on an invalid trusted maxLength (a caller bug is not shell input)", () => {
+    for (const bad of [
+      0,
+      -1,
+      1.5,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      Number.MAX_SAFE_INTEGER + 1,
+    ]) {
+      expect(() => resolveAuditedCwd("/repo/a", REPO, { maxLength: bad })).toThrow(RangeError);
+    }
+  });
+
+  it("THROWS on an unsafe or non-POSIX trusted repoRoot (never blamed on the shell)", () => {
+    expect(() => resolveAuditedCwd("/repo/a", "relative")).toThrow(TypeError);
+    expect(() => resolveAuditedCwd("/repo/a", "C:\\repo")).toThrow(TypeError); // wrong path domain
+    expect(() => resolveAuditedCwd("/repo/a", "/repo\x00")).toThrow(TypeError);
+    expect(() => resolveAuditedCwd("/repo/a", `/repo${String.fromCodePoint(0x2028)}`)).toThrow(
+      TypeError,
+    );
+    expect(() => resolveAuditedCwd("/repo/a", `/repo${RLO}`)).toThrow(TypeError);
+    expect(() => resolveAuditedCwd("/repo/a", `/repo${String.fromCharCode(0xd800)}`)).toThrow(
+      TypeError,
+    );
   });
 });
