@@ -25,13 +25,20 @@
 // (bash path, built entry, node-pty availability, initial prompt, executed
 // marker, returned prompt, exit code, no force-kill, no failure copy, no REPL
 // fallback) are the 4f release-gate evidence.
+//
+// A SECOND case (M G4 Step 5d) reuses the same prerequisites and fixture shape
+// to prove the audited-cwd PRODUCTION path: an interactive `cd` into a tricky
+// directory, the next accepted command audited with the exact prompt-time cwd,
+// and the trail read back through the production session APIs. Its precise
+// claim is stated on the case itself.
 
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { listSessions, loadSession } from "@viberevert/core";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { loadPtyModule, type PtyModule, type PtyProcess } from "../src/commands/pty-loader.js";
@@ -398,6 +405,237 @@ describe("viberevert shell --pty -- live PTY round-trip (M G4 Step 4f release ga
           }
         }
       }
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  // M G4 Step 5d. PRECISE CLAIM: a real interactive Bash command changes cwd;
+  // the next accepted command is audited through the production session/service
+  // path with the exact canonical prompt-time cwd; the append succeeds before
+  // release (the required audit gate sits before every allow frame -- strict
+  // ordering is unit-pinned; the marker EXECUTING is the live consequence that
+  // the production path traversed that gate); the command executes; the prompt
+  // returns; EOF produces natural teardown. Negative paths (malformed requests,
+  // append failure, shutdown races, ownership races, session replacement) are
+  // deliberately NOT re-proven here -- deterministic unit tests own them.
+  it(
+    "audits accepted commands with the exact prompt-time cwd through the production session path (M G4 Step 5d)",
+    async (ctx) => {
+      const prereq = await checkPrerequisites();
+      if (!prereq.ok) {
+        reportEvidence(`[shell --pty 5d cwd-audit] SKIP: ${prereq.reason}`);
+        ctx.skip();
+        return;
+      }
+
+      // Resolve the fixture root ONCE so the CLI's repo root and bash's startup
+      // getcwd() (both PHYSICAL) agree byte-for-byte even when the OS tmpdir is
+      // a symlink (macOS /tmp -> /private/tmp). Harness stabilization only --
+      // the production cwd contract stays lexical.
+      repoDir = await realpath(await mkdtemp(join(tmpdir(), "vr-pty-5d-")));
+      execFileSync("git", ["init", "-q", "-b", "main"], { cwd: repoDir });
+      execFileSync("git", ["config", "user.email", "smoke@example.test"], { cwd: repoDir });
+      execFileSync("git", ["config", "user.name", "smoke"], { cwd: repoDir });
+      await writeFile(join(repoDir, ".gitignore"), ".viberevert/\n");
+      await writeFile(join(repoDir, ".viberevert.yml"), "version: 1\n");
+      execFileSync("git", ["add", "."], { cwd: repoDir });
+      execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: repoDir });
+
+      // ONE directory name combining every "safe but tricky" filename class:
+      // leading dash (needs `cd --`), space, single quote, literal backslash,
+      // and a non-ASCII code point (e-acute, built from its code point so this
+      // source file stays ASCII-only). All legal POSIX filename bytes. None of
+      // these strings can contain the prompt token.
+      const trickyName = `-vr d'ir \\${String.fromCodePoint(0xe9)}`;
+      await mkdir(join(repoDir, trickyName));
+      // POSIX single-quoting: close, escaped literal quote, reopen ('\'').
+      const cdLine = `cd -- '${trickyName.replaceAll("'", `'\\''`)}'`;
+      const markerCmd = "echo VR_CWD5D_$((6*7))_ok";
+      const markerOut = "VR_CWD5D_42_ok";
+
+      // Baseline through the production reader: a fresh fixture has NO sessions,
+      // so the post-run state (one session, two entries) cannot be contaminated
+      // by pre-existing records.
+      expect((await listSessions(repoDir)).sessions).toHaveLength(0);
+
+      reportEvidence(
+        `[shell --pty 5d cwd-audit] RUN: bash=${prereq.bashPath} cliEntry=${CLI_ENTRY} node-pty=available`,
+      );
+
+      let output = "";
+      let truncated = false;
+      const appendOutput = (chunk: string): void => {
+        output += chunk;
+        if (output.length > MAX_OUTPUT_CHARS) {
+          output = output.slice(-MAX_OUTPUT_CHARS);
+          truncated = true;
+        }
+      };
+      const diag = (): string =>
+        `${truncated ? `[output truncated to last ${MAX_OUTPUT_CHARS} chars]\n` : ""}${output}`;
+
+      const child = prereq.pty.spawn(process.execPath, [CLI_ENTRY, "shell", "--pty"], {
+        name: "xterm-color",
+        cols: 80,
+        rows: 24,
+        cwd: repoDir,
+        env: { ...process.env, SHELL: prereq.bashPath },
+      });
+      let exitEvent: { exitCode: number; signal: number | undefined } | undefined;
+      const childExit = waitForPtyExit(child, CHILD_EXIT_BACKSTOP_MS);
+      void childExit.then(
+        (e) => {
+          exitEvent = e;
+        },
+        () => {
+          /* backstop timeout: surfaced by the phase/exit deadlines, not here */
+        },
+      );
+      const dataSub = child.onData(appendOutput);
+
+      // Set only if the cleanup backstop has to kill the child -- asserted after
+      // the finally: EOF teardown must never need it.
+      let forceKill = false;
+      let finalExitCode: number | undefined;
+
+      try {
+        // Phase 1: the guarded prompt.
+        await waitFor(
+          () => output.includes(PROMPT) || exitEvent !== undefined,
+          PROMPT_DEADLINE_MS,
+          "guarded prompt",
+          diag,
+        );
+        if (!output.includes(PROMPT)) {
+          throw new Error(
+            `[5d cwd-audit] child exited (code ${exitEvent?.exitCode}) before the guarded prompt.\n${diag()}`,
+          );
+        }
+        assertNoFailureCopy(output);
+
+        // Phase 2: `cd` is an ordinary accepted command -- audited at the repo
+        // root, allowed, executed. It prints nothing; the RETURNED prompt
+        // (counted from a per-phase snapshot, not a global total) signals
+        // completion.
+        const promptsBeforeCd = occurrenceCount(output, PROMPT);
+        child.write(`${cdLine}\r`);
+        await waitFor(
+          () => occurrenceCount(output, PROMPT) > promptsBeforeCd || exitEvent !== undefined,
+          MARKER_DEADLINE_MS,
+          "returned prompt after cd",
+          diag,
+        );
+        if (occurrenceCount(output, PROMPT) <= promptsBeforeCd) {
+          throw new Error(
+            `[5d cwd-audit] child exited (code ${exitEvent?.exitCode}) before the prompt returned after cd.\n${diag()}`,
+          );
+        }
+
+        // Phase 3: the marker, typed at the prompt INSIDE the tricky directory.
+        // Its OUTPUT (arithmetic-expanded) differs from the typed text, so a
+        // match proves execution -- the live consequence of the audit gate
+        // (including the commands.log append) having succeeded.
+        const promptsBeforeMarker = occurrenceCount(output, PROMPT);
+        child.write(`${markerCmd}\r`);
+        await waitFor(
+          () =>
+            (output.includes(markerOut) && occurrenceCount(output, PROMPT) > promptsBeforeMarker) ||
+            exitEvent !== undefined,
+          MARKER_DEADLINE_MS,
+          "executed marker in the tricky directory",
+          diag,
+        );
+        if (!output.includes(markerOut)) {
+          throw new Error(
+            `[5d cwd-audit] child exited (code ${exitEvent?.exitCode}) before the marker.\n${diag()}`,
+          );
+        }
+
+        // Phase 4: EOF -- not a command, never intercepted, never audited --
+        // keeps the accepted-command count at exactly two (`exit` would append
+        // a third entry; the valid-cwd `exit` path is already covered by the
+        // 4f case above). Await the exit PROMISE itself: when it resolves, the
+        // CLI process -- teardown and session closure included -- has
+        // terminated (the backstop rejection bounds a hang).
+        child.write("\x04");
+        const finalExit = await childExit;
+        exitEvent = finalExit;
+        finalExitCode = finalExit.exitCode;
+        expect(finalExit.exitCode).toBe(0);
+        assertNoFailureCopy(output);
+      } finally {
+        dataSub.dispose();
+        if (exitEvent === undefined) {
+          forceKill = true;
+          try {
+            child.kill();
+          } catch {
+            /* best-effort */
+          }
+        }
+      }
+      expect(forceKill).toBe(false);
+
+      // Discover and validate the owning session through the production session
+      // APIs, then read its referenced commands.log. v1 has no dedicated
+      // commands-log reader, so this test parses the referenced JSONL directly.
+      // loadSession schema-validates session.json and verifies its internal
+      // session_id, so both entries below are attributable to exactly this
+      // session. One session, zero warnings: no stale or replacement session
+      // exists.
+      const listed = await listSessions(repoDir);
+      expect(listed.warnings).toHaveLength(0);
+      expect(listed.sessions).toHaveLength(1);
+      const summary = listed.sessions[0];
+      if (summary === undefined) {
+        throw new Error("unreachable: exactly one session asserted above");
+      }
+      expect(summary.status).toBe("ended");
+      const state = await loadSession(summary.id, repoDir);
+      // Path safety is the production schema's guarantee, not this test's:
+      // SessionStateSchema pins `commands_log_path` as a safeStoredRelativePath
+      // (canonical relative POSIX -- forward slashes only, never absolute, no
+      // '.'/'..' segments; session-format schemas.ts), and loadSession parses
+      // through that schema before returning. The join below is the SAME idiom
+      // production appendCommandsLogEntry uses on the same loadSession-validated
+      // state (core session.ts).
+      const logRaw = await readFile(join(repoDir, ...state.commands_log_path.split("/")), "utf8");
+      const lines = logRaw.split("\n").filter((line) => line.length > 0);
+      // EXACTLY the two accepted commands -- no duplicates, no `exit`, no extras.
+      expect(lines).toHaveLength(2);
+      const entries = lines.map((line, index) => {
+        const value: unknown = JSON.parse(line);
+        if (value === null || typeof value !== "object" || Array.isArray(value)) {
+          throw new Error(`commands.log entry ${index + 1} is not an object`);
+        }
+        return value as {
+          readonly at?: unknown;
+          readonly cwd?: unknown;
+          readonly argv?: unknown;
+        };
+      });
+      // Entry 1: `cd`, audited at the repo root BEFORE the directory change.
+      expect(entries[0]?.argv).toEqual([cdLine]);
+      expect(entries[0]?.cwd).toBe(".");
+      // Entry 2: the marker, audited at the PROMPT-TIME cwd -- the canonical
+      // repo-relative POSIX form, byte-exact: leading dash, space, quote, and
+      // e-acute intact, and the literal backslash preserved as a FILENAME byte
+      // (never normalized into a "/" separator).
+      expect(entries[1]?.argv).toEqual([markerCmd]);
+      expect(entries[1]?.cwd).toBe(trickyName);
+      // The LOCKED commands.log timestamp contract (D102.F): core's
+      // appendCommandsLogEntry validates `at` against exactly this ISO-8601 UTC
+      // second-precision shape (session.ts COMMANDS_LOG_AT_RE) and REJECTS
+      // anything else -- this regex mirrors that production contract, it does
+      // not invent one. FILE ORDER is the append order; no wall-clock
+      // comparison.
+      for (const entry of entries) {
+        expect(entry.at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
+      }
+
+      reportEvidence(
+        `[shell --pty 5d cwd-audit] PASS: session=${summary.id} entries=2 cdCwd=. markerCwdLen=${trickyName.length} exitCode=${finalExitCode} forceKill=false`,
+      );
     },
     TEST_TIMEOUT_MS,
   );
