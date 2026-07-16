@@ -545,6 +545,10 @@ describe("interception hook -- interactive prompt + descriptor lifecycle (M G4 S
       const diag = (): string =>
         `${truncated ? `[output truncated to last ${MAX_OUTPUT_CHARS} chars]\n` : ""}${output}`;
 
+      // Set only if the cleanup backstop has to kill the child, i.e. the shell did
+      // NOT exit on its own -- asserted after the finally.
+      let forceKill = false;
+
       try {
         await waitFor(
           () => output.includes(PROMPT) || exitEvent !== undefined,
@@ -589,12 +593,35 @@ describe("interception hook -- interactive prompt + descriptor lifecycle (M G4 S
         );
         expect(output).not.toContain(MARKER_OUT);
 
+        // The `exit` BUILTIN is a command too: it passes through the same DEBUG
+        // trap and is also blocked while the cwd stays invalid. Pinned on purpose
+        // -- there is NO lifecycle exemption, and none may slip in unnoticed.
         child.write("exit\r");
-        const finalExit = await childExit;
-        expect(finalExit.exitCode).toBe(0); // natural teardown, not force-killed
+        await waitFor(
+          () => activeParent.requests().length >= 2 || exitEvent !== undefined,
+          COMMAND_DEADLINE_MS,
+          "the hook's interception request for the exit builtin",
+          diag,
+        );
+        await waitFor(
+          () => occurrences(output, PROMPT) >= 3 || exitEvent !== undefined,
+          SECOND_PROMPT_DEADLINE_MS,
+          "returned prompt after the skipped exit builtin",
+          diag,
+        );
+        // Exactly one more request, and STILL no decision frame ever attempted.
+        expect(activeParent.requests()).toHaveLength(2);
+        expect(activeParent.decisionFrameWriteAttempts()).toBe(0);
+
+        // EOF is NOT a command, so it is never intercepted -- the supported
+        // non-command way out of a shell whose audit prerequisite cannot be
+        // satisfied.
+        child.write("\x04");
+        await childExit; // resolves => the shell exited; no backstop timeout
       } finally {
         dataSub.dispose();
         if (exitEvent === undefined) {
+          forceKill = true;
           try {
             child.kill();
           } catch {
@@ -603,6 +630,9 @@ describe("interception hook -- interactive prompt + descriptor lifecycle (M G4 S
         }
         await awaitCleanupExit(childExit);
       }
+      // Natural teardown: the shell exited on EOF, so the cleanup backstop never
+      // had to force-kill it.
+      expect(forceKill).toBe(false);
     },
     TEST_TIMEOUT_MS,
   );
