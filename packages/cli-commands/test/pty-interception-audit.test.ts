@@ -375,15 +375,11 @@ describe("resolveAuditedCwd -- untrusted prompt-time cwd (lexical, matching run)
     expect(resolveAuditedCwd("/etc", REPO)).toEqual({ ok: false, reason: "cwd_outside_repo" });
   });
 
-  it("accepts spaces, quotes, backslashes, Unicode, and a leading dash", () => {
+  it("accepts spaces, quotes, Unicode, and a leading dash", () => {
     expect(resolveAuditedCwd("/repo/my dir", REPO)).toEqual({ ok: true, repoRelCwd: "my dir" });
     expect(resolveAuditedCwd(`/repo/it's "quoted"`, REPO)).toEqual({
       ok: true,
       repoRelCwd: `it's "quoted"`,
-    });
-    expect(resolveAuditedCwd("/repo/back\\slash", REPO)).toEqual({
-      ok: true,
-      repoRelCwd: "back\\slash",
     });
     expect(resolveAuditedCwd(`/repo/${CAFE}/${JP}`, REPO)).toEqual({
       ok: true,
@@ -394,6 +390,58 @@ describe("resolveAuditedCwd -- untrusted prompt-time cwd (lexical, matching run)
 
   it("accepts a valid supplementary (astral) character", () => {
     expect(resolveAuditedCwd(`/repo/${EMOJI}`, REPO)).toEqual({ ok: true, repoRelCwd: EMOJI });
+  });
+
+  // REPRESENTABILITY BOUNDARY (D102.F). commands.log stores the canonical
+  // repo-relative cwd in a cross-platform, forward-slash-only domain whose core
+  // validator rejects backslashes. A backslash is LEGAL in a POSIX filename, so
+  // this is a STORAGE-REPRESENTATION limit, not arbitrary character filtering --
+  // the accepted/rejected pair below makes that boundary explicit. Discovered
+  // live: the resolver used to accept a backslash that core then refused, so an
+  // affected command failed closed with a misleading `append_failed`.
+  it("rejects a repo-relative cwd containing a literal backslash as cwd_invalid", () => {
+    expect(resolveAuditedCwd("/repo/back\\slash", REPO)).toEqual({
+      ok: false,
+      reason: "cwd_invalid",
+    });
+    // Also when the backslash sits in a deeper segment of the stored tail.
+    expect(resolveAuditedCwd("/repo/pkg/na\\me/src", REPO)).toEqual({
+      ok: false,
+      reason: "cwd_invalid",
+    });
+  });
+
+  it("accepts a backslash confined to the SHARED absolute root prefix", () => {
+    // The backslash never reaches commands.log -- relativization discards the
+    // shared prefix -- so this cwd representation remains auditable when the
+    // backslash exists only in the shared absolute prefix. Representability is
+    // judged on the STORED value only.
+    expect(resolveAuditedCwd("/tmp/legal\\posix/repo/subdir", "/tmp/legal\\posix/repo")).toEqual({
+      ok: true,
+      repoRelCwd: "subdir",
+    });
+  });
+
+  it('resolves the root itself to "." even when the shared root contains a backslash', () => {
+    // The "." root marker is always representable; pins that a future refactor
+    // cannot regress into re-checking the ABSOLUTE input.
+    expect(resolveAuditedCwd("/tmp/legal\\posix/repo", "/tmp/legal\\posix/repo")).toEqual({
+      ok: true,
+      repoRelCwd: ".",
+    });
+  });
+
+  it("classifies an ESCAPING cwd that also contains a backslash as cwd_outside_repo", () => {
+    // CLASSIFICATION ORDER: containment is decided BEFORE representability, so
+    // an outside path is never mislabeled cwd_invalid.
+    expect(resolveAuditedCwd("/tmp/other\\dir", REPO)).toEqual({
+      ok: false,
+      reason: "cwd_outside_repo",
+    });
+    expect(resolveAuditedCwd("/repo/../out\\side", REPO)).toEqual({
+      ok: false,
+      reason: "cwd_outside_repo",
+    });
   });
 
   it("accepts a symlink-LOOKING lexical path (no realpath -- consistent with run)", () => {

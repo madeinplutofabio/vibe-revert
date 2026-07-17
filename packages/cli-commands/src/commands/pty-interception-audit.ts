@@ -254,10 +254,14 @@ export type ResolveAuditedCwdResult =
  * TRUSTED config (repoRoot / maxLength) THROWS -- our bug, surfaced through the
  * service's gate catch as audit_hook_threw, never blamed on the shell. UNTRUSTED
  * input returns: cwd_invalid (empty, over the code-unit bound, any C0/C1/DEL,
- * U+2028/9, bidi control, malformed UTF-16, or a non-absolute POSIX path);
- * cwd_outside_repo (lexically `..`, under `../`, or a different absolute root).
- * On success returns the normalized repo-relative POSIX cwd ("." for the repo
- * root). NEVER substitutes another directory.
+ * U+2028/9, bidi control, malformed UTF-16, a non-absolute POSIX path, or a
+ * resulting REPO-RELATIVE cwd containing a literal backslash -- legal in a POSIX
+ * filename but unrepresentable in the locked forward-slash-only commands.log
+ * path domain, D102.F); cwd_outside_repo (lexically `..`, under `../`, or a
+ * different absolute root). Containment is decided BEFORE representability, so
+ * a path outside the repo is never mislabeled cwd_invalid. On success returns
+ * the normalized repo-relative POSIX cwd ("." for the repo root). NEVER
+ * substitutes another directory.
  */
 export function resolveAuditedCwd(
   reportedCwd: string,
@@ -285,7 +289,24 @@ export function resolveAuditedCwd(
   if (posix.isAbsolute(rel) || rel === ".." || rel.startsWith("../")) {
     return { ok: false, reason: "cwd_outside_repo" };
   }
-  return { ok: true, repoRelCwd: rel === "" ? "." : rel };
+  const repoRelCwd = rel === "" ? "." : rel;
+
+  // REPRESENTABILITY (D102.F): commands.log stores the canonical repo-relative
+  // cwd, not the shell's absolute path. Core's appendCommandsLogEntry REJECTS a
+  // backslash in that stored value -- on Windows a backslash is a separator
+  // producers normalize away, so a stored one would be ambiguous (separator or
+  // filename byte?). A literal backslash is LEGAL in a POSIX filename but
+  // deliberately unsupported by that cross-platform representation. Reject it
+  // only when it SURVIVES into the stored value: a backslash in a shared
+  // absolute repo-root prefix is irrelevant because relativization removes it.
+  // Rejecting here -- before any ownership or storage work -- gives the honest
+  // reason (cwd_invalid) instead of a misleading append_failed from core.
+  // Validate exactly the string that would be persisted, not `rel`.
+  if (repoRelCwd.includes("\\")) {
+    return { ok: false, reason: "cwd_invalid" };
+  }
+
+  return { ok: true, repoRelCwd };
 }
 
 /**

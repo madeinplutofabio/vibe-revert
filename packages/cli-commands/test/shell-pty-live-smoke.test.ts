@@ -27,9 +27,10 @@
 // fallback) are the 4f release-gate evidence.
 //
 // A SECOND case (M G4 Step 5d) reuses the same prerequisites and fixture shape
-// to prove the audited-cwd PRODUCTION path: an interactive `cd` into a tricky
-// directory, the next accepted command audited with the exact prompt-time cwd,
-// and the trail read back through the production session APIs. Its precise
+// to prove the audited-cwd PRODUCTION path: an interactive `cd` into an awkward
+// but representable directory, the next accepted command audited with the exact
+// prompt-time cwd, and the owning session discovered and validated through the
+// production APIs before its referenced JSONL is parsed directly. Its precise
 // claim is stated on the case itself.
 
 import { execFileSync } from "node:child_process";
@@ -441,12 +442,16 @@ describe("viberevert shell --pty -- live PTY round-trip (M G4 Step 4f release ga
       execFileSync("git", ["add", "."], { cwd: repoDir });
       execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: repoDir });
 
-      // ONE directory name combining every "safe but tricky" filename class:
-      // leading dash (needs `cd --`), space, single quote, literal backslash,
-      // and a non-ASCII code point (e-acute, built from its code point so this
-      // source file stays ASCII-only). All legal POSIX filename bytes. None of
-      // these strings can contain the prompt token.
-      const trickyName = `-vr d'ir \\${String.fromCodePoint(0xe9)}`;
+      // A deliberately awkward but REPRESENTABLE POSIX directory name: leading
+      // dash (needs `cd --`), space, single quote, and a non-ASCII code point
+      // (e-acute, built from its code point so this source file stays
+      // ASCII-only). Deliberately NOT exhaustive over legal POSIX filenames --
+      // a literal backslash is legal on POSIX but unrepresentable in the locked
+      // forward-slash-only commands.log path domain (D102.F), so resolveAuditedCwd
+      // rejects it as cwd_invalid and such a directory stays fail-closed; that
+      // boundary is pinned in the resolver's unit tests, not here. None of these
+      // strings can contain the prompt token.
+      const trickyName = `-vr d'ir ${String.fromCodePoint(0xe9)}`;
       await mkdir(join(repoDir, trickyName));
       // POSIX single-quoting: close, escaped literal quote, reopen ('\'').
       const cdLine = `cd -- '${trickyName.replaceAll("'", `'\\''`)}'`;
@@ -619,8 +624,8 @@ describe("viberevert shell --pty -- live PTY round-trip (M G4 Step 4f release ga
       expect(entries[0]?.cwd).toBe(".");
       // Entry 2: the marker, audited at the PROMPT-TIME cwd -- the canonical
       // repo-relative POSIX form, byte-exact: leading dash, space, quote, and
-      // e-acute intact, and the literal backslash preserved as a FILENAME byte
-      // (never normalized into a "/" separator).
+      // e-acute all intact through the hook's JSON escape, the parser, and
+      // lexical resolution.
       expect(entries[1]?.argv).toEqual([markerCmd]);
       expect(entries[1]?.cwd).toBe(trickyName);
       // The LOCKED commands.log timestamp contract (D102.F): core's
