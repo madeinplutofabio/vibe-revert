@@ -39,9 +39,33 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the spawn (so ENOENT / failed-spawn commands are still logged); per-command
   child exits are displayed (`[exit: N]` / `[signal: SIG]`) and swallowed,
   never propagated to the shell's own exit code. Scoped teardown: the shell
-  never ends a session it does not own. No `node-pty` / native dependency --
-  the transparent terminal bridge is deferred to G4. See
-  `docs/shell-contract.md`.
+  never ends a session it does not own. This path has no `node-pty` / native
+  dependency; the transparent terminal bridge is the separate, experimental
+  `shell --pty` mode below. See `docs/shell-contract.md`.
+- `viberevert shell --pty` (**experimental**) -- an opt-in transparent PTY
+  bridge with **best-effort prompt-level guard interception**: runs a real
+  interactive Bash session inside `node-pty` (an optional dependency), bridges
+  stdin/stdout raw, and checks the command text Bash reports at its prompt
+  boundary against the same configured guard rules, using a single-element
+  command-text representation. Plain `viberevert shell` is unchanged and
+  remains the stable, native-dependency-free baseline.
+  **Interception coverage is best effort and PTY mode is not a sandbox** -- it
+  covers command events that traverse the installed Bash prompt hook, not
+  commands run inside already-running programs, nested processes, alternate
+  shells, or anything bypassing the hook. What it does intercept is
+  fail-closed: an **auditable interception** is never released unless policy
+  allows it and its audit prerequisite succeeds. `require_confirm` matches are
+  blocked, not prompted, in v1. Requires a real TTY and a resolvable Bash 4.1+;
+  unavailable via MCP; refuses non-zero rather than ever falling back silently
+  (a stock Windows box resolves PowerShell and refuses). Unlike the REPL, PTY
+  mode is not fixed-cwd: each auditable interception is recorded in
+  `commands.log` at its prompt-time directory, as a canonical
+  repository-relative path; some legal POSIX directory names (currently those
+  whose stored relative path contains a backslash) are not representable in
+  that format, and intercepted, auditable commands in them stay fail-closed.
+  If an audit prerequisite cannot be satisfied persistently, every intercepted,
+  auditable command stays blocked -- including `exit`; leave with Ctrl-D. See
+  `docs/pty-contract.md`.
 
 ## [0.7.1-beta.1] - 2026-07-04
 

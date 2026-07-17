@@ -32,9 +32,11 @@ spawn(argv[0], argv.slice(1), { stdio: "inherit", shell: false, cwd: invocationC
   explicitly: `sh -c "echo hi > out"` / `cmd /c "..."`. The guard then sees that
   literal command.
 - **No native terminal bridge.** There is no `node-pty`, no native dependency,
-  and no raw `process.stdin` / `process.stdout`. A fully transparent terminal
-  bridge (real interactive shell, keystroke-level passthrough) is deferred to
-  G4.
+  and no raw `process.stdin` / `process.stdout` in this path. A fully
+  transparent terminal bridge (real interactive shell, keystroke-level
+  passthrough) is a separate, experimental, opt-in mode --
+  [`viberevert shell --pty`](pty-contract.md). Plain `shell` remains the stable
+  baseline and is unaffected by it.
 - **Guarding applies to the TOP-LEVEL command only.** Commands a spawned child
   runs internally are never seen and never intercepted.
 - **Terminal output is NOT captured.** Children own the real terminal via
@@ -58,7 +60,7 @@ via `lines.next()`.
   spawn **closes** the iterator on Node 24 (the next read throws
   `readline was closed`). Child stdin is therefore best-effort in G3; transparent
   stdin hand-off to an interactive child is a G4 concern.
-- **EOF ends the loop.** `Ctrl+D` (or the input stream ending) terminates the
+- **EOF ends the loop.** `Ctrl-D` (or the input stream ending) terminates the
   REPL cleanly, exactly like typing `exit`.
 
 ## Tokenizing (v1)
@@ -84,7 +86,7 @@ normalizes to `rm -rf /`.
 
 ## Control words
 
-- The exact single-token line `exit`, or EOF / `Ctrl+D`, terminates the REPL.
+- The exact single-token line `exit`, or EOF / `Ctrl-D`, terminates the REPL.
 - `exit` is handled **before** guard/confirm policy: it is never tokenized for
   policy, spawned, or logged, and it **cannot be guarded** --
   `commands.guard: ["exit"]` does not trap you inside the shell. `exit 3` is not
@@ -224,14 +226,18 @@ cmd /c npm test
 
 The guard then sees the `cmd /c ...` form of the command.
 
-## Not in scope (deferred to G4)
+## Not in scope for `shell` (the guarded REPL)
 
-- **Transparent PTY / terminal bridge** -- a real interactive shell
-  (bash/zsh/pwsh) inside `node-pty` (ConPTY on Windows), raw
-  stdin<->pty<->stdout bridging, and keystroke-level interception. G3 is
-  deliberately PTY-free (pinned by the D103.M source-shape invariants); the
-  native-dependency and platform-split lift belongs in G4.
-- **`cd` / working-directory changes** -- the REPL is fixed-cwd in v1.
+- **Transparent PTY / terminal bridge** -- a real interactive shell inside
+  `node-pty`, raw stdin<->pty<->stdout bridging, and prompt-level interception.
+  This is deliberately **not** part of `shell`, which stays PTY-free (pinned by
+  the D103.M source-shape invariants). It ships separately and experimentally as
+  [`viberevert shell --pty`](pty-contract.md), Bash-only and gated on an
+  optional native dependency; see that contract for its coverage limits and
+  fail-closed behavior.
+- **`cd` / working-directory changes** -- the REPL is fixed-cwd in v1, and its
+  `commands.log` `cwd` is constant for the session. (PTY mode is not fixed-cwd:
+  it audits each command at its prompt-time directory.)
 - **Inner / nested command interception** -- never claimed. Guarding is
   top-level only.
 - **Guard globs / regex / path normalization** -- shared with `run`; a possible
