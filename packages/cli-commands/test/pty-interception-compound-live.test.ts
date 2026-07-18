@@ -21,14 +21,25 @@
 //     timeline: (1) every event is dispositioned, and an allow-frame WRITE is
 //     only STARTED after the synthetic audit record was appended; (2) no blocked
 //     event executes; (3) an audit-prerequisite failure never authorizes the
-//     command; (4) synthetic audit records correspond exactly, one-to-one by id,
-//     with interceptions for which the parent STARTED an allow-frame write --
-//     "parent-authorized", NOT "delivered" and NOT "executed".
+//     command; (4) synthetic audit records correspond exactly, one-to-one by the
+//     parent-owned connection identity, with interceptions for which the parent
+//     STARTED an allow-frame write -- "parent-authorized", NOT "delivered" and
+//     NOT "executed".
 //   * CHARACTERIZATION RECORD -- the observed Bash hook-event sequence and
 //     whether each command part executed are printed as CI evidence, NOT
 //     hard-asserted to a shape; constructs / event granularity may differ.
 //   * MAINTAINER VERDICT -- contract-consistent limitation vs safety
 //     contradiction vs insufficient evidence, recorded in the contract (H1c).
+//
+// CORRELATION IS CONNECTION-SCOPED. The parent assigns its OWN monotonic
+// connectionId per accepted request and keys the ledger, timeline, and audit
+// records by it. The client-supplied hook id (`$BASHPID-<seq>`) is validated
+// non-empty but is NEVER a uniqueness key: an early nested-construct run showed
+// `$$-<seq>` ids colliding across subshells (`$$` is the shell PID, unchanged in
+// a subshell, so the forked `<seq>` counter repeats), so the hook was hardened
+// to `$BASHPID-<seq>` AND this harness was reworked to trust only its own
+// connectionId. A same-hook-id collision is recorded as descriptive evidence,
+// never a protocol error.
 //
 // The parent's synthetic "accepted-command audit records" are an in-memory model
 // of the audit prerequisite, NOT the real commands.log; the real append path is
@@ -55,7 +66,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
-import { createServer, type Socket } from "node:net";
+import { connect, createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -108,7 +119,12 @@ function readProp<const Key extends string>(value: object, key: Key): unknown {
  *  allow-frame write started), "block" (policy blocked; no audit attempted),
  *  "close" (policy passed but the audit prerequisite FAILED; no write). */
 interface RecordedRequest {
-  readonly id: string;
+  /** Parent-owned monotonic correlation key. The ONLY identity the ledger,
+   *  timeline, and audit records join on -- never the client hook id. */
+  readonly connectionId: number;
+  /** The client-supplied hook request id (`$BASHPID-<seq>`). Validated
+   *  non-empty; descriptive only, NOT trusted as unique. */
+  readonly hookRequestId: string;
   readonly rawLine: string;
   readonly cwd: string;
   readonly decision: "allow" | "block" | "close";
@@ -120,7 +136,8 @@ interface RecordedRequest {
 }
 
 interface AuditRecord {
-  readonly id: string;
+  readonly connectionId: number;
+  readonly hookRequestId: string;
   readonly rawLine: string;
 }
 
@@ -133,11 +150,22 @@ type ParentTimelineEvent =
   | {
       readonly sequence: number;
       readonly kind: "disposition";
-      readonly id: string;
+      readonly connectionId: number;
+      readonly hookRequestId: string;
       readonly decision: "allow" | "block" | "close";
     }
-  | { readonly sequence: number; readonly kind: "audit_appended"; readonly id: string }
-  | { readonly sequence: number; readonly kind: "allow_frame_write_started"; readonly id: string };
+  | {
+      readonly sequence: number;
+      readonly kind: "audit_appended";
+      readonly connectionId: number;
+      readonly hookRequestId: string;
+    }
+  | {
+      readonly sequence: number;
+      readonly kind: "allow_frame_write_started";
+      readonly connectionId: number;
+      readonly hookRequestId: string;
+    };
 
 /** Distributive Omit so recordTimeline's input keeps each variant's
  *  discriminant-specific fields (e.g. `decision` on "disposition"). A plain
@@ -157,15 +185,28 @@ interface PolicyParentOptions {
   readonly failAudit?: (rawLine: string) => boolean;
 }
 
+/** A hook request id observed on MORE than one connection. Descriptive evidence
+ *  that the client id is not globally unique -- NEVER a protocol error. Expected
+ *  empty in a bounded single-process-tree run after the `$BASHPID` hardening,
+ *  but the harness must remain correct regardless (correlation is by
+ *  connectionId). */
+interface HookRequestIdCollision {
+  readonly hookRequestId: string;
+  readonly connectionIds: readonly number[];
+}
+
 interface PolicyParent {
   readonly port: number;
   requests: () => readonly RecordedRequest[];
   auditRecords: () => readonly AuditRecord[];
   timeline: () => readonly ParentTimelineEvent[];
   /** Envelope-level rejections (malformed JSON, bad protocolVersion/nonce,
-   *  missing/blank id, non-string rawLine/cwd, duplicate id). A protocol error
-   *  starts NO allow-frame write. Expected empty against a well-behaved hook. */
+   *  missing/blank id, non-string rawLine/cwd). A protocol error starts NO
+   *  allow-frame write. A REPEATED id is NOT an error -- it is recorded via
+   *  hookRequestIdCollisions. Expected empty against a well-behaved hook. */
   protocolErrors: () => readonly string[];
+  /** Hook ids seen on more than one connection (descriptive; expected empty). */
+  hookRequestIdCollisions: () => readonly HookRequestIdCollision[];
   close(): Promise<void>;
 }
 
@@ -186,7 +227,8 @@ function startPolicyParent(options: PolicyParentOptions = {}): Promise<PolicyPar
   const audits: AuditRecord[] = [];
   const timeline: ParentTimelineEvent[] = [];
   const protocolErrors: string[] = [];
-  const seenIds = new Set<string>();
+  const hookIdToConnectionIds = new Map<string, number[]>();
+  let nextConnectionId = 1;
   let nextSequence = 1;
 
   function recordTimeline(event: ParentTimelineEventInput): void {
@@ -255,20 +297,24 @@ function startPolicyParent(options: PolicyParentOptions = {}): Promise<PolicyPar
         socket.end();
         return;
       }
-      if (seenIds.has(id)) {
-        protocolErrors.push(`duplicate id ${id}`);
-        socket.end();
-        return;
+      // A REPEATED hook id is NOT a protocol error. Correlation is by the
+      // parent-owned connectionId; the collision is recorded as evidence.
+      const connectionId = nextConnectionId++;
+      const priorConnectionIds = hookIdToConnectionIds.get(id);
+      if (priorConnectionIds === undefined) {
+        hookIdToConnectionIds.set(id, [connectionId]);
+      } else {
+        priorConnectionIds.push(connectionId);
       }
-      seenIds.add(id);
       const rawLine = rawLineValue;
       const cwd = cwdValue;
 
       // (1) Policy disposition FIRST. A block never reaches the audit step.
       if (options.block?.(rawLine) ?? false) {
-        recordTimeline({ kind: "disposition", id, decision: "block" });
+        recordTimeline({ kind: "disposition", connectionId, hookRequestId: id, decision: "block" });
         recorded.push({
-          id,
+          connectionId,
+          hookRequestId: id,
           rawLine,
           cwd,
           decision: "block",
@@ -283,9 +329,10 @@ function startPolicyParent(options: PolicyParentOptions = {}): Promise<PolicyPar
       // (2) Audit prerequisite, reached ONLY after policy allowed.
       const auditSucceeded = !(options.failAudit?.(rawLine) ?? false);
       if (!auditSucceeded) {
-        recordTimeline({ kind: "disposition", id, decision: "close" });
+        recordTimeline({ kind: "disposition", connectionId, hookRequestId: id, decision: "close" });
         recorded.push({
-          id,
+          connectionId,
+          hookRequestId: id,
           rawLine,
           cwd,
           decision: "close",
@@ -302,11 +349,12 @@ function startPolicyParent(options: PolicyParentOptions = {}): Promise<PolicyPar
       // before the write begins -- no transient audit/timeline-without-request
       // state -- and the write-start timeline event immediately precedes the
       // actual write, preserving the exact ordering claim.
-      recordTimeline({ kind: "disposition", id, decision: "allow" });
-      audits.push({ id, rawLine });
-      recordTimeline({ kind: "audit_appended", id });
+      recordTimeline({ kind: "disposition", connectionId, hookRequestId: id, decision: "allow" });
+      audits.push({ connectionId, hookRequestId: id, rawLine });
+      recordTimeline({ kind: "audit_appended", connectionId, hookRequestId: id });
       recorded.push({
-        id,
+        connectionId,
+        hookRequestId: id,
         rawLine,
         cwd,
         decision: "allow",
@@ -314,9 +362,18 @@ function startPolicyParent(options: PolicyParentOptions = {}): Promise<PolicyPar
         auditSucceeded: true,
         allowFrameWriteStarted: true,
       });
-      recordTimeline({ kind: "allow_frame_write_started", id });
+      recordTimeline({ kind: "allow_frame_write_started", connectionId, hookRequestId: id });
+      // The reply echoes the client hook id as UNTRUSTED metadata: JSON.stringify
+      // so an id with quotes/backslashes/control chars can never produce a
+      // malformed frame. For the `$BASHPID-<seq>` ids that actually occur this is
+      // byte-identical to the allow frame the hook waits for; connectionId is
+      // internal to the parent and never leaves it.
       socket.end(
-        `{"protocolVersion":${PTY_INTERCEPTION_PROTOCOL_VERSION},"id":"${id}","kind":"allow"}\n`,
+        `${JSON.stringify({
+          protocolVersion: PTY_INTERCEPTION_PROTOCOL_VERSION,
+          id,
+          kind: "allow",
+        })}\n`,
       );
     });
     socket.on("error", () => {
@@ -338,6 +395,25 @@ function startPolicyParent(options: PolicyParentOptions = {}): Promise<PolicyPar
         auditRecords: () => audits,
         timeline: () => timeline,
         protocolErrors: () => protocolErrors,
+        // Deterministic for stable CI evidence: groups sorted by hookRequestId,
+        // each connectionIds array numerically sorted. Ordering only -- not a
+        // behavioural contract.
+        hookRequestIdCollisions: () =>
+          [...hookIdToConnectionIds.entries()]
+            .filter(([, connectionIds]) => connectionIds.length > 1)
+            .map(([hookRequestId, connectionIds]) => ({
+              hookRequestId,
+              connectionIds: [...connectionIds].sort((x, y) => x - y),
+            }))
+            .sort((a, b) => {
+              if (a.hookRequestId < b.hookRequestId) {
+                return -1;
+              }
+              if (a.hookRequestId > b.hookRequestId) {
+                return 1;
+              }
+              return 0;
+            }),
         close: () =>
           new Promise<void>((resolveClose) => {
             for (const socket of sockets) {
@@ -469,45 +545,69 @@ function requestsFor(active: PolicyParent, token: string): readonly RecordedRequ
 }
 
 /**
- * Machine assertions (1), (3), (4) on the parent's ledger + timeline, by request
- * IDENTITY. Proves: unique non-empty ids; no orphan timeline/audit ids; exactly
- * one disposition per request; for an allow, exactly one audit append and one
- * write-start, ORDERED disposition < audit_appended < allow_frame_write_started;
- * for a block, no audit and no write-start; for a close (audit-failed), no
- * append and no write-start; and synthetic audit records one-to-one by id with
- * interceptions for which an allow-frame write was started, none for one that
- * was not.
+ * Machine assertions (1), (3), (4) on the parent's ledger + timeline, keyed by
+ * the parent-owned CONNECTION identity (never the client hook id). Proves:
+ * unique connectionIds; every hook id non-empty (NOT required unique); no orphan
+ * timeline/audit connectionIds; exactly one disposition per request; for an
+ * allow, exactly one audit append and one write-start, ORDERED disposition <
+ * audit_appended < allow_frame_write_started; for a block, no audit and no
+ * write-start; for a close (audit-failed), no append and no write-start; and
+ * synthetic audit records one-to-one by connectionId with interceptions for
+ * which an allow-frame write was started, none for one that was not.
  */
 function assertLedgerConsistent(active: PolicyParent): void {
   const reqs = active.requests();
   const audits = active.auditRecords();
   const timeline = active.timeline();
 
-  const ids = reqs.map((r) => r.id);
-  expect(ids.every((id) => id.length > 0)).toBe(true);
-  expect(new Set(ids).size).toBe(ids.length);
-  expect(new Set(audits.map((a) => a.id)).size).toBe(audits.length);
+  // Hook ids must be non-empty but need NOT be unique; the parent-owned
+  // connectionId is the correlation key and MUST be unique.
+  expect(reqs.every((r) => r.hookRequestId.length > 0)).toBe(true);
+  const connectionIds = reqs.map((r) => r.connectionId);
+  expect(new Set(connectionIds).size).toBe(connectionIds.length);
+  expect(new Set(audits.map((a) => a.connectionId)).size).toBe(audits.length);
 
-  // No orphan timeline / audit ids: every one must belong to a recorded request.
-  const requestIds = new Set(ids);
+  // No orphan timeline / audit connectionIds: each must belong to a request.
+  const requestConnectionIds = new Set(connectionIds);
   for (const event of timeline) {
     expect(
-      requestIds.has(event.id),
-      `timeline event must belong to a recorded request: ${event.id}`,
+      requestConnectionIds.has(event.connectionId),
+      `timeline event must belong to a recorded request: connection ${event.connectionId}`,
     ).toBe(true);
   }
   for (const a of audits) {
-    expect(requestIds.has(a.id), `audit record must belong to a recorded request: ${a.id}`).toBe(
-      true,
-    );
+    expect(
+      requestConnectionIds.has(a.connectionId),
+      `audit record must belong to a recorded request: connection ${a.connectionId}`,
+    ).toBe(true);
   }
 
   for (const r of reqs) {
-    const tl = timeline.filter((e) => e.id === r.id);
+    const tl = timeline.filter((e) => e.connectionId === r.connectionId);
     const dispositions = tl.filter((e) => e.kind === "disposition");
     const appended = tl.filter((e) => e.kind === "audit_appended");
     const writeStarted = tl.filter((e) => e.kind === "allow_frame_write_started");
-    const auditForId = audits.filter((a) => a.id === r.id);
+    const auditForConnection = audits.filter((a) => a.connectionId === r.connectionId);
+
+    // Metadata consistency WITHIN a connection: the descriptive hookRequestId
+    // (and the audit rawLine) must never be crossed between connections, even
+    // though hookRequestId is not a join key.
+    for (const event of tl) {
+      expect(
+        event.hookRequestId,
+        `timeline hook id must match request for connection ${r.connectionId}`,
+      ).toBe(r.hookRequestId);
+    }
+    for (const audit of auditForConnection) {
+      expect(
+        audit.hookRequestId,
+        `audit hook id must match request for connection ${r.connectionId}`,
+      ).toBe(r.hookRequestId);
+      expect(
+        audit.rawLine,
+        `audit rawLine must match request for connection ${r.connectionId}`,
+      ).toBe(r.rawLine);
+    }
 
     expect(dispositions, `exactly one disposition for ${r.rawLine}`).toHaveLength(1);
 
@@ -518,7 +618,7 @@ function assertLedgerConsistent(active: PolicyParent): void {
       ).toBe(true);
       expect(appended).toHaveLength(1);
       expect(writeStarted).toHaveLength(1);
-      expect(auditForId).toHaveLength(1);
+      expect(auditForConnection).toHaveLength(1);
       // ORDER: dispositioned, then audit appended, then allow-frame write started.
       expect(dispositions[0]?.sequence ?? -1).toBeLessThan(appended[0]?.sequence ?? -1);
       expect(appended[0]?.sequence ?? -1).toBeLessThan(writeStarted[0]?.sequence ?? -1);
@@ -529,7 +629,7 @@ function assertLedgerConsistent(active: PolicyParent): void {
       ).toBe(true);
       expect(appended).toHaveLength(0);
       expect(writeStarted).toHaveLength(0);
-      expect(auditForId).toHaveLength(0);
+      expect(auditForConnection).toHaveLength(0);
     } else {
       expect(
         r.auditAttempted && !r.auditSucceeded && !r.allowFrameWriteStarted,
@@ -537,21 +637,25 @@ function assertLedgerConsistent(active: PolicyParent): void {
       ).toBe(true);
       expect(appended).toHaveLength(0);
       expect(writeStarted).toHaveLength(0);
-      expect(auditForId).toHaveLength(0);
+      expect(auditForConnection).toHaveLength(0);
     }
   }
 
-  const writeStartedIds = reqs.filter((r) => r.allowFrameWriteStarted).map((r) => r.id);
+  const writeStartedConnectionIds = reqs
+    .filter((r) => r.allowFrameWriteStarted)
+    .map((r) => r.connectionId);
   expect(
     audits
-      .map((a) => a.id)
+      .map((a) => a.connectionId)
       .slice()
-      .sort(),
-  ).toEqual(writeStartedIds.slice().sort());
-  const noWriteStarted = new Set(reqs.filter((r) => !r.allowFrameWriteStarted).map((r) => r.id));
+      .sort((x, y) => x - y),
+  ).toEqual(writeStartedConnectionIds.slice().sort((x, y) => x - y));
+  const noWriteStartedConnectionIds = new Set(
+    reqs.filter((r) => !r.allowFrameWriteStarted).map((r) => r.connectionId),
+  );
   for (const a of audits) {
     expect(
-      noWriteStarted.has(a.id),
+      noWriteStartedConnectionIds.has(a.connectionId),
       `no audit entry for a non-write-started request: ${a.rawLine}`,
     ).toBe(false);
   }
@@ -1483,8 +1587,9 @@ async function runConstructCase(
         requestMatcher: RequestMatcher;
         expectation: InterceptionExpectation;
         targetExecuted: boolean;
-        matchingRequestIds: string[];
-        outerContainingMarkerRequestIds: string[];
+        matchingConnectionIds: number[];
+        matchingHookRequestIds: string[];
+        outerContainingConnectionIds: number[];
         targetOutcome: CoverageOutcome;
         reviewPosture: ReviewPosture;
       }
@@ -1525,23 +1630,35 @@ async function runConstructCase(
       requestMatcher,
       expectation,
       targetExecuted,
-      matchingRequestIds: targetRequests.map((r) => r.id),
-      outerContainingMarkerRequestIds: activeParent
+      matchingConnectionIds: targetRequests.map((r) => r.connectionId),
+      matchingHookRequestIds: targetRequests.map((r) => r.hookRequestId),
+      outerContainingConnectionIds: activeParent
         .requests()
         .filter(
           (r) => r.rawLine.includes(targetMarker) && !matchesRequest(requestMatcher, r.rawLine),
         )
-        .map((r) => r.id),
+        .map((r) => r.connectionId),
       targetOutcome,
       reviewPosture,
     };
   }
 
+  // After the `$BASHPID` hardening no hook-id collision is expected within a
+  // single bounded process tree. The harness never DEPENDS on this (it keys on
+  // connectionId); asserting it here documents the post-fix expectation and
+  // surfaces PID reuse if it ever occurred, without weakening correctness.
+  const hookRequestIdCollisions = activeParent.hookRequestIdCollisions();
+  expect(
+    hookRequestIdCollisions,
+    `[${spec.caseId}] no hook-request-id collisions expected after $BASHPID`,
+  ).toEqual([]);
+
   const cwdEqualsExpectedDir = activeParent.requests().every((r) => r.cwd === expectedDir);
   const events = activeParent.requests().map((r) => {
-    const tl = activeParent.timeline().filter((e) => e.id === r.id);
+    const tl = activeParent.timeline().filter((e) => e.connectionId === r.connectionId);
     return {
-      id: r.id,
+      connectionId: r.connectionId,
+      hookRequestId: r.hookRequestId,
       cwd: r.cwd,
       rawLine: r.rawLine,
       decision: r.decision,
@@ -1566,6 +1683,7 @@ async function runConstructCase(
       target: targetEvidence,
       cwdEqualsExpectedDir,
       protocolErrors: activeParent.protocolErrors(),
+      hookRequestIdCollisions,
       forceKilled,
       events,
     })}`,
@@ -1591,4 +1709,128 @@ describe("compound PTY interception -- construct matrix on the PS1 driver (M H1b
       TEST_TIMEOUT_MS,
     );
   }
+});
+
+// ===========================================================================
+// M H1b -- ARCHITECTURAL REGRESSION: the parent correlates strictly by its own
+// connectionId and must stay correct when separate connections present the SAME
+// hook id. Deterministic (raw sockets, no PTY) so it runs on every platform,
+// including the Windows dev host. Locks the four invariants that outlive the
+// `$BASHPID` fix: (1) correlation is by parent connectionId, never the client
+// id; (2) the hook id is validated non-empty but NOT a uniqueness key; (3) two
+// same-id connections are independently dispositioned, get distinct
+// connectionIds, and each is answered on its own socket; (4) the id collision is
+// recorded as descriptive evidence, never a protocol error. The two exchanges
+// are initiated concurrently, but the test does NOT force both requests to
+// coexist in parent state at once (Node drains the `data` events serially); a
+// deterministic forced-overlap test would need an explicit parent barrier,
+// unnecessary unless production later gains shared in-flight request state.
+// ===========================================================================
+
+/** One raw request/response against the policy parent. Resolves with the reply
+ *  line (trailing newline stripped), or "" if the parent closed without a frame
+ *  (a block/close disposition). Never uses the PTY hook. */
+function exchange(port: number, request: Record<string, unknown>): Promise<string> {
+  return new Promise((resolveExchange, reject) => {
+    const socket = connect(port, "127.0.0.1", () => {
+      socket.write(`${JSON.stringify(request)}\n`);
+    });
+    let buf = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk: string) => {
+      buf += chunk;
+    });
+    socket.on("close", () => resolveExchange(buf.replace(/\n$/, "")));
+    socket.on("error", reject);
+    socket.setTimeout(5_000, () => {
+      socket.destroy();
+      reject(new Error("collision-regression exchange timed out"));
+    });
+  });
+}
+
+describe("policy parent -- same hook id, connection-scoped disposition (M H1b regression)", () => {
+  it("dispositions two same-hook-id connections independently, by parent connectionId", async () => {
+    // The block policy targets ONLY the second command's exact text. Capture a
+    // local const: `parent` is module-level and reassigned by afterEach, so
+    // TypeScript widens it back to `| undefined` after each await.
+    const activeParent = await startPolicyParent({
+      block: (rawLine) => rawLine === "echo VRC_COLLIDE_BLOCK_2",
+    });
+    parent = activeParent;
+    const collidingId = "1234-1"; // identical client id on BOTH connections
+
+    // The exchanges are initiated concurrently with the SAME id. The test does
+    // not depend on connection acceptance or disposition order; requests are
+    // identified by rawLine, never by connectionId assignment order. Array order
+    // (not resolution order) maps each reply to its request.
+    const [allowReply, blockReply] = await Promise.all([
+      exchange(activeParent.port, {
+        protocolVersion: PTY_INTERCEPTION_PROTOCOL_VERSION,
+        nonce: NONCE,
+        id: collidingId,
+        rawLine: "echo VRC_COLLIDE_ALLOW_1",
+        cwd: "/tmp/vr-collide",
+      }),
+      exchange(activeParent.port, {
+        protocolVersion: PTY_INTERCEPTION_PROTOCOL_VERSION,
+        nonce: NONCE,
+        id: collidingId,
+        rawLine: "echo VRC_COLLIDE_BLOCK_2",
+        cwd: "/tmp/vr-collide",
+      }),
+    ]);
+
+    // (4) A repeated id is NOT a protocol error.
+    expect(activeParent.protocolErrors()).toEqual([]);
+
+    // (3) Each connection is answered on its OWN socket: the allowed one gets an
+    // allow frame echoing the shared client id (asserted SEMANTICALLY, not by
+    // serialization order); the blocked one gets no frame (empty).
+    expect(JSON.parse(allowReply)).toEqual({
+      protocolVersion: PTY_INTERCEPTION_PROTOCOL_VERSION,
+      id: collidingId,
+      kind: "allow",
+    });
+    expect(blockReply).toBe("");
+
+    // (1)+(3) Two ledger entries: SAME hook id, DISTINCT parent connectionIds.
+    const reqs = activeParent.requests();
+    expect(reqs).toHaveLength(2);
+    expect(reqs.every((r) => r.hookRequestId === collidingId)).toBe(true);
+    expect(new Set(reqs.map((r) => r.connectionId)).size).toBe(2);
+
+    // Independently dispositioned by CONTENT, not by id.
+    const allowReq = reqs.find((r) => r.rawLine === "echo VRC_COLLIDE_ALLOW_1");
+    const blockReq = reqs.find((r) => r.rawLine === "echo VRC_COLLIDE_BLOCK_2");
+    expect(allowReq?.decision).toBe("allow");
+    expect(allowReq?.allowFrameWriteStarted).toBe(true);
+    expect(blockReq?.decision).toBe("block");
+    expect(blockReq?.allowFrameWriteStarted).toBe(false);
+
+    // (2) The collision is recorded as descriptive evidence: one group, the
+    // shared id, both connectionIds (getter returns them numerically sorted).
+    const collisions = activeParent.hookRequestIdCollisions();
+    expect(collisions).toHaveLength(1);
+    expect(collisions[0]?.hookRequestId).toBe(collidingId);
+    expect(collisions[0]?.connectionIds.slice().sort((x, y) => x - y)).toEqual(
+      reqs
+        .map((r) => r.connectionId)
+        .slice()
+        .sort((x, y) => x - y),
+    );
+
+    // The ledger stays internally consistent under the collision (keys on
+    // connectionId, so a repeated hook id does not break correspondence).
+    assertLedgerConsistent(activeParent);
+
+    reportEvidence(
+      `[compound-collision-regression] ${JSON.stringify({
+        hookRequestId: collidingId,
+        connectionIds: reqs.map((r) => r.connectionId),
+        decisions: reqs.map((r) => r.decision),
+        collisions,
+      })}`,
+    );
+  });
 });
