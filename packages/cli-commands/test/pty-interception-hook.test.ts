@@ -190,8 +190,17 @@ describe("generateBashInterceptionHook — wire protocol from the shared constan
     );
   });
 
-  it("derives the request id from the shell PID and monotonic sequence", () => {
-    expect(hook).toContain('local __vr_id="$$-$__viberevert_ic_seq"');
+  it("derives the request id from BASHPID and a monotonic sequence", () => {
+    // BASHPID, not $$: with `shopt -s extdebug` the DEBUG trap is INHERITED into
+    // subshells (command substitution, `( )`), where $$ stays the parent shell's
+    // PID and the sequence counter is a forked copy -- so `$$-<seq>` request ids
+    // COLLIDE across the parent shell and its subshells (observed live in M H1b1).
+    // $BASHPID is the subshell's own PID, eliminating that collision for the
+    // session. This is a robustness improvement, NOT a promise of permanent
+    // global uniqueness (PIDs are eventually reused, and a subshell still forks
+    // the counter); the wire protocol's real correlation boundary remains the
+    // individual socket exchange, one request and one same-connection reply.
+    expect(hook).toContain('local __vr_id="$BASHPID-$__viberevert_ic_seq"');
     // biome-ignore lint/suspicious/noTemplateCurlyInString: bash arithmetic expansion, not a JS template literal
     expect(hook).toContain("__viberevert_ic_seq=$(( ${__viberevert_ic_seq:-0} + 1 ))");
   });

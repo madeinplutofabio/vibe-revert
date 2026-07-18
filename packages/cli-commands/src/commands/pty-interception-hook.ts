@@ -152,7 +152,7 @@ __viberevert_ic_debug_trap() {
     __vr_status=1
   else
     __viberevert_ic_seq=$(( \${__viberevert_ic_seq:-0} + 1 ))
-    local __vr_id="$$-$__viberevert_ic_seq"
+    local __vr_id="$BASHPID-$__viberevert_ic_seq"
     local __vr_escaped __vr_cwd
     if __vr_escaped=$(__viberevert_ic_json_escape "$__vr_line" 2>/dev/null) &&
       __vr_cwd=$(__viberevert_ic_json_escape "\${PWD-}" 2>/dev/null); then
