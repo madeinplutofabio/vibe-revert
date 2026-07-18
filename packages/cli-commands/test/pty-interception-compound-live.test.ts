@@ -52,10 +52,12 @@
 // Linux CI run; another POSIX host (e.g. macOS with an eligible Bash) may also
 // run the test when node-pty and an eligible Bash are available.
 
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { PTY_INTERCEPTION_PROTOCOL_VERSION } from "../src/commands/pty-interception.js";
@@ -599,7 +601,7 @@ async function runGuardedSession(
     cols: 80,
     rows: 24,
     cwd: rcDir,
-    env: { ...process.env, SHELL: host.bashPath },
+    env: { ...process.env, SHELL: host.bashPath, VR_CASE_DIR: rcDir },
   });
 
   const childExit = waitForPtyExit(child, EXIT_BACKSTOP_MS);
@@ -815,4 +817,778 @@ describe("compound PTY interception -- `;` sequence characterization (M H1a)", (
     },
     TEST_TIMEOUT_MS,
   );
+});
+
+// ===========================================================================
+// M H1b1 -- construct matrix on the PS1 driver (data-driven). Reuses the H1a
+// policy parent + ledger machinery. Complete PS1 inputs only; PS2/continuation
+// constructs are H1b2.
+//
+// POLICY TARGETING vs MARKER IDENTITY: a marker's output token is used only for
+// EXECUTION evidence. Policy (block / audit-fail) selects requests by an EXACT
+// (trim-normalized) match of the inner simple command -- NOT by textual token
+// containment. For nested constructs the outer `$BASH_COMMAND` (a function
+// definition, a subshell, a substitution's outer echo, a loop) may itself
+// contain the inner token; matching by containment would block the OUTER and
+// hide the exact coverage question. The target's SAFETY verdict is derived from
+// the matcher; token containment stays descriptive coverage evidence
+// (outerContainingMarkerRequestIds).
+// ===========================================================================
+
+type InterceptionExpectation =
+  | "must_surface" // reachable top-level simple command (&& / || element)
+  | "may_be_unreached" // shell control flow may skip it (native short-circuit)
+  | "coverage_under_characterization"; // Bash evaluates it, but the hook may not inherit
+
+/** Positive/negative control for a marker's execution. `characterize` records
+ *  the observed value without asserting -- used for deny/audit-fail markers,
+ *  whose safety is governed by the matcher-based target verdict. */
+type ExecutionExpectation = "must_execute" | "must_not_execute" | "characterize";
+
+type MatchingAuthorization = "none" | "all_authorized" | "some_not_authorized";
+
+type CoverageOutcome =
+  | "intercepted_authorized_executed"
+  | "intercepted_authorized_not_observed_executing"
+  | "intercepted_blocked_not_executed"
+  | "intercepted_blocked_but_executed" // the ONLY safety contradiction
+  | "not_intercepted_not_executed" // native short-circuit / unreached / outer-prevented
+  | "executed_without_matching_interception"; // coverage gap -> H1c verdict input
+
+type ReviewPosture =
+  | "contract_consistent"
+  | "coverage_gap"
+  | "safety_contradiction"
+  | "insufficient_evidence";
+
+function classifyMarker(authorization: MatchingAuthorization, executed: boolean): CoverageOutcome {
+  if (authorization === "none") {
+    return executed ? "executed_without_matching_interception" : "not_intercepted_not_executed";
+  }
+  if (authorization === "all_authorized") {
+    return executed
+      ? "intercepted_authorized_executed"
+      : "intercepted_authorized_not_observed_executing";
+  }
+  return executed ? "intercepted_blocked_but_executed" : "intercepted_blocked_not_executed";
+}
+
+function deriveReviewPosture(
+  outcome: CoverageOutcome,
+  expectation: InterceptionExpectation,
+): ReviewPosture {
+  if (outcome === "intercepted_blocked_but_executed") {
+    return "safety_contradiction";
+  }
+  if (outcome === "executed_without_matching_interception") {
+    return "coverage_gap";
+  }
+  if (outcome === "not_intercepted_not_executed") {
+    return expectation === "may_be_unreached" ? "contract_consistent" : "insufficient_evidence";
+  }
+  return "contract_consistent";
+}
+
+/** Trim-only normalization. Deliberately does NOT collapse internal whitespace,
+ *  strip quotes, or parse shell syntax. */
+function normalizeRawLine(rawLine: string): string {
+  return rawLine.trim();
+}
+
+/** Exact-only. Containment matching was intentionally removed: for nested
+ *  constructs it cannot distinguish an inner interception from an outer event
+ *  that merely contains the inner token. */
+interface RequestMatcher {
+  readonly kind: "exact";
+  readonly rawLine: string;
+}
+
+function matchesRequest(matcher: RequestMatcher, rawLine: string): boolean {
+  return normalizeRawLine(rawLine) === normalizeRawLine(matcher.rawLine);
+}
+
+function authorizationOf(requests: readonly RecordedRequest[]): MatchingAuthorization {
+  if (requests.length === 0) {
+    return "none";
+  }
+  return requests.every((r) => r.allowFrameWriteStarted) ? "all_authorized" : "some_not_authorized";
+}
+
+type MarkerExecution =
+  | { readonly kind: "output"; readonly out: string }
+  | { readonly kind: "fsSentinel"; readonly file: string };
+
+interface MarkerSpec {
+  readonly label: string;
+  readonly token: string;
+  readonly execution: MarkerExecution;
+  readonly expectation: ExecutionExpectation;
+}
+
+type ConstructMode =
+  | { readonly kind: "allow-all" }
+  | {
+      readonly kind: "block";
+      readonly targetMarker: string;
+      readonly requestMatcher: RequestMatcher;
+      readonly expectation: InterceptionExpectation;
+    }
+  | {
+      readonly kind: "audit-fail";
+      readonly targetMarker: string;
+      readonly requestMatcher: RequestMatcher;
+      readonly expectation: InterceptionExpectation;
+    };
+
+interface ConstructCase {
+  readonly caseId: string;
+  readonly inputs: readonly string[];
+  readonly markers: readonly MarkerSpec[];
+  readonly mode: ConstructMode;
+}
+
+interface RuntimeMeta {
+  readonly bashVersion: string;
+  readonly bashVersionError: string | null;
+  readonly bashPath: string;
+  readonly nodeVersion: string;
+  readonly platform: string;
+}
+
+function readRuntimeMeta(host: { bashPath: string }): RuntimeMeta {
+  let bashVersion = "unknown";
+  let bashVersionError: string | null = null;
+  try {
+    bashVersion = execFileSync(
+      host.bashPath,
+      ["--noprofile", "--norc", "-c", 'printf %s "$BASH_VERSION"'],
+      { encoding: "utf8", env: { ...process.env, BASH_ENV: "" } },
+    ).trim();
+    if (bashVersion.length === 0) {
+      bashVersionError = "empty $BASH_VERSION";
+    }
+  } catch (err) {
+    bashVersionError = err instanceof Error ? err.message : String(err);
+  }
+  return {
+    bashVersion,
+    bashVersionError,
+    bashPath: host.bashPath,
+    nodeVersion: process.version,
+    platform: `${process.platform}-${process.arch}`,
+  };
+}
+
+const CASES: readonly ConstructCase[] = [
+  {
+    caseId: "and-allow",
+    inputs: ["echo VRC_AND_A_$((20+22)) && echo VRC_AND_B_$((20+23))"],
+    markers: [
+      {
+        label: "A",
+        token: "VRC_AND_A_",
+        execution: { kind: "output", out: "VRC_AND_A_42" },
+        expectation: "must_execute",
+      },
+      {
+        label: "B",
+        token: "VRC_AND_B_",
+        execution: { kind: "output", out: "VRC_AND_B_43" },
+        expectation: "must_execute",
+      },
+    ],
+    mode: { kind: "allow-all" },
+  },
+  {
+    caseId: "and-deny",
+    inputs: ["echo VRC_AND2_A_$((20+22)) && echo VRC_AND2_B_$((20+23))"],
+    markers: [
+      {
+        label: "A",
+        token: "VRC_AND2_A_",
+        execution: { kind: "output", out: "VRC_AND2_A_42" },
+        expectation: "characterize",
+      },
+      {
+        label: "B",
+        token: "VRC_AND2_B_",
+        execution: { kind: "output", out: "VRC_AND2_B_43" },
+        expectation: "characterize",
+      },
+    ],
+    mode: {
+      kind: "block",
+      targetMarker: "VRC_AND2_B_",
+      requestMatcher: { kind: "exact", rawLine: "echo VRC_AND2_B_$((20+23))" },
+      expectation: "must_surface",
+    },
+  },
+  {
+    caseId: "or-allow",
+    inputs: ["echo VRC_OR_A_$((20+22)) || echo VRC_OR_B_$((20+23))"],
+    markers: [
+      {
+        label: "A",
+        token: "VRC_OR_A_",
+        execution: { kind: "output", out: "VRC_OR_A_42" },
+        expectation: "must_execute",
+      },
+      {
+        label: "B",
+        token: "VRC_OR_B_",
+        execution: { kind: "output", out: "VRC_OR_B_43" },
+        expectation: "must_not_execute",
+      },
+    ],
+    mode: { kind: "allow-all" },
+  },
+  {
+    caseId: "or-deny-reachable",
+    inputs: ["false || echo VRC_ORD_DENY_$((20+23))"],
+    markers: [
+      {
+        label: "DENY",
+        token: "VRC_ORD_DENY_",
+        execution: { kind: "output", out: "VRC_ORD_DENY_43" },
+        expectation: "characterize",
+      },
+    ],
+    mode: {
+      kind: "block",
+      targetMarker: "VRC_ORD_DENY_",
+      requestMatcher: { kind: "exact", rawLine: "echo VRC_ORD_DENY_$((20+23))" },
+      expectation: "must_surface",
+    },
+  },
+  {
+    caseId: "or-deny-unreached",
+    inputs: ["echo VRC_ORU_A_$((20+22)) || echo VRC_ORU_DENY_$((20+23))"],
+    markers: [
+      {
+        label: "A",
+        token: "VRC_ORU_A_",
+        execution: { kind: "output", out: "VRC_ORU_A_42" },
+        expectation: "characterize",
+      },
+      {
+        label: "DENY",
+        token: "VRC_ORU_DENY_",
+        execution: { kind: "output", out: "VRC_ORU_DENY_43" },
+        expectation: "characterize",
+      },
+    ],
+    mode: {
+      kind: "block",
+      targetMarker: "VRC_ORU_DENY_",
+      requestMatcher: { kind: "exact", rawLine: "echo VRC_ORU_DENY_$((20+23))" },
+      expectation: "may_be_unreached",
+    },
+  },
+  {
+    caseId: "pipe-allow",
+    inputs: ['touch "$VR_CASE_DIR/VRC_PIPE_INNER_42.sentinel" | cat'],
+    markers: [
+      {
+        label: "INNER",
+        token: "VRC_PIPE_INNER_",
+        execution: { kind: "fsSentinel", file: "VRC_PIPE_INNER_42.sentinel" },
+        expectation: "must_execute",
+      },
+    ],
+    mode: { kind: "allow-all" },
+  },
+  {
+    caseId: "pipe-deny",
+    inputs: ['touch "$VR_CASE_DIR/VRC_PIPE2_INNER_42.sentinel" | cat'],
+    markers: [
+      {
+        label: "INNER",
+        token: "VRC_PIPE2_INNER_",
+        execution: { kind: "fsSentinel", file: "VRC_PIPE2_INNER_42.sentinel" },
+        expectation: "characterize",
+      },
+    ],
+    mode: {
+      kind: "block",
+      targetMarker: "VRC_PIPE2_INNER_",
+      requestMatcher: {
+        kind: "exact",
+        rawLine: 'touch "$VR_CASE_DIR/VRC_PIPE2_INNER_42.sentinel"',
+      },
+      expectation: "coverage_under_characterization",
+    },
+  },
+  {
+    caseId: "subst-allow",
+    inputs: ["echo VRC_SUBST_OUTER_$((20+22))_cap=$(echo VRC_SUBST_INNER_$((20+23)))"],
+    markers: [
+      {
+        label: "OUTER",
+        token: "VRC_SUBST_OUTER_",
+        execution: { kind: "output", out: "VRC_SUBST_OUTER_42_cap=" },
+        expectation: "must_execute",
+      },
+      {
+        label: "INNER",
+        token: "VRC_SUBST_INNER_",
+        execution: { kind: "output", out: "_cap=VRC_SUBST_INNER_43" },
+        expectation: "must_execute",
+      },
+    ],
+    mode: { kind: "allow-all" },
+  },
+  {
+    caseId: "subst-deny",
+    inputs: ["echo VRC_SUBST2_OUTER_$((20+22))_cap=$(echo VRC_SUBST2_INNER_$((20+23)))"],
+    markers: [
+      {
+        label: "OUTER",
+        token: "VRC_SUBST2_OUTER_",
+        execution: { kind: "output", out: "VRC_SUBST2_OUTER_42_cap=" },
+        expectation: "characterize",
+      },
+      {
+        label: "INNER",
+        token: "VRC_SUBST2_INNER_",
+        execution: { kind: "output", out: "_cap=VRC_SUBST2_INNER_43" },
+        expectation: "characterize",
+      },
+    ],
+    mode: {
+      kind: "block",
+      targetMarker: "VRC_SUBST2_INNER_",
+      requestMatcher: { kind: "exact", rawLine: "echo VRC_SUBST2_INNER_$((20+23))" },
+      expectation: "coverage_under_characterization",
+    },
+  },
+  {
+    caseId: "subshell-allow",
+    inputs: ["( echo VRC_SUB_A_$((20+22)); echo VRC_SUB_B_$((20+23)) )"],
+    markers: [
+      {
+        label: "A",
+        token: "VRC_SUB_A_",
+        execution: { kind: "output", out: "VRC_SUB_A_42" },
+        expectation: "must_execute",
+      },
+      {
+        label: "B",
+        token: "VRC_SUB_B_",
+        execution: { kind: "output", out: "VRC_SUB_B_43" },
+        expectation: "must_execute",
+      },
+    ],
+    mode: { kind: "allow-all" },
+  },
+  {
+    caseId: "subshell-deny",
+    inputs: ["( echo VRC_SUB2_A_$((20+22)); echo VRC_SUB2_B_$((20+23)) )"],
+    markers: [
+      {
+        label: "A",
+        token: "VRC_SUB2_A_",
+        execution: { kind: "output", out: "VRC_SUB2_A_42" },
+        expectation: "characterize",
+      },
+      {
+        label: "B",
+        token: "VRC_SUB2_B_",
+        execution: { kind: "output", out: "VRC_SUB2_B_43" },
+        expectation: "characterize",
+      },
+    ],
+    mode: {
+      kind: "block",
+      targetMarker: "VRC_SUB2_B_",
+      requestMatcher: { kind: "exact", rawLine: "echo VRC_SUB2_B_$((20+23))" },
+      expectation: "coverage_under_characterization",
+    },
+  },
+  {
+    caseId: "function-allow",
+    inputs: ["vr_h1_func_a(){ echo VRC_FUNC_BODY_$((20+22)); }", "vr_h1_func_a"],
+    markers: [
+      {
+        label: "BODY",
+        token: "VRC_FUNC_BODY_",
+        execution: { kind: "output", out: "VRC_FUNC_BODY_42" },
+        expectation: "must_execute",
+      },
+    ],
+    mode: { kind: "allow-all" },
+  },
+  {
+    caseId: "function-deny",
+    inputs: ["vr_h1_func_b(){ echo VRC_FUNC2_BODY_$((20+22)); }", "vr_h1_func_b"],
+    markers: [
+      {
+        label: "BODY",
+        token: "VRC_FUNC2_BODY_",
+        execution: { kind: "output", out: "VRC_FUNC2_BODY_42" },
+        expectation: "characterize",
+      },
+    ],
+    mode: {
+      kind: "block",
+      targetMarker: "VRC_FUNC2_BODY_",
+      requestMatcher: { kind: "exact", rawLine: "echo VRC_FUNC2_BODY_$((20+22))" },
+      expectation: "coverage_under_characterization",
+    },
+  },
+  {
+    caseId: "loop-allow",
+    inputs: ["for i in 1 2; do echo VRC_LOOP_BODY_$((20+22)); done"],
+    markers: [
+      {
+        label: "BODY",
+        token: "VRC_LOOP_BODY_",
+        execution: { kind: "output", out: "VRC_LOOP_BODY_42" },
+        expectation: "must_execute",
+      },
+    ],
+    mode: { kind: "allow-all" },
+  },
+  {
+    caseId: "loop-deny",
+    inputs: ["for i in 1 2; do echo VRC_LOOP2_BODY_$((20+22)); done"],
+    markers: [
+      {
+        label: "BODY",
+        token: "VRC_LOOP2_BODY_",
+        execution: { kind: "output", out: "VRC_LOOP2_BODY_42" },
+        expectation: "characterize",
+      },
+    ],
+    mode: {
+      kind: "block",
+      targetMarker: "VRC_LOOP2_BODY_",
+      requestMatcher: { kind: "exact", rawLine: "echo VRC_LOOP2_BODY_$((20+22))" },
+      expectation: "coverage_under_characterization",
+    },
+  },
+  {
+    caseId: "andmid-deny",
+    inputs: ["echo VRC_AM_A_$((20+22)) && echo VRC_AM_MID_$((20+23)) && echo VRC_AM_C_$((20+24))"],
+    markers: [
+      {
+        label: "A",
+        token: "VRC_AM_A_",
+        execution: { kind: "output", out: "VRC_AM_A_42" },
+        expectation: "characterize",
+      },
+      {
+        label: "MID",
+        token: "VRC_AM_MID_",
+        execution: { kind: "output", out: "VRC_AM_MID_43" },
+        expectation: "characterize",
+      },
+      {
+        label: "C",
+        token: "VRC_AM_C_",
+        execution: { kind: "output", out: "VRC_AM_C_44" },
+        expectation: "characterize",
+      },
+    ],
+    mode: {
+      kind: "block",
+      targetMarker: "VRC_AM_MID_",
+      requestMatcher: { kind: "exact", rawLine: "echo VRC_AM_MID_$((20+23))" },
+      expectation: "must_surface",
+    },
+  },
+  {
+    caseId: "auditfail-and",
+    inputs: ["true && echo VRC_AF_TARGET_$((20+22))"],
+    markers: [
+      {
+        label: "TARGET",
+        token: "VRC_AF_TARGET_",
+        execution: { kind: "output", out: "VRC_AF_TARGET_42" },
+        expectation: "characterize",
+      },
+    ],
+    mode: {
+      kind: "audit-fail",
+      targetMarker: "VRC_AF_TARGET_",
+      requestMatcher: { kind: "exact", rawLine: "echo VRC_AF_TARGET_$((20+22))" },
+      expectation: "must_surface",
+    },
+  },
+  {
+    caseId: "auditfail-subst",
+    inputs: ["echo VRC_AFS_OUTER_$((20+22))_cap=$(echo VRC_AFS_INNER_$((20+23)))"],
+    markers: [
+      {
+        label: "OUTER",
+        token: "VRC_AFS_OUTER_",
+        execution: { kind: "output", out: "VRC_AFS_OUTER_42_cap=" },
+        expectation: "characterize",
+      },
+      {
+        label: "INNER",
+        token: "VRC_AFS_INNER_",
+        execution: { kind: "output", out: "_cap=VRC_AFS_INNER_43" },
+        expectation: "characterize",
+      },
+    ],
+    mode: {
+      kind: "audit-fail",
+      targetMarker: "VRC_AFS_INNER_",
+      requestMatcher: { kind: "exact", rawLine: "echo VRC_AFS_INNER_$((20+23))" },
+      expectation: "coverage_under_characterization",
+    },
+  },
+];
+
+// Collection-time guards: unique caseIds and unique fs-sentinel filenames.
+{
+  const caseIds = CASES.map((c) => c.caseId);
+  if (new Set(caseIds).size !== caseIds.length) {
+    throw new Error(`duplicate caseId in H1b1 CASES: ${caseIds.join(", ")}`);
+  }
+  const sentinels = CASES.flatMap((c) => c.markers)
+    .map((m) => m.execution)
+    .filter((e): e is { kind: "fsSentinel"; file: string } => e.kind === "fsSentinel")
+    .map((e) => e.file);
+  if (new Set(sentinels).size !== sentinels.length) {
+    throw new Error(`duplicate fs-sentinel filename in H1b1 CASES: ${sentinels.join(", ")}`);
+  }
+}
+
+async function runConstructCase(
+  host: { pty: PtyModule; bashPath: string },
+  meta: RuntimeMeta,
+  spec: ConstructCase,
+): Promise<void> {
+  const caseKey = spec.caseId.toUpperCase().replace(/-/g, "_");
+  const usabilityToken = `VRC_${caseKey}_USABLE_`;
+  const usabilityOut = `${usabilityToken}42_ok`;
+  const usabilityCmd = `echo ${usabilityToken}$((6*7))_ok`;
+
+  // Case-spec validation (fails clearly BEFORE spawning Bash).
+  const tokens = spec.markers.map((m) => m.token);
+  expect(new Set(tokens).size, `[${spec.caseId}] marker tokens must be unique`).toBe(tokens.length);
+  for (const m of spec.markers) {
+    if (m.execution.kind === "output") {
+      expect(
+        m.execution.out.includes(m.token),
+        `[${spec.caseId}] ${m.label} out must contain its token`,
+      ).toBe(true);
+      expect(
+        m.execution.out,
+        `[${spec.caseId}] ${m.label} out must differ from the typed token`,
+      ).not.toBe(m.token);
+    } else {
+      expect(m.execution.file, `[${spec.caseId}] ${m.label} sentinel must be a basename`).toBe(
+        basename(m.execution.file),
+      );
+    }
+  }
+  let parentOpts: PolicyParentOptions = {};
+  if (spec.mode.kind !== "allow-all") {
+    const { targetMarker, requestMatcher, expectation } = spec.mode;
+    expect(
+      tokens.includes(targetMarker),
+      `[${spec.caseId}] targetMarker must be a case marker token`,
+    ).toBe(true);
+    expect(
+      normalizeRawLine(requestMatcher.rawLine).length,
+      `[${spec.caseId}] exact matcher non-empty`,
+    ).toBeGreaterThan(0);
+    expect(
+      spec.inputs.some((inp) => inp.includes(requestMatcher.rawLine)),
+      `[${spec.caseId}] exact matcher must appear in an input`,
+    ).toBe(true);
+    expect(
+      spec.inputs.every(
+        (inp) => normalizeRawLine(inp) !== normalizeRawLine(requestMatcher.rawLine),
+      ),
+      `[${spec.caseId}] exact matcher must be a proper part, not the whole construct`,
+    ).toBe(true);
+    expect(
+      matchesRequest(requestMatcher, usabilityCmd),
+      `[${spec.caseId}] matcher must not match the usability probe`,
+    ).toBe(false);
+    if (expectation === "must_surface") {
+      const joined = spec.inputs.join(" ; ");
+      expect(
+        joined.includes("false &&") || joined.includes("true ||"),
+        `[${spec.caseId}] must_surface target not behind a short-circuit`,
+      ).toBe(false);
+    }
+    parentOpts =
+      spec.mode.kind === "block"
+        ? { block: (rawLine) => matchesRequest(requestMatcher, rawLine) }
+        : { failAudit: (rawLine) => matchesRequest(requestMatcher, rawLine) };
+  }
+
+  const activeParent = await startPolicyParent(parentOpts);
+  parent = activeParent;
+  const { output, forceKilled } = await runGuardedSession(host, activeParent, [
+    ...spec.inputs,
+    usabilityCmd,
+  ]);
+  const caseDir = rcDir;
+  const expectedDir = await realpath(caseDir);
+
+  expect(activeParent.protocolErrors(), `[${spec.caseId}] no protocol errors`).toEqual([]);
+  expect(forceKilled, `[${spec.caseId}] no forced cleanup`).toBe(false);
+  assertLedgerConsistent(activeParent);
+
+  const executedOf = (m: MarkerSpec): boolean =>
+    m.execution.kind === "output"
+      ? output.includes(m.execution.out)
+      : existsSync(join(caseDir, m.execution.file));
+
+  // Positive/negative execution controls (proves allow-all constructs are valid
+  // and reachable; deny/audit-fail markers are `characterize`).
+  for (const m of spec.markers) {
+    const executed = executedOf(m);
+    if (m.expectation === "must_execute") {
+      expect(executed, `[${spec.caseId}] positive-control marker ${m.label} must execute`).toBe(
+        true,
+      );
+    } else if (m.expectation === "must_not_execute") {
+      expect(executed, `[${spec.caseId}] marker ${m.label} must not execute`).toBe(false);
+    }
+  }
+
+  // Descriptive per-marker (token-based) coverage evidence -- NOT the safety verdict.
+  const markerEvidence = spec.markers.map((m) => ({
+    label: m.label,
+    token: m.token,
+    expectation: m.expectation,
+    executed: executedOf(m),
+    tokenOutcome: classifyMarker(
+      authorizationOf(activeParent.requests().filter((r) => r.rawLine.includes(m.token))),
+      executedOf(m),
+    ),
+  }));
+
+  // Usability (distinct token, always allowed): proves the shell is alive AND
+  // interception is still active.
+  const usabilityOutcome = classifyMarker(
+    authorizationOf(activeParent.requests().filter((r) => r.rawLine.includes(usabilityToken))),
+    output.includes(usabilityOut),
+  );
+  expect(
+    usabilityOutcome,
+    `[${spec.caseId}] usability probe must be intercepted, authorized, and executed`,
+  ).toBe("intercepted_authorized_executed");
+
+  // Target safety verdict -- MATCHER-based (never token containment).
+  let targetEvidence:
+    | {
+        targetMarker: string;
+        requestMatcher: RequestMatcher;
+        expectation: InterceptionExpectation;
+        targetExecuted: boolean;
+        matchingRequestIds: string[];
+        outerContainingMarkerRequestIds: string[];
+        targetOutcome: CoverageOutcome;
+        reviewPosture: ReviewPosture;
+      }
+    | undefined;
+  if (spec.mode.kind !== "allow-all") {
+    const { targetMarker, requestMatcher, expectation } = spec.mode;
+    const targetMarkerSpec = spec.markers.find((m) => m.token === targetMarker);
+    if (targetMarkerSpec === undefined) {
+      throw new Error(`[${spec.caseId}] unreachable: targetMarker has no marker spec`);
+    }
+    const targetRequests = activeParent
+      .requests()
+      .filter((r) => matchesRequest(requestMatcher, r.rawLine));
+    const targetExecuted = executedOf(targetMarkerSpec);
+    const targetOutcome = classifyMarker(authorizationOf(targetRequests), targetExecuted);
+    const reviewPosture = deriveReviewPosture(targetOutcome, expectation);
+
+    expect(
+      targetOutcome,
+      `[${spec.caseId}] target: a blocked/closed event must not execute`,
+    ).not.toBe("intercepted_blocked_but_executed");
+    if (expectation === "must_surface") {
+      expect(
+        targetRequests.length,
+        `[${spec.caseId}] must_surface target must surface`,
+      ).toBeGreaterThanOrEqual(1);
+    }
+    const requiredDecision = spec.mode.kind === "block" ? "block" : "close";
+    for (const r of targetRequests) {
+      expect(
+        r.decision,
+        `[${spec.caseId}] surfaced target must be dispositioned ${requiredDecision}`,
+      ).toBe(requiredDecision);
+    }
+
+    targetEvidence = {
+      targetMarker,
+      requestMatcher,
+      expectation,
+      targetExecuted,
+      matchingRequestIds: targetRequests.map((r) => r.id),
+      outerContainingMarkerRequestIds: activeParent
+        .requests()
+        .filter(
+          (r) => r.rawLine.includes(targetMarker) && !matchesRequest(requestMatcher, r.rawLine),
+        )
+        .map((r) => r.id),
+      targetOutcome,
+      reviewPosture,
+    };
+  }
+
+  const cwdEqualsExpectedDir = activeParent.requests().every((r) => r.cwd === expectedDir);
+  const events = activeParent.requests().map((r) => {
+    const tl = activeParent.timeline().filter((e) => e.id === r.id);
+    return {
+      id: r.id,
+      cwd: r.cwd,
+      rawLine: r.rawLine,
+      decision: r.decision,
+      writeStarted: r.allowFrameWriteStarted,
+      timeline: {
+        disposition: tl.find((e) => e.kind === "disposition")?.sequence,
+        auditAppended: tl.find((e) => e.kind === "audit_appended")?.sequence,
+        allowFrameWriteStarted: tl.find((e) => e.kind === "allow_frame_write_started")?.sequence,
+      },
+    };
+  });
+
+  reportEvidence(
+    `[compound-characterization] ${JSON.stringify({
+      ...meta,
+      caseId: spec.caseId,
+      mode: spec.mode.kind,
+      inputMode: "complete",
+      inputs: spec.inputs,
+      markerEvidence,
+      usabilityOutcome,
+      target: targetEvidence,
+      cwdEqualsExpectedDir,
+      protocolErrors: activeParent.protocolErrors(),
+      forceKilled,
+      events,
+    })}`,
+  );
+}
+
+describe("compound PTY interception -- construct matrix on the PS1 driver (M H1b1)", () => {
+  for (const spec of CASES) {
+    it(
+      spec.caseId,
+      async (ctx) => {
+        const host = await resolveHostBash();
+        if (host === null) {
+          reportEvidence(
+            `[compound-characterization] SKIP ${spec.caseId}: not a POSIX Bash + node-pty host`,
+          );
+          ctx.skip();
+          return;
+        }
+        const meta = readRuntimeMeta(host);
+        await runConstructCase(host, meta, spec);
+      },
+      TEST_TIMEOUT_MS,
+    );
+  }
 });
