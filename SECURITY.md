@@ -5,7 +5,18 @@
 If you find a security vulnerability in VibeRevert, please report it
 **privately** to **fabio@madeinpluto.com** instead of opening a public issue.
 
-You should expect an initial acknowledgement within a few business days.
+We aim to acknowledge a report within 5 business days. This is an acknowledgment
+target, not a remediation deadline.
+
+Please avoid public disclosure while we investigate and coordinate a reasonable
+remediation or disclosure timeline. If we cannot agree on a timeline, please give
+us reasonable advance notice before publication.
+
+## Supported versions
+
+VibeRevert is currently a beta. Security fixes are developed against the latest
+published beta. Earlier beta versions may not receive separate fixes; users
+should expect to upgrade to the latest beta.
 
 ## Scope
 
@@ -22,6 +33,9 @@ Out of scope:
   respective vendors.
 - Issues that depend on a malicious local user with write access to the
   repository or `.viberevert/` directory.
+
+For the full security posture, trust boundaries, and what VibeRevert does and
+does not defend against, see [THREAT_MODEL.md](THREAT_MODEL.md).
 
 ## Rollback limitations (not a vulnerability)
 
