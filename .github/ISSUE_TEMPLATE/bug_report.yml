@@ -1,0 +1,63 @@
+name: Bug report
+description: Report a reproducible problem in VibeRevert (not a security vulnerability).
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Thanks for reporting. For **security vulnerabilities**, do not use this
+        form -- follow the private process in
+        [SECURITY.md](https://github.com/madeinplutofabio/vibe-revert/blob/main/SECURITY.md).
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug, including the exact command you ran.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What you expected to happen instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Minimal, exact steps. Include a repository or config snippet if relevant.
+      placeholder: |
+        1. viberevert start ...
+        2. ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: VibeRevert version
+      description: Output of `viberevert --version`.
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: OS and platform
+      description: e.g. Ubuntu 24.04, macOS 14 (arm64), Windows 11.
+    validations:
+      required: true
+  - type: input
+    id: node
+    attributes:
+      label: Node.js version
+      description: Output of `node --version`.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output or logs
+      description: Paste terminal output or error messages. Redact anything sensitive.
+      render: shell
+    validations:
+      required: false
