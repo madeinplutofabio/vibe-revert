@@ -118,12 +118,116 @@ expand, or normalize that text.
   necessarily the complete line the user typed. One submitted pipeline,
   conditional chain, function invocation, or other construct may therefore cause
   multiple interceptions -- and so multiple policy decisions and multiple audit
-  entries -- but compound and multiline behavior is not currently a tested
-  compatibility promise.
+  entries. Compound and multiline behavior is **characterized under the tested
+  configuration** (see **Compound and multiline characterization**), but the
+  specific event shape is not promised across every Bash/Readline version.
 - **Policy evaluates the text Bash reports, not a semantically expanded
   command.** How Bash populates that value for aliases, shell functions, and
   expansions is Bash's behavior; VibeRevert neither normalizes it nor tests
   those cases.
+
+## Compound and multiline characterization
+
+*A submitted line is not always one interception.* The hook fires per **simple
+command** (`$BASH_COMMAND`) at the `DEBUG`-trap boundary, so one typed pipeline,
+chain, substitution, subshell, function, loop, or continuation may produce one
+or several interceptions -- each an independent policy decision and audit entry.
+This section records what was **characterized on Linux CI** under the production
+hook and what is **not** promised. It is the tested elaboration of **What gets
+intercepted, exactly**; it does not widen coverage or turn Bash's event
+granularity into a cross-version promise.
+
+*Evidence note: characterized on Linux CI in July 2026 using Bash
+`5.2.21(1)-release` and Node `22.23.1`. These versions identify the observed
+run; they do not define the supported-version contract.*
+
+### Guaranteed contract
+
+Independent of how a construct decomposes into events:
+
+- Each surfaced simple command is dispositioned **before** it may run. The
+  mandatory, fail-closed rules this contract states above apply **per
+  interception** -- a blocked or audit-failed command MUST NOT run, and an allow
+  MUST follow a successful audit. Compound structure grants **no** exemption.
+- Correctness is **connection-scoped**: each interception is one loopback
+  exchange, dispositioned on its own connection. It MUST NOT depend on the
+  client-supplied request id being globally unique.
+- Coverage remains **best effort** (a construct MAY decompose differently on
+  another Bash/Readline build); disposition remains **fail-closed**.
+
+### Observed Bash 5.2 behavior
+
+*Informative -- the tested decomposition, not a promise.*
+
+- **Simple-command boundary.** `;`, `&&`, `||`, pipelines (`|`), command
+  substitutions (`$(...)`), subshells (`( ... )`), function bodies, and loop
+  bodies each surfaced at the simple-command boundary; each surfaced element was
+  independently dispositioned, and a blocked element did not execute.
+- **Nested commands surface.** Under the tested hook configuration, `extdebug`
+  caused the `DEBUG` trap to be inherited into nested execution contexts,
+  including command substitutions, subshells, functions, and loop bodies. Inner
+  commands therefore surfaced and were **independently blockable** -- coverage
+  this contract does not *promise* (see below), observed to occur.
+- **A hook skip is not a command failure.** In `A && MID && C`, blocking `MID`
+  caused the hook to **skip** it, but Bash still proceeded to run `C`. Skipping a
+  command is **not** equivalent to a native non-zero exit and does **not**
+  short-circuit a `&&` chain. Blocking a command prevents *that* command; it does
+  not synthesize the failure semantics a real command's non-zero status would.
+- **Native short-circuit.** Conversely, native `||` short-circuiting can leave a
+  policy target **legitimately unreachable** (e.g. the right side of
+  `true || target`): Bash never evaluates it, so it never surfaces. This is a
+  contract-consistent non-event, not a coverage gap.
+- **Backslash continuation.** A `\`-newline continuation is joined by Bash before
+  it reaches the trap: the physical lines become **one** simple command, reported
+  once as a single pre-expansion `$BASH_COMMAND`.
+- **Heredoc.** A heredoc surfaced as **one** command whose `$BASH_COMMAND`
+  contained the **entire heredoc source** -- command line, body, and delimiter,
+  with embedded newlines. The body and delimiter did **not** surface as
+  independent commands; execution was confirmed by the file the command wrote.
+  *Because policy evaluates the reported text verbatim, a rule can still match
+  text drawn from the body -- see **What gets intercepted, exactly**.*
+- **Prompt transitions.** PS1/PS2 continuation transitions were driven and
+  verified by the **ordered sequence of prompts** the shell emitted, never by
+  elapsed time or output appearance.
+
+### Known limitations and non-promises
+
+- **Not a cross-version compatibility promise.** The decomposition above is the
+  tested Bash's behavior under the current hook. Another Bash or Readline version
+  MAY decompose a construct differently. The guaranteed contract holds regardless;
+  the specific event shape does not.
+- **Chain/short-circuit semantics are the shell's.** Blocking one element of a
+  chain does not reproduce native failure or short-circuit behavior. Users MUST
+  NOT assume that blocking one element aborts the rest.
+- **Single-write multiline only; not bracketed paste.** Multiline input was
+  characterized as a single write of a newline-separated block. The terminal
+  **bracketed-paste** protocol (a real emulator's clipboard framing) is a distinct
+  surface and is **not** characterized here.
+- **No semantic aggregation.** VibeRevert does not reassemble a construct's
+  interceptions into one logical command; each is dispositioned on the text Bash
+  reported for it.
+- **The verdict is not inherited across mechanism changes.** A future change to
+  the hook, Bash options, PTY driver, or prompt configuration MUST rerun this
+  matrix before the maintainer verdict below is carried forward.
+
+### Maintainer verdict
+
+The tested compound and multiline surface is **contract-consistent**: every
+surfaced command was dispositioned fail-closed, no blocked or audit-failed
+command executed, and **no safety contradiction was observed** across the
+characterized constructs. This is a verdict about the **tested configuration** --
+not a blanket compatibility guarantee for every Bash/Readline version. Coverage
+stays best effort; disposition stays mandatory.
+
+*Historical note:* the first nested-construct run exposed request ids that
+**collided across subshells** -- the pre-fix `$$-<sequence>` id keeps the parent
+PID inside a subshell, so the forked sequence repeated. The hook was hardened to
+`$BASHPID-<sequence>`, which removed the observed collision, and the harness was
+corrected to correlate strictly by connection identity rather than trusting
+client ids as unique. The duplicates did not produce a wrong-command
+authorization under the connection-per-request protocol, but they weakened
+diagnostics and exposed an incorrect uniqueness assumption in the original test
+harness.
 
 ## Guard and confirm (per intercepted command)
 
@@ -304,6 +408,11 @@ repository, production session/service wiring):
   exactly two accepted-command entries with the expected canonical
   repository-relative cwds.
 - The `node-pty` native binding loads and can allocate a PTY (Linux and Windows).
+- The compound and multiline characterization matrix runs live on Linux CI. It
+  covers compound chains, pipelines, nested execution contexts, backslash
+  continuation, heredoc, and single-write multiline input; every surfaced target
+  was dispositioned fail-closed, and no safety contradiction was observed in the
+  tested configuration.
 
 **Proven by unit tests** (deterministic, not live):
 
@@ -321,7 +430,9 @@ mismatch over backslashes that is now the representability rule above.
 
 ## Not in scope
 
-- **Interception of nested/inner commands** -- see coverage. Never claimed.
+- **Interception of nested/inner commands as a guarantee** -- never claimed.
+  (Observed to occur through `functrace` under the tested hook -- see **Compound
+  and multiline characterization** -- but not promised.)
 - **Interactive confirmation in PTY mode** -- v1 blocks `require_confirm`
   matches instead of prompting.
 - **Shells other than Bash**, and any promise about arbitrary Bash builds beyond
