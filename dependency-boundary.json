@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "forbiddenByDefault": [
+    "express",
+    "fastify",
+    "hono",
+    "koa",
+    "@slack/*",
+    "nodemailer",
+    "aws-sdk",
+    "@aws-sdk/*",
+    "@google-cloud/*",
+    "@azure/*",
+    "pg",
+    "mysql2",
+    "mongodb",
+    "redis",
+    "ioredis"
+  ],
+  "requiresReview": ["@octokit/*", "openai", "@anthropic-ai/*", "langchain", "@langchain/*"],
+  "allowlistOverrides": []
+}
