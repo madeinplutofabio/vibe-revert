@@ -65,7 +65,7 @@
 
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { connect, createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
@@ -1833,4 +1833,995 @@ describe("policy parent -- same hook id, connection-scoped disposition (M H1b re
       })}`,
     );
   });
+});
+
+// ===========================================================================
+// M H1b2 -- PS2 / MULTILINE characterization. Extends the H1a/H1b1 harness with
+// a multiline-aware input driver; the connection-scoped policy parent + ledger
+// (startPolicyParent, assertLedgerConsistent, the classifier/matcher/collision
+// machinery) are REUSED UNCHANGED. Covers the locked constructs: backslash
+// continuation, heredoc, and single_write_multiline input, with explicit PS1/PS2
+// transition handling and a post-deny / post-failure usability probe.
+//
+// COMPLETION IS NEVER INFERRED FROM TIME OR OUTPUT APPEARANCE. Distinct PS1/PS2
+// markers are set in the rc; each write captures prompt-count baselines BEFORE
+// writing and asserts the exact delta afterward. The ORDERED sequence of newly
+// appended prompts is derived by POSITION in the output (both prompts can arrive
+// in one PTY chunk), so a premature completion -- or a PS2 after completion -- is
+// caught, not masked.
+//
+// "single_write_multiline" is exactly that -- one child.write() of a
+// \n-separated block. It is NOT the terminal bracketed-paste protocol and makes
+// no claim about it; bracketed paste is a distinct surface, out of scope here.
+// ===========================================================================
+
+const PS1_MARKER = "vr-ps1> ";
+const PS2_MARKER = "vr-ps2> ";
+
+/** A typed physical line and the prompt expected once it is submitted: PS2 =
+ *  continuation (logical command not yet complete), PS1 = logical completion. */
+interface TypedLine {
+  readonly text: string;
+  readonly expectAfter: "PS1" | "PS2";
+}
+
+type ConstructInput =
+  | {
+      readonly kind: "typed";
+      readonly constructKind: "backslash_continuation" | "heredoc";
+      readonly lines: readonly TypedLine[];
+    }
+  | {
+      readonly kind: "single_write_multiline";
+      readonly block: string;
+      readonly logicalCommands: number;
+      readonly minPs2Transitions: number;
+      readonly exactPromptSequence?: readonly ("PS1" | "PS2")[];
+    };
+
+/** Filesystem execution proof for the heredoc case: terminal output cannot
+ *  distinguish `cat`'s output from the echoed heredoc body, so execution is
+ *  proven by the written file's exact content. `commandPrefix` is a
+ *  CHARACTERIZATION prefix (never policy targeting) used to confirm the heredoc
+ *  command itself surfaced, tolerant of how Bash renders the delimiter. */
+interface HeredocResult {
+  readonly file: string; // basename written under $VR_CASE_DIR
+  readonly content: string; // exact expected file content
+  readonly bodyToken: string; // must not surface as an independent command
+  readonly delimiter: string; // must not surface as an independent command
+  readonly commandPrefix: string; // the heredoc command must surface with this prefix
+}
+
+interface MultilineCase {
+  readonly caseId: string;
+  readonly construct: ConstructInput;
+  readonly markers: readonly MarkerSpec[];
+  readonly mode: ConstructMode;
+  readonly heredocResult?: HeredocResult;
+}
+
+/** One write's ordered prompt-transition evidence. newPromptSequence is the
+ *  full ordered list of prompts appended by this write, resolved by POSITION. */
+interface PromptStepEvidence {
+  readonly writeIndex: number;
+  readonly inputKind: "typed_line" | "single_write_multiline";
+  readonly bytesWritten: number;
+  readonly expectedAfter: "PS1" | "PS2" | "multiple_ps1";
+  readonly ps1Before: number;
+  readonly ps2Before: number;
+  readonly ps1After: number;
+  readonly ps2After: number;
+  readonly firstNewPrompt: "PS1" | "PS2" | "none";
+  readonly newPromptSequence: readonly ("PS1" | "PS2")[];
+}
+
+interface MultilineWrite {
+  readonly kind: "typed_line" | "single_write_multiline";
+  readonly bytes: string;
+  readonly expectedAfter: "PS1" | "PS2" | "multiple_ps1";
+  readonly logicalCommands: number; // for multiple_ps1; 1 otherwise
+  readonly minPs2Transitions: number; // for single-write; 0 otherwise
+  readonly exactPromptSequence?: readonly ("PS1" | "PS2")[];
+}
+
+/** The ORDERED prompt kinds newly appended in a segment, by position -- so
+ *  `PS2 -> PS1 -> PS2` is distinguishable from `PS2 -> PS2 -> PS1`, which totals
+ *  and a single "first prompt" cannot separate. */
+function newPromptSequenceOf(segment: string): ("PS1" | "PS2")[] {
+  const found: { position: number; kind: "PS1" | "PS2" }[] = [];
+  const markers: readonly (readonly [string, "PS1" | "PS2"])[] = [
+    [PS1_MARKER, "PS1"],
+    [PS2_MARKER, "PS2"],
+  ];
+  for (const [marker, kind] of markers) {
+    let position = segment.indexOf(marker);
+    while (position !== -1) {
+      found.push({ position, kind });
+      position = segment.indexOf(marker, position + marker.length);
+    }
+  }
+  return found.sort((a, b) => a.position - b.position).map((p) => p.kind);
+}
+
+/** Deterministic backslash-continuation join: a line ending in `\` continues to
+ *  the next with the backslash removed and NOTHING inserted -- so the exact
+ *  pre-expansion $BASH_COMMAND has no fragile whitespace to predict. The test
+ *  derives the joined command from the typed lines rather than guessing it. */
+function joinBackslashContinuation(lines: readonly TypedLine[]): string {
+  let joined = "";
+  for (const line of lines) {
+    joined += line.text.endsWith("\\") ? line.text.slice(0, -1) : line.text;
+  }
+  return joined;
+}
+
+/**
+ * Drive a guarded interactive Bash with distinct PS1/PS2 markers over an ordered
+ * list of writes, asserting the exact prompt transition each produces (deltas +
+ * the full ordered prompt sequence). Returns ordered PromptStepEvidence, the
+ * collected output, and whether the cleanup backstop force-killed the child.
+ * Sets the module-level `rcDir` for afterEach.
+ */
+async function runGuardedMultilineSession(
+  host: { pty: PtyModule; bashPath: string },
+  activeParent: PolicyParent,
+  writes: readonly MultilineWrite[],
+): Promise<{ output: string; forceKilled: boolean; promptSteps: PromptStepEvidence[] }> {
+  const hook = generateBashInterceptionHook({
+    nonce: NONCE,
+    endpoint: `127.0.0.1:${activeParent.port}`,
+  });
+  rcDir = await mkdtemp(join(tmpdir(), "vr-multiline-"));
+  const rcPath = join(rcDir, "hook.rc");
+  await writeFile(rcPath, `PS1='${PS1_MARKER}'\nPS2='${PS2_MARKER}'\nPROMPT_COMMAND=\n${hook}`, {
+    mode: 0o600,
+  });
+
+  const child = host.pty.spawn(host.bashPath, ["--noprofile", "--rcfile", rcPath, "-i"], {
+    name: "xterm-color",
+    cols: 80,
+    rows: 24,
+    cwd: rcDir,
+    env: { ...process.env, SHELL: host.bashPath, VR_CASE_DIR: rcDir },
+  });
+
+  const childExit = waitForPtyExit(child, EXIT_BACKSTOP_MS);
+  let exitEvent: { exitCode: number; signal: number | undefined } | undefined;
+  void childExit.then(
+    (event) => {
+      exitEvent = event;
+    },
+    () => {
+      // backstop/kill surfaced by the per-phase deadlines
+    },
+  );
+
+  let output = "";
+  let truncated = false;
+  const dataSub = child.onData((chunk) => {
+    output += chunk;
+    if (output.length > MAX_OUTPUT_CHARS) {
+      output = output.slice(-MAX_OUTPUT_CHARS);
+      truncated = true;
+    }
+  });
+  const diag = (): string =>
+    `${truncated ? `[output truncated to last ${MAX_OUTPUT_CHARS} chars]\n` : ""}${output}`;
+
+  const promptSteps: PromptStepEvidence[] = [];
+  let forceKilled = false;
+  try {
+    // The initial PS1 is the BASELINE, never a transition caused by test input.
+    await waitFor(
+      () => occurrences(output, PS1_MARKER) >= 1 || exitEvent !== undefined,
+      PROMPT_DEADLINE_MS,
+      "initial guarded PS1",
+      diag,
+    );
+    if (occurrences(output, PS1_MARKER) < 1) {
+      throw new Error(
+        `child exited (code ${exitEvent?.exitCode}) before the guarded PS1.\n${diag()}`,
+      );
+    }
+    // Startup must be exactly one PS1 and no PS2; otherwise the per-write deltas
+    // below would be measured against a corrupted baseline.
+    expect(occurrences(output, PS1_MARKER), "[multiline] exactly one startup PS1").toBe(1);
+    expect(occurrences(output, PS2_MARKER), "[multiline] no startup PS2").toBe(0);
+
+    for (const [writeIndex, w] of writes.entries()) {
+      // Truncation would break the position math; these cases are tiny, so it
+      // must not occur.
+      expect(truncated, `[multiline] output truncated before write ${writeIndex}`).toBe(false);
+      const ps1Before = occurrences(output, PS1_MARKER);
+      const ps2Before = occurrences(output, PS2_MARKER);
+      const lenBefore = output.length;
+      child.write(w.bytes);
+
+      if (w.expectedAfter === "PS2") {
+        await waitFor(
+          () =>
+            occurrences(output, PS2_MARKER) > ps2Before ||
+            occurrences(output, PS1_MARKER) > ps1Before ||
+            exitEvent !== undefined,
+          SETTLE_DEADLINE_MS,
+          `PS2 after typed line ${writeIndex}`,
+          diag,
+        );
+      } else if (w.expectedAfter === "PS1") {
+        await waitFor(
+          () =>
+            occurrences(output, PS1_MARKER) > ps1Before ||
+            occurrences(output, PS2_MARKER) > ps2Before ||
+            exitEvent !== undefined,
+          SETTLE_DEADLINE_MS,
+          `PS1 after typed line ${writeIndex}`,
+          diag,
+        );
+      } else {
+        await waitFor(
+          () =>
+            occurrences(output, PS1_MARKER) >= ps1Before + w.logicalCommands ||
+            exitEvent !== undefined,
+          SETTLE_DEADLINE_MS,
+          `${w.logicalCommands} PS1 after single-write block ${writeIndex}`,
+          diag,
+        );
+      }
+
+      if (exitEvent !== undefined) {
+        throw new Error(
+          `child exited (code ${exitEvent.exitCode}) during write ${writeIndex}.\n${diag()}`,
+        );
+      }
+
+      const ps1After = occurrences(output, PS1_MARKER);
+      const ps2After = occurrences(output, PS2_MARKER);
+      const newPromptSequence = newPromptSequenceOf(output.slice(lenBefore));
+      const firstNewPrompt: "PS1" | "PS2" | "none" = newPromptSequence[0] ?? "none";
+      promptSteps.push({
+        writeIndex,
+        inputKind: w.kind,
+        bytesWritten: w.bytes.length,
+        expectedAfter: w.expectedAfter,
+        ps1Before,
+        ps2Before,
+        ps1After,
+        ps2After,
+        firstNewPrompt,
+        newPromptSequence,
+      });
+
+      // Exact per-write transition assertions (deltas + ordered prompt sequence).
+      if (w.expectedAfter === "PS2") {
+        expect(ps2After - ps2Before, `[multiline] write ${writeIndex} PS2 delta`).toBe(1);
+        expect(ps1After - ps1Before, `[multiline] write ${writeIndex} PS1 delta`).toBe(0);
+        expect(newPromptSequence, `[multiline] write ${writeIndex} prompt sequence`).toEqual([
+          "PS2",
+        ]);
+      } else if (w.expectedAfter === "PS1") {
+        expect(ps1After - ps1Before, `[multiline] write ${writeIndex} PS1 delta`).toBe(1);
+        expect(ps2After - ps2Before, `[multiline] write ${writeIndex} PS2 delta`).toBe(0);
+        expect(newPromptSequence, `[multiline] write ${writeIndex} prompt sequence`).toEqual([
+          "PS1",
+        ]);
+      } else {
+        expect(
+          ps1After - ps1Before,
+          `[multiline] write ${writeIndex} PS1 delta (single-write)`,
+        ).toBe(w.logicalCommands);
+        expect(
+          ps2After - ps2Before,
+          `[multiline] write ${writeIndex} PS2 delta >= min`,
+        ).toBeGreaterThanOrEqual(w.minPs2Transitions);
+        if (w.exactPromptSequence !== undefined) {
+          expect(
+            newPromptSequence,
+            `[multiline] write ${writeIndex} exact prompt sequence`,
+          ).toEqual(w.exactPromptSequence);
+        } else {
+          expect(
+            newPromptSequence[newPromptSequence.length - 1],
+            `[multiline] write ${writeIndex} single-write ends on PS1`,
+          ).toBe("PS1");
+          expect(
+            newPromptSequence.filter((p) => p === "PS1").length,
+            `[multiline] write ${writeIndex} single-write PS1 count`,
+          ).toBe(w.logicalCommands);
+          expect(
+            newPromptSequence.filter((p) => p === "PS2").length,
+            `[multiline] write ${writeIndex} single-write PS2 count`,
+          ).toBeGreaterThanOrEqual(w.minPs2Transitions);
+        }
+      }
+    }
+
+    // Position math held for every write.
+    expect(truncated, "[multiline] output truncated during the run").toBe(false);
+
+    child.write("\x04"); // EOF: never intercepted -> always leaves
+    await childExit;
+  } finally {
+    dataSub.dispose();
+    if (exitEvent === undefined) {
+      forceKilled = true;
+      try {
+        child.kill();
+      } catch {
+        // best-effort cleanup
+      }
+    }
+    await awaitCleanupExit(childExit);
+  }
+
+  return { output, forceKilled, promptSteps };
+}
+
+/**
+ * Run one multiline case: fail-fast spec validation, then drive the construct +
+ * a post-case usability probe, then assert the ledger, executions, heredoc
+ * filesystem proof + command-surfaced invariant, usability, matcher-based target
+ * verdict, and no collisions. Emits `[multiline-characterization]` evidence.
+ */
+async function runMultilineCase(
+  host: { pty: PtyModule; bashPath: string },
+  meta: RuntimeMeta,
+  spec: MultilineCase,
+): Promise<void> {
+  const caseKey = spec.caseId.toUpperCase().replace(/-/g, "_");
+  const usabilityToken = `VRC_${caseKey}_USABLE_`;
+  const usabilityOut = `${usabilityToken}42_ok`;
+  const usabilityCmd = `echo ${usabilityToken}$((6*7))_ok`;
+
+  // ---- Fail-fast spec validation (BEFORE spawning Bash) ----
+  const tokens = spec.markers.map((m) => m.token);
+  expect(new Set(tokens).size, `[${spec.caseId}] marker tokens must be unique`).toBe(tokens.length);
+  for (const m of spec.markers) {
+    if (m.execution.kind === "output") {
+      expect(
+        m.execution.out.includes(m.token),
+        `[${spec.caseId}] ${m.label} out must contain its token`,
+      ).toBe(true);
+      expect(
+        m.execution.out,
+        `[${spec.caseId}] ${m.label} out must differ from the typed token`,
+      ).not.toBe(m.token);
+    } else {
+      expect(m.execution.file, `[${spec.caseId}] ${m.label} sentinel must be a basename`).toBe(
+        basename(m.execution.file),
+      );
+    }
+  }
+
+  const inputStrings: string[] = [usabilityToken, usabilityCmd];
+  if (spec.construct.kind === "typed") {
+    const lines = spec.construct.lines;
+    for (const line of lines) {
+      inputStrings.push(line.text);
+    }
+    if (spec.construct.constructKind === "backslash_continuation") {
+      expect(
+        lines.length,
+        `[${spec.caseId}] backslash construct needs >= 2 lines`,
+      ).toBeGreaterThanOrEqual(2);
+      for (const line of lines.slice(0, -1)) {
+        expect(
+          line.text.endsWith("\\"),
+          `[${spec.caseId}] non-final backslash line must end with '\\'`,
+        ).toBe(true);
+        expect(line.expectAfter, `[${spec.caseId}] non-final backslash line must expect PS2`).toBe(
+          "PS2",
+        );
+      }
+      const last = lines[lines.length - 1];
+      expect(
+        last?.text.endsWith("\\"),
+        `[${spec.caseId}] final backslash line must not end with '\\'`,
+      ).toBe(false);
+      expect(last?.expectAfter, `[${spec.caseId}] final backslash line must expect PS1`).toBe(
+        "PS1",
+      );
+    } else {
+      // constructKind === "heredoc"
+      expect(
+        spec.heredocResult,
+        `[${spec.caseId}] heredoc construct requires heredocResult`,
+      ).not.toBeUndefined();
+      expect(
+        lines.length,
+        `[${spec.caseId}] heredoc needs opener + body + terminator`,
+      ).toBeGreaterThanOrEqual(3);
+      expect(lines[0]?.expectAfter, `[${spec.caseId}] heredoc opener must expect PS2`).toBe("PS2");
+      for (const line of lines.slice(1, -1)) {
+        expect(line.expectAfter, `[${spec.caseId}] heredoc body line must expect PS2`).toBe("PS2");
+      }
+      expect(
+        lines[lines.length - 1]?.expectAfter,
+        `[${spec.caseId}] heredoc terminator must expect PS1`,
+      ).toBe("PS1");
+      if (spec.heredocResult !== undefined) {
+        const hr = spec.heredocResult;
+        expect(
+          lines.some((l) => l.text === hr.bodyToken),
+          `[${spec.caseId}] body token must appear as a complete input line`,
+        ).toBe(true);
+        expect(
+          lines.filter((l) => l.text === hr.delimiter).length,
+          `[${spec.caseId}] delimiter must appear exactly once as a complete input line`,
+        ).toBe(1);
+        expect(
+          lines[lines.length - 1]?.text,
+          `[${spec.caseId}] terminator line must be the delimiter`,
+        ).toBe(hr.delimiter);
+        expect(
+          lines[0]?.text.startsWith(hr.commandPrefix),
+          `[${spec.caseId}] commandPrefix must prefix the heredoc opener`,
+        ).toBe(true);
+      }
+    }
+  } else {
+    inputStrings.push(spec.construct.block);
+    expect(
+      spec.heredocResult,
+      `[${spec.caseId}] single-write must not carry a heredocResult`,
+    ).toBeUndefined();
+    expect(
+      spec.construct.block.endsWith("\n"),
+      `[${spec.caseId}] single-write block must end with \\n`,
+    ).toBe(true);
+    expect(
+      spec.construct.block.slice(0, -1).includes("\n"),
+      `[${spec.caseId}] single-write block must be multiline (a newline before the final one)`,
+    ).toBe(true);
+    expect(
+      spec.construct.logicalCommands,
+      `[${spec.caseId}] logicalCommands must be >= 1`,
+    ).toBeGreaterThanOrEqual(1);
+    expect(
+      spec.construct.minPs2Transitions,
+      `[${spec.caseId}] minPs2Transitions must be >= 0`,
+    ).toBeGreaterThanOrEqual(0);
+    if (spec.construct.exactPromptSequence !== undefined) {
+      const seq = spec.construct.exactPromptSequence;
+      expect(seq[seq.length - 1], `[${spec.caseId}] exact prompt sequence must end in PS1`).toBe(
+        "PS1",
+      );
+      expect(
+        seq.filter((prompt) => prompt === "PS1").length,
+        `[${spec.caseId}] exact prompt sequence PS1 count must equal logicalCommands`,
+      ).toBe(spec.construct.logicalCommands);
+      expect(
+        seq.filter((prompt) => prompt === "PS2").length,
+        `[${spec.caseId}] exact prompt sequence must satisfy minPs2Transitions`,
+      ).toBeGreaterThanOrEqual(spec.construct.minPs2Transitions);
+    }
+  }
+  for (const m of spec.markers) {
+    if (m.execution.kind === "output") {
+      inputStrings.push(m.execution.out);
+    }
+  }
+  if (spec.heredocResult !== undefined) {
+    const hr = spec.heredocResult;
+    inputStrings.push(hr.content, hr.bodyToken, hr.delimiter, hr.commandPrefix);
+    expect(basename(hr.file), `[${spec.caseId}] heredoc result must be a basename`).toBe(hr.file);
+    expect(
+      hr.delimiter.length,
+      `[${spec.caseId}] heredoc delimiter must be non-empty`,
+    ).toBeGreaterThan(0);
+    expect(
+      hr.commandPrefix.length,
+      `[${spec.caseId}] heredoc commandPrefix must be non-empty`,
+    ).toBeGreaterThan(0);
+  }
+  for (const s of inputStrings) {
+    expect(s.includes(PS1_MARKER), `[${spec.caseId}] PS1 marker must not appear in inputs`).toBe(
+      false,
+    );
+    expect(s.includes(PS2_MARKER), `[${spec.caseId}] PS2 marker must not appear in inputs`).toBe(
+      false,
+    );
+  }
+
+  let parentOpts: PolicyParentOptions = {};
+  if (spec.mode.kind !== "allow-all") {
+    const { targetMarker, requestMatcher } = spec.mode;
+    expect(
+      tokens.includes(targetMarker),
+      `[${spec.caseId}] targetMarker must be a case marker token`,
+    ).toBe(true);
+    expect(
+      normalizeRawLine(requestMatcher.rawLine).length,
+      `[${spec.caseId}] exact matcher non-empty`,
+    ).toBeGreaterThan(0);
+    expect(
+      matchesRequest(requestMatcher, usabilityCmd),
+      `[${spec.caseId}] matcher must not match the usability probe`,
+    ).toBe(false);
+    // The exact matcher is validated per typed constructKind. Backslash cases are
+    // checked against the COMPUTED join (no prediction); any other typed kind must
+    // define its own rule rather than being silently treated as a backslash join.
+    if (spec.construct.kind === "typed") {
+      if (spec.construct.constructKind === "backslash_continuation") {
+        expect(
+          normalizeRawLine(requestMatcher.rawLine),
+          `[${spec.caseId}] matcher must equal the computed backslash join`,
+        ).toBe(normalizeRawLine(joinBackslashContinuation(spec.construct.lines)));
+      } else {
+        throw new Error(
+          `[${spec.caseId}] no exact-matcher validation rule for typed constructKind '${spec.construct.constructKind}'`,
+        );
+      }
+    }
+    parentOpts =
+      spec.mode.kind === "block"
+        ? { block: (rawLine) => matchesRequest(requestMatcher, rawLine) }
+        : { failAudit: (rawLine) => matchesRequest(requestMatcher, rawLine) };
+  }
+
+  // ---- Run ----
+  const activeParent = await startPolicyParent(parentOpts);
+  parent = activeParent;
+
+  const writes: MultilineWrite[] = [];
+  if (spec.construct.kind === "typed") {
+    for (const line of spec.construct.lines) {
+      writes.push({
+        kind: "typed_line",
+        bytes: `${line.text}\r`,
+        expectedAfter: line.expectAfter,
+        logicalCommands: 1,
+        minPs2Transitions: 0,
+      });
+    }
+  } else {
+    writes.push({
+      kind: "single_write_multiline",
+      bytes: spec.construct.block,
+      expectedAfter: "multiple_ps1",
+      logicalCommands: spec.construct.logicalCommands,
+      minPs2Transitions: spec.construct.minPs2Transitions,
+      ...(spec.construct.exactPromptSequence !== undefined
+        ? { exactPromptSequence: spec.construct.exactPromptSequence }
+        : {}),
+    });
+  }
+  // Post-case usability probe: a fresh single-line PS1 command proving
+  // interception is STILL active (especially after a deny / audit failure).
+  writes.push({
+    kind: "typed_line",
+    bytes: `${usabilityCmd}\r`,
+    expectedAfter: "PS1",
+    logicalCommands: 1,
+    minPs2Transitions: 0,
+  });
+
+  const { output, forceKilled, promptSteps } = await runGuardedMultilineSession(
+    host,
+    activeParent,
+    writes,
+  );
+  const caseDir = rcDir;
+  const expectedDir = await realpath(caseDir);
+
+  expect(activeParent.protocolErrors(), `[${spec.caseId}] no protocol errors`).toEqual([]);
+  expect(forceKilled, `[${spec.caseId}] no forced cleanup`).toBe(false);
+  assertLedgerConsistent(activeParent);
+
+  const constructKind =
+    spec.construct.kind === "typed" ? spec.construct.constructKind : "single_write_multiline";
+  const inputMode = spec.construct.kind === "typed" ? "typed" : "single_write_multiline";
+
+  // ---- Marker execution controls ----
+  const executedOf = (m: MarkerSpec): boolean =>
+    m.execution.kind === "output"
+      ? output.includes(m.execution.out)
+      : existsSync(join(caseDir, m.execution.file));
+  for (const m of spec.markers) {
+    const executed = executedOf(m);
+    if (m.expectation === "must_execute") {
+      expect(executed, `[${spec.caseId}] positive-control marker ${m.label} must execute`).toBe(
+        true,
+      );
+    } else if (m.expectation === "must_not_execute") {
+      expect(executed, `[${spec.caseId}] marker ${m.label} must not execute`).toBe(false);
+    }
+  }
+  const markerEvidence = spec.markers.map((m) => ({
+    label: m.label,
+    token: m.token,
+    expectation: m.expectation,
+    executed: executedOf(m),
+    tokenOutcome: classifyMarker(
+      authorizationOf(activeParent.requests().filter((r) => r.rawLine.includes(m.token))),
+      executedOf(m),
+    ),
+  }));
+
+  // ---- Heredoc: filesystem execution proof + command-surfaced + non-surfacing ----
+  let heredocEvidence:
+    | {
+        file: string;
+        expectedContent: string;
+        contentMatches: boolean;
+        commandSurfaced: boolean;
+        heredocCommandConnectionIds: number[];
+        bodySurfacedAsCommand: boolean;
+        delimiterSurfacedAsCommand: boolean;
+        heredocContainingBodyConnectionIds: number[];
+      }
+    | undefined;
+  if (spec.heredocResult !== undefined) {
+    const hr = spec.heredocResult;
+    const resultPath = join(caseDir, hr.file);
+    expect(existsSync(resultPath), `[${spec.caseId}] heredoc result file must exist`).toBe(true);
+    const actual = await readFile(resultPath, "utf8");
+    expect(actual, `[${spec.caseId}] heredoc result content must be exact`).toBe(hr.content);
+
+    const requests = activeParent.requests();
+    // The heredoc COMMAND itself must have surfaced (>= 1). Prefix match, not
+    // exact: characterization only, tolerant of how Bash renders the delimiter.
+    // No "exactly one" claim until Linux evidence establishes it across versions.
+    const commandRequests = requests.filter((r) =>
+      normalizeRawLine(r.rawLine).startsWith(hr.commandPrefix),
+    );
+    expect(
+      commandRequests.length,
+      `[${spec.caseId}] heredoc command must surface as an interception`,
+    ).toBeGreaterThanOrEqual(1);
+
+    // NARROW security property: the body / delimiter must not surface as an
+    // INDEPENDENTLY intercepted command. A shell that echoes some heredoc source
+    // text inside the `cat` command's own $BASH_COMMAND stays contract-consistent.
+    const bodySurfacedAsCommand = requests.some(
+      (r) => normalizeRawLine(r.rawLine) === hr.bodyToken,
+    );
+    const delimiterSurfacedAsCommand = requests.some(
+      (r) => normalizeRawLine(r.rawLine) === hr.delimiter,
+    );
+    expect(
+      bodySurfacedAsCommand,
+      `[${spec.caseId}] heredoc body must not surface as an independently intercepted command`,
+    ).toBe(false);
+    expect(
+      delimiterSurfacedAsCommand,
+      `[${spec.caseId}] heredoc delimiter must not surface as an independently intercepted command`,
+    ).toBe(false);
+
+    heredocEvidence = {
+      file: hr.file,
+      expectedContent: hr.content,
+      contentMatches: actual === hr.content,
+      commandSurfaced: commandRequests.length >= 1,
+      heredocCommandConnectionIds: commandRequests.map((r) => r.connectionId),
+      bodySurfacedAsCommand,
+      delimiterSurfacedAsCommand,
+      heredocContainingBodyConnectionIds: requests
+        .filter((r) => r.rawLine.includes(hr.bodyToken))
+        .map((r) => r.connectionId),
+    };
+  }
+
+  // ---- Usability probe (distinct token; always allowed) ----
+  const usabilityOutcome = classifyMarker(
+    authorizationOf(activeParent.requests().filter((r) => r.rawLine.includes(usabilityToken))),
+    output.includes(usabilityOut),
+  );
+  expect(
+    usabilityOutcome,
+    `[${spec.caseId}] usability probe must be intercepted, authorized, and executed`,
+  ).toBe("intercepted_authorized_executed");
+
+  // ---- Matcher-based target verdict (block / audit-fail) ----
+  let targetEvidence:
+    | {
+        targetMarker: string;
+        requestMatcher: RequestMatcher;
+        expectation: InterceptionExpectation;
+        targetExecuted: boolean;
+        matchingConnectionIds: number[];
+        matchingHookRequestIds: string[];
+        targetOutcome: CoverageOutcome;
+        reviewPosture: ReviewPosture;
+      }
+    | undefined;
+  if (spec.mode.kind !== "allow-all") {
+    const { targetMarker, requestMatcher, expectation } = spec.mode;
+    const targetMarkerSpec = spec.markers.find((m) => m.token === targetMarker);
+    if (targetMarkerSpec === undefined) {
+      throw new Error(`[${spec.caseId}] unreachable: targetMarker has no marker spec`);
+    }
+    const targetRequests = activeParent
+      .requests()
+      .filter((r) => matchesRequest(requestMatcher, r.rawLine));
+    const targetExecuted = executedOf(targetMarkerSpec);
+    const targetOutcome = classifyMarker(authorizationOf(targetRequests), targetExecuted);
+    const reviewPosture = deriveReviewPosture(targetOutcome, expectation);
+
+    expect(
+      targetOutcome,
+      `[${spec.caseId}] target: a blocked/closed event must not execute`,
+    ).not.toBe("intercepted_blocked_but_executed");
+    if (expectation === "must_surface") {
+      expect(
+        targetRequests.length,
+        `[${spec.caseId}] must_surface target must surface`,
+      ).toBeGreaterThanOrEqual(1);
+    }
+    const requiredDecision = spec.mode.kind === "block" ? "block" : "close";
+    for (const r of targetRequests) {
+      expect(
+        r.decision,
+        `[${spec.caseId}] surfaced target must be dispositioned ${requiredDecision}`,
+      ).toBe(requiredDecision);
+    }
+
+    targetEvidence = {
+      targetMarker,
+      requestMatcher,
+      expectation,
+      targetExecuted,
+      matchingConnectionIds: targetRequests.map((r) => r.connectionId),
+      matchingHookRequestIds: targetRequests.map((r) => r.hookRequestId),
+      targetOutcome,
+      reviewPosture,
+    };
+  }
+
+  // ---- Collisions + connection-scoped events (reused, unchanged) ----
+  const hookRequestIdCollisions = activeParent.hookRequestIdCollisions();
+  expect(
+    hookRequestIdCollisions,
+    `[${spec.caseId}] no hook-request-id collisions expected after $BASHPID`,
+  ).toEqual([]);
+
+  const cwdEqualsExpectedDir = activeParent.requests().every((r) => r.cwd === expectedDir);
+  const events = activeParent.requests().map((r) => {
+    const tl = activeParent.timeline().filter((e) => e.connectionId === r.connectionId);
+    return {
+      connectionId: r.connectionId,
+      hookRequestId: r.hookRequestId,
+      cwd: r.cwd,
+      rawLine: r.rawLine,
+      decision: r.decision,
+      writeStarted: r.allowFrameWriteStarted,
+      timeline: {
+        disposition: tl.find((e) => e.kind === "disposition")?.sequence,
+        auditAppended: tl.find((e) => e.kind === "audit_appended")?.sequence,
+        allowFrameWriteStarted: tl.find((e) => e.kind === "allow_frame_write_started")?.sequence,
+      },
+    };
+  });
+
+  reportEvidence(
+    `[multiline-characterization] ${JSON.stringify({
+      ...meta,
+      caseId: spec.caseId,
+      mode: spec.mode.kind,
+      constructKind,
+      inputMode,
+      markerEvidence,
+      heredoc: heredocEvidence,
+      usabilityOutcome,
+      target: targetEvidence,
+      promptSteps,
+      ps1Total: occurrences(output, PS1_MARKER),
+      ps2Total: occurrences(output, PS2_MARKER),
+      cwdEqualsExpectedDir,
+      protocolErrors: activeParent.protocolErrors(),
+      hookRequestIdCollisions,
+      forceKilled,
+      events,
+    })}`,
+  );
+}
+
+const MULTILINE_CASES: readonly MultilineCase[] = [
+  // 1) backslash continuation, allow-all: joins to ONE simple command that runs.
+  {
+    caseId: "bs-allow",
+    construct: {
+      kind: "typed",
+      constructKind: "backslash_continuation",
+      lines: [
+        { text: "echo VRC_BSA_A_$((20+22))_\\", expectAfter: "PS2" },
+        { text: "VRC_BSA_B_$((20+23))", expectAfter: "PS1" },
+      ],
+    },
+    markers: [
+      {
+        label: "A",
+        token: "VRC_BSA_A_",
+        execution: { kind: "output", out: "VRC_BSA_A_42_VRC_BSA_B_43" },
+        expectation: "must_execute",
+      },
+      {
+        label: "B",
+        token: "VRC_BSA_B_",
+        execution: { kind: "output", out: "VRC_BSA_A_42_VRC_BSA_B_43" },
+        expectation: "must_execute",
+      },
+    ],
+    mode: { kind: "allow-all" },
+  },
+  // 2) backslash continuation, BLOCK the joined command (+ usability after deny).
+  {
+    caseId: "bs-deny",
+    construct: {
+      kind: "typed",
+      constructKind: "backslash_continuation",
+      lines: [
+        { text: "echo VRC_BSD_A_$((20+22))_\\", expectAfter: "PS2" },
+        { text: "VRC_BSD_B_$((20+23))", expectAfter: "PS1" },
+      ],
+    },
+    markers: [
+      {
+        label: "A",
+        token: "VRC_BSD_A_",
+        execution: { kind: "output", out: "VRC_BSD_A_42_VRC_BSD_B_43" },
+        expectation: "characterize",
+      },
+      {
+        label: "B",
+        token: "VRC_BSD_B_",
+        execution: { kind: "output", out: "VRC_BSD_A_42_VRC_BSD_B_43" },
+        expectation: "characterize",
+      },
+    ],
+    mode: {
+      kind: "block",
+      targetMarker: "VRC_BSD_B_",
+      requestMatcher: { kind: "exact", rawLine: "echo VRC_BSD_A_$((20+22))_VRC_BSD_B_$((20+23))" },
+      expectation: "must_surface",
+    },
+  },
+  // 3) backslash continuation, AUDIT-FAIL the joined command (+ usability after failure).
+  {
+    caseId: "bs-auditfail",
+    construct: {
+      kind: "typed",
+      constructKind: "backslash_continuation",
+      lines: [
+        { text: "echo VRC_BSF_A_$((20+22))_\\", expectAfter: "PS2" },
+        { text: "VRC_BSF_B_$((20+23))", expectAfter: "PS1" },
+      ],
+    },
+    markers: [
+      {
+        label: "A",
+        token: "VRC_BSF_A_",
+        execution: { kind: "output", out: "VRC_BSF_A_42_VRC_BSF_B_43" },
+        expectation: "characterize",
+      },
+      {
+        label: "B",
+        token: "VRC_BSF_B_",
+        execution: { kind: "output", out: "VRC_BSF_A_42_VRC_BSF_B_43" },
+        expectation: "characterize",
+      },
+    ],
+    mode: {
+      kind: "audit-fail",
+      targetMarker: "VRC_BSF_B_",
+      requestMatcher: { kind: "exact", rawLine: "echo VRC_BSF_A_$((20+22))_VRC_BSF_B_$((20+23))" },
+      expectation: "must_surface",
+    },
+  },
+  // 4) heredoc, allow-all: the `cat` command surfaces; body/delimiter never surface
+  //    as commands; execution PROVEN by the written file's exact content.
+  {
+    caseId: "heredoc-allow",
+    construct: {
+      kind: "typed",
+      constructKind: "heredoc",
+      lines: [
+        { text: `cat > "$VR_CASE_DIR/VRC_HEREDOC_RESULT.txt" <<'VREOF'`, expectAfter: "PS2" },
+        { text: "VRC_HEREDOC_BODY_42", expectAfter: "PS2" },
+        { text: "VREOF", expectAfter: "PS1" },
+      ],
+    },
+    markers: [],
+    mode: { kind: "allow-all" },
+    heredocResult: {
+      file: "VRC_HEREDOC_RESULT.txt",
+      content: "VRC_HEREDOC_BODY_42\n",
+      bodyToken: "VRC_HEREDOC_BODY_42",
+      delimiter: "VREOF",
+      commandPrefix: `cat > "$VR_CASE_DIR/VRC_HEREDOC_RESULT.txt" <<`,
+    },
+  },
+  // 5) single_write_multiline: two simple commands in one write -> two interceptions.
+  {
+    caseId: "single-write-simple-allow",
+    construct: {
+      kind: "single_write_multiline",
+      block: "echo VRC_SWS_A_$((20+22))\necho VRC_SWS_B_$((20+23))\n",
+      logicalCommands: 2,
+      minPs2Transitions: 0,
+      exactPromptSequence: ["PS1", "PS1"],
+    },
+    markers: [
+      {
+        label: "A",
+        token: "VRC_SWS_A_",
+        execution: { kind: "output", out: "VRC_SWS_A_42" },
+        expectation: "must_execute",
+      },
+      {
+        label: "B",
+        token: "VRC_SWS_B_",
+        execution: { kind: "output", out: "VRC_SWS_B_43" },
+        expectation: "must_execute",
+      },
+    ],
+    mode: { kind: "allow-all" },
+  },
+  // 6) single_write_multiline: a loop spanning physical lines -> PS2 entered
+  //    mid-block, the loop body surfaces and executes.
+  {
+    caseId: "single-write-loop-allow",
+    construct: {
+      kind: "single_write_multiline",
+      block: "for VRC_i in 1\ndo echo VRC_SWL_$((20+22))\ndone\n",
+      logicalCommands: 1,
+      minPs2Transitions: 2,
+    },
+    markers: [
+      {
+        label: "BODY",
+        token: "VRC_SWL_",
+        execution: { kind: "output", out: "VRC_SWL_42" },
+        expectation: "must_execute",
+      },
+    ],
+    mode: { kind: "allow-all" },
+  },
+];
+
+{
+  // Collection-time uniqueness guards: malformed tables fail at import, before
+  // any Bash is spawned.
+  const caseIds = MULTILINE_CASES.map((spec) => spec.caseId);
+  if (new Set(caseIds).size !== caseIds.length) {
+    throw new Error(`duplicate caseId in H1b2 cases: ${caseIds.join(", ")}`);
+  }
+  const allTokens = MULTILINE_CASES.flatMap((spec) => spec.markers.map((m) => m.token));
+  if (new Set(allTokens).size !== allTokens.length) {
+    throw new Error(`duplicate marker token in H1b2 cases: ${allTokens.join(", ")}`);
+  }
+  const files: string[] = [];
+  for (const spec of MULTILINE_CASES) {
+    for (const m of spec.markers) {
+      if (m.execution.kind === "fsSentinel") {
+        files.push(m.execution.file);
+      }
+    }
+    if (spec.heredocResult !== undefined) {
+      files.push(spec.heredocResult.file);
+    }
+  }
+  if (new Set(files).size !== files.length) {
+    throw new Error(`duplicate result filename in H1b2 cases: ${files.join(", ")}`);
+  }
+}
+
+describe("compound PTY interception -- PS2 / multiline characterization (M H1b2)", () => {
+  for (const spec of MULTILINE_CASES) {
+    it(
+      spec.caseId,
+      async (ctx) => {
+        const host = await resolveHostBash();
+        if (host === null) {
+          reportEvidence(
+            `[multiline-characterization] SKIP ${spec.caseId}: not a POSIX Bash + node-pty host`,
+          );
+          ctx.skip();
+          return;
+        }
+        const meta = readRuntimeMeta(host);
+        await runMultilineCase(host, meta, spec);
+      },
+      TEST_TIMEOUT_MS,
+    );
+  }
 });
