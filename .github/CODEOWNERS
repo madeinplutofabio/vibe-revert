@@ -1,0 +1,22 @@
+# CODEOWNERS -- declared review ownership for trust-critical areas.
+#
+# This file names the account responsible for reviewing changes to the paths
+# below. It does NOT by itself require review, and it does NOT establish
+# independent review: on a solo-maintained project the owner and the author are
+# often the same person, so this does not close the Scorecard Code-Review check.
+# Code-owner review is only enforced once branch protection is configured (a
+# repository setting, not this file) to require it.
+#
+# Owning `.github/workflows/` and this CODEOWNERS file keeps the CI, release, and
+# ownership controls themselves inside the declared critical surface, so they
+# cannot be changed without routing to the designated owner once enforcement is
+# enabled.
+
+/.github/CODEOWNERS                         @madeinplutofabio
+/.github/workflows/                         @madeinplutofabio
+/SECURITY.md                                @madeinplutofabio
+/THREAT_MODEL.md                            @madeinplutofabio
+/packages/git/                              @madeinplutofabio
+/packages/session-format/                   @madeinplutofabio
+/packages/cli-commands/**/*pty*             @madeinplutofabio
+/scripts/release-*                          @madeinplutofabio
