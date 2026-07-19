@@ -4,6 +4,13 @@
     "noEmit": true,
     "tsBuildInfoFile": "./.tsbuildinfo"
   },
-  "include": ["src", "test", "../../tests/fixtures/**/*.ts"],
+  "include": [
+    "src",
+    "test",
+    "../../tests/fixtures/**/*.ts",
+    "../../scripts/dependency-policy-core.ts",
+    "../../scripts/workspace-collector.ts",
+    "../../scripts/check-dependency-policy.ts"
+  ],
   "exclude": ["dist", "node_modules"]
 }
