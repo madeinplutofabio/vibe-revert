@@ -23,6 +23,7 @@
     "lint": "biome check .",
     "format": "biome format --write .",
     "typecheck": "pnpm -r --if-present typecheck",
+    "check:dependency-policy": "tsx scripts/check-dependency-policy.ts",
     "regen-goldens": "tsx scripts/regen-goldens.ts",
     "changeset": "changeset",
     "changeset:version": "changeset version",

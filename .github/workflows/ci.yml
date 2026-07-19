@@ -61,6 +61,15 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Check dependency boundary (M H5)
+        # Governance gate: the committed workspace manifests must satisfy
+        # dependency-boundary.json. Invoked via the canonical package script so CI
+        # and local contributors share one command and implementation changes stay
+        # invisible here. No --as-of: the check evaluates against the current date
+        # on purpose, so an expiring requiresReview override fails after its review
+        # date; pinning a fixed date would defeat that mechanism.
+        run: pnpm check:dependency-policy
+
       - name: Verify node-pty binding
         working-directory: packages/cli-commands
         shell: bash
