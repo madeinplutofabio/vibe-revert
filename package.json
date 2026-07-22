@@ -25,6 +25,8 @@
     "typecheck": "pnpm -r --if-present typecheck",
     "check:dependency-policy": "tsx scripts/check-dependency-policy.ts",
     "regen-goldens": "tsx scripts/regen-goldens.ts",
+    "regen:license-audit": "tsx scripts/regen-license-audit.ts",
+    "refresh:license-metadata": "tsx scripts/refresh-license-metadata.ts",
     "changeset": "changeset",
     "changeset:version": "changeset version",
     "changeset:publish": "changeset publish"
@@ -33,6 +35,7 @@
     "@biomejs/biome": "2.4.13",
     "@changesets/cli": "2.31.0",
     "@types/node": "22.15.30",
+    "tar": "7.5.15",
     "tsx": "4.19.2",
     "typescript": "5.9.3",
     "vitest": "4.1.5",

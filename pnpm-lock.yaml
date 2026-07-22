@@ -17,6 +17,9 @@ importers:
       '@types/node':
         specifier: 22.15.30
         version: 22.15.30
+      tar:
+        specifier: 7.5.15
+        version: 7.5.15
       tsx:
         specifier: 4.19.2
         version: 4.19.2

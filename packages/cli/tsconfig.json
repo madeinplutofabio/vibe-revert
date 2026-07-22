@@ -10,7 +10,21 @@
     "../../tests/fixtures/**/*.ts",
     "../../scripts/dependency-policy-core.ts",
     "../../scripts/workspace-collector.ts",
-    "../../scripts/check-dependency-policy.ts"
+    "../../scripts/check-dependency-policy.ts",
+    "../../scripts/strict-json.ts",
+    "../../scripts/license-audit-core.ts",
+    "../../scripts/license-lockfile-v9.ts",
+    "../../scripts/license-schemas.ts",
+    "../../scripts/license-audit-render.ts",
+    "../../scripts/license-collector.ts",
+    "../../scripts/regen-license-audit.ts",
+    "../../scripts/regen-license-audit-core.ts",
+    "../../scripts/refresh-sri.ts",
+    "../../scripts/refresh-net.ts",
+    "../../scripts/refresh-tarball.ts",
+    "../../scripts/refresh-registry.ts",
+    "../../scripts/refresh-license-metadata.ts",
+    "../../scripts/refresh-license-metadata-core.ts"
   ],
   "exclude": ["dist", "node_modules"]
 }

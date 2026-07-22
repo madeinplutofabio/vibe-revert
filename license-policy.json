@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "dispositions": {
+    "0BSD": {
+      "disposition": "allowed",
+      "obligations": []
+    },
+    "Apache-2.0": {
+      "disposition": "allowed-with-obligations",
+      "obligations": ["include-license-text", "preserve-notice-if-present"]
+    },
+    "BSD-2-Clause": {
+      "disposition": "allowed-with-obligations",
+      "obligations": ["include-license-text"]
+    },
+    "BSD-3-Clause": {
+      "disposition": "allowed-with-obligations",
+      "obligations": ["include-license-text"]
+    },
+    "BlueOak-1.0.0": {
+      "disposition": "allowed-with-obligations",
+      "obligations": ["include-license-text"]
+    },
+    "CC0-1.0": {
+      "disposition": "allowed",
+      "obligations": []
+    },
+    "ISC": {
+      "disposition": "allowed-with-obligations",
+      "obligations": ["include-license-text"]
+    },
+    "MIT": {
+      "disposition": "allowed-with-obligations",
+      "obligations": ["include-license-text"]
+    },
+    "MIT-0": {
+      "disposition": "allowed",
+      "obligations": []
+    },
+    "Unlicense": {
+      "disposition": "allowed",
+      "obligations": []
+    }
+  }
+}

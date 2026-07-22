@@ -2,14 +2,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Fabio Marcello Salvadori
 //
-// Shared workspace-manifest collector (M H5). Discovers manifests from the
+// Shared workspace-manifest discovery (M H5). Discovers manifests from the
 // COMMITTED workspace definition (pnpm-workspace.yaml), validates unsafe patterns
 // BEFORE touching the filesystem, resolves each pattern's parent physically and
 // requires it to stay inside the repo BEFORE enumerating, follows symlinked
-// package directories, and resolves each manifest physically (realpath) to keep
-// it inside the repo. Any collector failure returns NO manifests -- a partial
-// inventory must never let policy evaluation report "clean". Shared by the entry
-// and the tests.
+// package directories, and resolves each manifest physically (realpath) to keep it
+// inside the repo. Any discovery failure returns NO manifests/paths -- a partial
+// inventory must never let a consumer report "clean".
+//
+// Two exports over one shared discovery+path-validation pass:
+//   - collectWorkspaceManifests(): reads and JSON-parses each manifest's content
+//     (used by the dependency-boundary checker); behavior is unchanged.
+//   - collectWorkspaceManifestPaths(): returns validated paths only, without ever
+//     reading manifest content, so a caller can own the authoritative read.
 
 import { existsSync, readdirSync, readFileSync, realpathSync, type Stats, statSync } from "node:fs";
 import { isAbsolute, join, relative, sep } from "node:path";
@@ -19,6 +24,21 @@ import { type RawManifest, sortViolations, type Violation } from "./dependency-p
 
 export interface CollectResult {
   readonly manifests: readonly RawManifest[];
+  readonly violations: readonly Violation[];
+}
+
+export interface ManifestPathsResult {
+  readonly paths: readonly string[];
+  readonly violations: readonly Violation[];
+}
+
+interface ManifestEntry {
+  readonly path: string;
+  readonly isRoot: boolean;
+}
+
+interface DiscoveryResult {
+  readonly entries: readonly ManifestEntry[];
   readonly violations: readonly Violation[];
 }
 
@@ -69,8 +89,8 @@ function extractPackagePatterns(doc: unknown, out: Violation[]): string[] | null
 }
 
 /** A workspace pattern must be relative, use `/` separators, and contain no
- *  whitespace, control characters (including NUL), backslashes, or `.`/`..` path
- *  components -- validated on the COMMITTED syntax before any filesystem access. */
+ *  whitespace, control characters (including NUL and DEL), backslashes, or `.`/`..`
+ *  path components -- validated on the COMMITTED syntax before any filesystem access. */
 function isSafeWorkspacePattern(pattern: string): boolean {
   if (pattern.length === 0 || /\s/.test(pattern)) {
     return false;
@@ -79,8 +99,9 @@ function isSafeWorkspacePattern(pattern: string): boolean {
     return false;
   }
   for (const ch of pattern) {
-    if (ch.charCodeAt(0) < 0x20) {
-      return false; // control characters, including NUL
+    const code = ch.charCodeAt(0);
+    if (code < 0x20 || code === 0x7f) {
+      return false; // control characters, including NUL and DEL
     }
   }
   for (const segment of pattern.split("/")) {
@@ -192,13 +213,16 @@ function resolvePattern(physicalRoot: string, pattern: string, out: Violation[])
   return null;
 }
 
-export function collectWorkspaceManifests(repoRoot: string): CollectResult {
+/** Discover and PATH-validate the workspace manifests without reading their
+ *  content. Returns the path-valid entries plus every discovery/path violation
+ *  (unsorted; callers sort). Content read + parse is the caller's responsibility. */
+function discoverManifestPaths(repoRoot: string): DiscoveryResult {
   let physicalRoot: string;
   try {
     physicalRoot = realpathSync(repoRoot);
   } catch (err) {
     return {
-      manifests: [],
+      entries: [],
       violations: [
         {
           code: "WORKSPACE_CONFIG_MALFORMED",
@@ -212,13 +236,13 @@ export function collectWorkspaceManifests(repoRoot: string): CollectResult {
   const rootManifestPath = join(physicalRoot, "package.json");
   if (!existsSync(wsPath)) {
     return {
-      manifests: [],
+      entries: [],
       violations: [{ code: "WORKSPACE_CONFIG_MISSING", message: `missing ${wsPath}` }],
     };
   }
   if (!existsSync(rootManifestPath)) {
     return {
-      manifests: [],
+      entries: [],
       violations: [
         { code: "WORKSPACE_ROOT_MANIFEST_MISSING", message: `missing ${rootManifestPath}` },
       ],
@@ -231,7 +255,7 @@ export function collectWorkspaceManifests(repoRoot: string): CollectResult {
     doc = parseYaml(readFileSync(wsPath, "utf8"));
   } catch (err) {
     return {
-      manifests: [],
+      entries: [],
       violations: [
         {
           code: "WORKSPACE_CONFIG_MALFORMED",
@@ -242,7 +266,7 @@ export function collectWorkspaceManifests(repoRoot: string): CollectResult {
   }
   const patterns = extractPackagePatterns(doc, violations);
   if (patterns === null) {
-    return { manifests: [], violations: sortViolations(violations) };
+    return { entries: [], violations };
   }
 
   const candidates: { lexicalPath: string; isRoot: boolean; pattern: string }[] = [
@@ -274,7 +298,7 @@ export function collectWorkspaceManifests(repoRoot: string): CollectResult {
   }
 
   const seenPhysical = new Set<string>();
-  const manifests: RawManifest[] = [];
+  const entries: ManifestEntry[] = [];
   for (const { lexicalPath, isRoot } of uniqueCandidates) {
     let stat: Stats;
     try {
@@ -318,13 +342,23 @@ export function collectWorkspaceManifests(repoRoot: string): CollectResult {
       continue;
     }
     seenPhysical.add(physical);
+    entries.push({ path: lexicalPath, isRoot });
+  }
+  return { entries, violations };
+}
+
+export function collectWorkspaceManifests(repoRoot: string): CollectResult {
+  const { entries, violations } = discoverManifestPaths(repoRoot);
+  const allViolations: Violation[] = [...violations];
+  const manifests: RawManifest[] = [];
+  for (const { path, isRoot } of entries) {
     let text: string;
     try {
-      text = readFileSync(lexicalPath, "utf8");
+      text = readFileSync(path, "utf8");
     } catch (err) {
-      violations.push({
+      allViolations.push({
         code: "WORKSPACE_MANIFEST_UNREADABLE",
-        message: `cannot read ${lexicalPath}: ${(err as Error).message}`,
+        message: `cannot read ${path}: ${(err as Error).message}`,
       });
       continue;
     }
@@ -332,17 +366,24 @@ export function collectWorkspaceManifests(repoRoot: string): CollectResult {
     try {
       content = JSON.parse(text);
     } catch (err) {
-      violations.push({
+      allViolations.push({
         code: "WORKSPACE_MANIFEST_INVALID_JSON",
-        message: `invalid JSON in ${lexicalPath}: ${(err as Error).message}`,
+        message: `invalid JSON in ${path}: ${(err as Error).message}`,
       });
       continue;
     }
-    manifests.push({ path: lexicalPath, isRoot, content });
+    manifests.push({ path, isRoot, content });
   }
-
-  if (violations.length > 0) {
-    return { manifests: [], violations: sortViolations(violations) };
+  if (allViolations.length > 0) {
+    return { manifests: [], violations: sortViolations(allViolations) };
   }
   return { manifests, violations: [] };
+}
+
+export function collectWorkspaceManifestPaths(repoRoot: string): ManifestPathsResult {
+  const { entries, violations } = discoverManifestPaths(repoRoot);
+  if (violations.length > 0) {
+    return { paths: [], violations: sortViolations(violations) };
+  }
+  return { paths: entries.map((e) => e.path), violations: [] };
 }
