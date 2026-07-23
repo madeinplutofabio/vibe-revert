@@ -35,7 +35,7 @@
   "devDependencies": {
     "@biomejs/biome": "2.4.13",
     "@changesets/cli": "2.31.0",
-    "@types/node": "22.15.30",
+    "@types/node": "26.1.1",
     "tar": "7.5.15",
     "tsx": "4.19.2",
     "typescript": "5.9.3",
