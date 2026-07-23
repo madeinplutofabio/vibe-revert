@@ -70,6 +70,15 @@ jobs:
         # date; pinning a fixed date would defeat that mechanism.
         run: pnpm check:dependency-policy
 
+      - name: Check license audit freshness (M H5)
+        # Governance gate: LICENSE-AUDIT.md must be byte-identical to a fresh render
+        # from the committed inputs (pnpm-lock.yaml + workspace manifests +
+        # license-policy.json + license-metadata.json). Offline and deterministic; the
+        # network refresh (refresh:license-metadata) is a separate manual step and is
+        # NOT run in CI. Invoked via the canonical package script so CI and local
+        # contributors share one command.
+        run: pnpm check:license-audit
+
       - name: Verify node-pty binding
         working-directory: packages/cli-commands
         shell: bash
