@@ -1,0 +1,53 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Fabio Marcello Salvadori
+#
+# CodeQL static analysis (M H5). An ADVANCED (custom) workflow — GitHub default
+# code-scanning setup is intentionally left DISABLED (verified not-configured), so the
+# two never run at once. Analyzes the TypeScript/JavaScript sources and the GitHub
+# Actions workflows on push to main, on pull requests, and weekly. build-mode: none —
+# CodeQL analyzes the committed sources directly (no dependency install or native build).
+#
+# Starts on the current CodeQL Action v4 major (github/codeql-action@v4.x.y). Action
+# pinning (M H4): every third-party `uses:` is a full commit SHA with an informational
+# version comment, reviewed with each Dependabot bump.
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "27 3 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-24.04
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [javascript-typescript, actions]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+        with:
+          category: "/language:${{ matrix.language }}"
