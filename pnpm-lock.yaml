@@ -18,8 +18,8 @@ importers:
         specifier: 22.15.30
         version: 22.15.30
       tar:
-        specifier: 7.5.15
-        version: 7.5.15
+        specifier: 7.5.19
+        version: 7.5.19
       tsx:
         specifier: 4.19.2
         version: 4.19.2
@@ -133,8 +133,8 @@ importers:
         specifier: 4.0.4
         version: 4.0.4
       tar:
-        specifier: 7.5.15
-        version: 7.5.15
+        specifier: 7.5.19
+        version: 7.5.19
       ulid:
         specifier: 3.0.2
         version: 3.0.2
@@ -1420,8 +1420,8 @@ packages:
     resolution: {integrity: sha512-vavAMRXOgBVNF6nyEEmL3DBK19iRpDcoIwW+swQ+CbGiu7lju6t+JklA1MHweoWtadgt4ISVUsXLyDq34ddcwA==}
     engines: {node: '>=4'}
 
-  tar@7.5.15:
-    resolution: {integrity: sha512-dzGK0boVlC4W5QFuQN1EFSl3bIDYsk7Tj40U6eIBnK2k/8ml7TZ5agbI5j5+qnoVcAA+rNtBml8SEiLxZpNqRQ==}
+  tar@7.5.19:
+    resolution: {integrity: sha512-4LeEWl96twnS2Q7Bz4MGqgazLqO+hJN63GZxXoIqh1T3VweYD997gbU1ItNsQafqqXTXd5WFyFdReLtwvRBNiw==}
     engines: {node: '>=18'}
 
   term-size@2.2.1:
@@ -2794,7 +2794,7 @@ snapshots:
 
   strip-bom@3.0.0: {}
 
-  tar@7.5.15:
+  tar@7.5.19:
     dependencies:
       '@isaacs/fs-minipass': 4.0.1
       chownr: 3.0.0
