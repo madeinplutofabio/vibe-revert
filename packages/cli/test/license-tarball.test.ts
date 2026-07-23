@@ -6,12 +6,14 @@
 // Gzipped ustar archives are built by hand (correct checksums for node-tar's strict
 // Parser) so every hostile entry shape is expressible without touching disk. Covered:
 // package.json byte extraction and sorted legal-file paths; legal-basename variants
-// and ignored files; absent package.json -> null; and the fail-closed hazards — a
-// symlinked file of interest, a second package/package.json, a duplicate legal path,
-// an unsafe (control-bearing) path under package/, path traversal inside the package/
-// tree, entries outside the package/ prefix ignored (never surfaced), package.json
-// over its byte cap, the entry-count cap, invalid limits, a gzip bomb over the
-// decompressed cap, a non-gzip buffer, and a buffer over the compressed cap.
+// and ignored files; absent package.json -> null; single-root confinement (a root that
+// is not "package/", directory entries, a second top-level root, a top-level file, an
+// unsafe root name, and type/path contradictions all fail closed or are tolerated per
+// the tar entry type); and the fail-closed hazards — a symlinked file of interest, a
+// second package.json, a duplicate legal path, an unsafe (control-bearing) path, path
+// traversal under the root, package.json over its byte cap, the entry-count cap,
+// invalid limits, a gzip bomb over the decompressed cap, a non-gzip buffer, and a
+// buffer over the compressed cap.
 
 import { gzipSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
@@ -186,20 +188,6 @@ describe("scanTarball — fail-closed hazards", () => {
     }
   });
 
-  it("never surfaces an entry outside the package/ prefix", async () => {
-    for (const name of ["../package/LICENSE", "/package/LICENSE", "other/LICENSE"]) {
-      const r = await scanTarball(
-        buildTgz([{ name, content: Buffer.from("x") }]),
-        DEFAULT_TARBALL_LIMITS,
-      );
-      expect(r.ok).toBe(true);
-      if (r.ok) {
-        expect(r.scan.legalFiles).toEqual([]);
-        expect(r.scan.packageJson).toBeNull();
-      }
-    }
-  });
-
   it("rejects a package.json exceeding its byte cap", async () => {
     const tgz = buildTgz([{ name: "package/package.json", content: Buffer.alloc(2048, 0x20) }]);
     const r = await scanTarball(tgz, { ...DEFAULT_TARBALL_LIMITS, maxPackageJsonBytes: 1024 });
@@ -254,6 +242,117 @@ describe("scanTarball — fail-closed hazards", () => {
     expect(r.ok).toBe(false);
     if (!r.ok) {
       expect(r.reason).toContain("compressed bytes");
+    }
+  });
+});
+
+describe("scanTarball — single-root confinement", () => {
+  it("collects a package whose root directory is not 'package/' (with dir entries)", async () => {
+    const tgz = buildTgz([
+      { name: "node/", type: "dir" },
+      { name: "node/package.json", content: Buffer.from('{"name":"@types/node"}') },
+      { name: "node/LICENSE", content: Buffer.from("MIT") },
+      { name: "node/assert/", type: "dir" },
+      { name: "node/assert.d.ts", content: Buffer.from("decl") },
+    ]);
+    const r = await scanTarball(tgz, DEFAULT_TARBALL_LIMITS);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.scan.packageJson?.toString("utf8")).toBe('{"name":"@types/node"}');
+      expect(r.scan.legalFiles).toEqual(["LICENSE"]);
+    }
+  });
+
+  it("still collects a standard package/ root with a directory entry", async () => {
+    const tgz = buildTgz([
+      { name: "package/", type: "dir" },
+      { name: "package/package.json", content: Buffer.from("{}") },
+      { name: "package/LICENSE", content: Buffer.from("x") },
+    ]);
+    const r = await scanTarball(tgz, DEFAULT_TARBALL_LIMITS);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.scan.legalFiles).toEqual(["LICENSE"]);
+    }
+  });
+
+  it("tolerates a root-only directory entry", async () => {
+    const tgz = buildTgz([
+      { name: "node/", type: "dir" },
+      { name: "node/package.json", content: Buffer.from("{}") },
+    ]);
+    expect((await scanTarball(tgz, DEFAULT_TARBALL_LIMITS)).ok).toBe(true);
+  });
+
+  it("rejects a root-only entry that is not declared as a directory", async () => {
+    // node-tar coerces a typeflag-0 file with a trailing-slash name to Directory, so a
+    // non-directory root-only entry is only reachable via a non-File type (symlink).
+    const tgz = buildTgz([{ name: "node/", type: "symlink", linkname: "x" }]);
+    const r = await scanTarball(tgz, DEFAULT_TARBALL_LIMITS);
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.reason).toContain("root entry is not a directory");
+    }
+  });
+
+  it("rejects a non-directory entry whose path ends with a slash", async () => {
+    const tgz = buildTgz([
+      { name: "node/package.json", content: Buffer.from("{}") },
+      { name: "node/fake/", type: "symlink", linkname: "x" },
+    ]);
+    const r = await scanTarball(tgz, DEFAULT_TARBALL_LIMITS);
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.reason).toContain("non-directory entry");
+    }
+  });
+
+  it("rejects path traversal under a named root", async () => {
+    const tgz = buildTgz([
+      { name: "node/package.json", content: Buffer.from("{}") },
+      { name: "node/../evil/LICENSE", content: Buffer.from("x") },
+    ]);
+    const r = await scanTarball(tgz, DEFAULT_TARBALL_LIMITS);
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.reason).toContain("unsafe");
+    }
+  });
+
+  it("rejects a second top-level root directory", async () => {
+    const tgz = buildTgz([
+      { name: "node/package.json", content: Buffer.from("{}") },
+      { name: "other/file.txt", content: Buffer.from("x") },
+    ]);
+    const r = await scanTarball(tgz, DEFAULT_TARBALL_LIMITS);
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.reason).toContain("more than one top-level");
+    }
+  });
+
+  it("rejects a top-level file alongside the root", async () => {
+    const tgz = buildTgz([
+      { name: "node/package.json", content: Buffer.from("{}") },
+      { name: "README", content: Buffer.from("x") },
+    ]);
+    const r = await scanTarball(tgz, DEFAULT_TARBALL_LIMITS);
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.reason).toContain("single package root");
+    }
+  });
+
+  it("rejects unsafe root directory names (traversal and control characters)", async () => {
+    for (const name of ["../package.json", `a${String.fromCharCode(1)}b/package.json`]) {
+      const r = await scanTarball(
+        buildTgz([{ name, content: Buffer.from("{}") }]),
+        DEFAULT_TARBALL_LIMITS,
+      );
+      expect(r.ok).toBe(false);
+      if (!r.ok) {
+        expect(r.reason).toContain("root directory name is unsafe");
+      }
     }
   });
 });
