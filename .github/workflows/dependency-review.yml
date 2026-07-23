@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Fabio Marcello Salvadori
+#
+# Dependency Review (M H5). A pull-request gate that inspects the dependency changes a
+# PR introduces (via the GitHub dependency-graph compare API — the repo's dependency
+# graph is enabled).
+#
+# License posture is governed separately by the committed license audit
+# (LICENSE-AUDIT.md + check:license-audit). This workflow configures no license
+# allow/deny policy and blocks newly introduced vulnerabilities at high severity
+# or above.
+#
+# Action pinning (M H4): full commit SHA + informational version comment,
+# Dependabot-tracked.
+name: Dependency Review
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-review:
+    name: Dependency Review
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+
+      - name: Dependency Review
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: high
