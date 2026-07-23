@@ -1,0 +1,58 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Fabio Marcello Salvadori
+#
+# OpenSSF Scorecard (M H5). Runs the Scorecard supply-chain security checks weekly and
+# on push to main, writes SARIF, uploads it to the code-scanning dashboard, and
+# publishes results to the OpenSSF Scorecard API (public repo). Mirrors OpenSSF's own
+# canonical workflow. This milestone stands up the workflow; the full findings review
+# and OpenSSF dossier are M H14.
+#
+# Permissions follow the Scorecard pattern: the analysis job elevates only
+# security-events: write (SARIF upload) and id-token: write (OIDC for publish_results).
+# Reading classic Branch Protection settings requires an admin-scoped PAT, which is
+# intentionally NOT configured here. Repository Rules remain visible to the default
+# GITHUB_TOKEN; any affected Scorecard result is reviewed in M H14.
+#
+# Action pinning (M H4): full commit SHA + informational version comment,
+# Dependabot-tracked.
+name: Scorecard
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "24 5 * * 2"
+
+permissions: read-all
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    runs-on: ubuntu-24.04
+    permissions:
+      security-events: write
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run Scorecard analysis
+        uses: ossf/scorecard-action@4eaacf0543bb3f2c246792bd56e8cdeffafb205a # v2.4.3
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: true
+
+      - name: Upload SARIF artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: scorecard-sarif
+          path: results.sarif
+          retention-days: 5
+
+      - name: Upload to code-scanning
+        uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+        with:
+          sarif_file: results.sarif
