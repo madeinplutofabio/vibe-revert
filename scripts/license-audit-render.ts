@@ -372,7 +372,6 @@ export function renderAuditModel(model: AuditModel): string {
     "registration. Dispositions are this repository's own policy, not a legal determination. A",
     "`review-required` or `disallowed` row, a metadata conflict, or an unresolved peer obligation",
     "means human review is needed; it is not an automated legal judgment.",
-    "",
   ];
   return `${lines.join("\n")}\n`;
 }
