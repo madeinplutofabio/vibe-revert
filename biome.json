@@ -22,6 +22,7 @@
       "!!**/coverage",
       "!!LICENSE",
       "!!NOTICE",
+      "!!license-metadata.json",
       "!!tests/fixtures/**/expected",
       "!!tests/fixtures-rollback/**/expected"
     ]
