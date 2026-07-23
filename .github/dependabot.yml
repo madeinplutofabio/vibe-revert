@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Fabio Marcello Salvadori
+#
+# Dependency-update automation (M H5). Two ecosystems:
+#   - npm: the pnpm workspace (single root pnpm-lock.yaml + all workspace manifests).
+#   - github-actions: the SHA-pinned `uses:` refs in .github/workflows. Dependabot
+#     proposes action updates while the M H4 invariant remains full-SHA pins, never
+#     floating major aliases; informational version comments are reviewed with the PR.
+#
+# node-pty is version-locked and EXCLUDED from automated npm updates (the ignore rule
+# below). Its native binding is source-built via node-gyp on the pinned Node 22.23.1
+# toolchain (pnpm-workspace.yaml onlyBuiltDependencies, D104.M.6) and verified by the
+# CI binding gate; an automated bump would break the reproducible build. It is NOT
+# frozen: upgrade it manually through a dependency-update PR that re-runs the toolchain,
+# binding, PTY-probe, and live-smoke gates across the CI matrix.
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "chore(deps)"
+      prefix-development: "chore(deps-dev)"
+    ignore:
+      # node-pty: version-locked (see header). Manual upgrades only, never automated.
+      - dependency-name: "node-pty"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci(deps)"
