@@ -44,7 +44,7 @@
     "clipanion": "3.2.1"
   },
   "devDependencies": {
-    "typescript": "5.9.3"
+    "typescript": "7.0.2"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json && node scripts/finalize-bin.mjs",
