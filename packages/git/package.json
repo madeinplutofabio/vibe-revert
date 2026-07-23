@@ -42,7 +42,7 @@
   "dependencies": {
     "@viberevert/session-format": "workspace:*",
     "picomatch": "4.0.4",
-    "tar": "7.5.15",
+    "tar": "7.5.21",
     "ulid": "3.0.2"
   },
   "devDependencies": {
