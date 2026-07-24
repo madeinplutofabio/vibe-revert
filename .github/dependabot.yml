@@ -1,37 +1,56 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Fabio Marcello Salvadori
 #
-# Dependency-update automation (M H5). Two ecosystems:
-#   - npm: the pnpm workspace (single root pnpm-lock.yaml + all workspace manifests).
-#   - github-actions: the SHA-pinned `uses:` refs in .github/workflows. Dependabot
-#     proposes action updates while the M H4 invariant remains full-SHA pins, never
-#     floating major aliases; informational version comments are reviewed with the PR.
+# Dependency-update automation. Two ecosystems, two policies:
 #
-# node-pty is version-locked and EXCLUDED from automated npm updates (the ignore rule
-# below). Its native binding is source-built via node-gyp on the pinned Node 22.23.1
-# toolchain (pnpm-workspace.yaml onlyBuiltDependencies, D104.M.6) and verified by the
-# CI binding gate; an automated bump would break the reproducible build. It is NOT
-# frozen: upgrade it manually through a dependency-update PR that re-runs the toolchain,
-# binding, PTY-probe, and live-smoke gates across the CI matrix.
+#   - github-actions: Dependabot proposes action updates while the M H4
+#     invariant remains full-SHA pins, never floating major aliases;
+#     informational version comments are reviewed with the PR.
+#
+#   - npm: routine version-update PRs are DISABLED
+#     (`open-pull-requests-limit: 0`). The M H5 license-audit merge gate
+#     hashes the full root manifest and lockfile, so every dependency change
+#     invalidates LICENSE-AUDIT.md until metadata and the audit are
+#     deliberately regenerated. Bot-opened npm version PRs therefore cannot
+#     satisfy the repository's merge requirements on their own.
+#
+# npm dependencies are maintained through deliberate, manually prepared
+# batches driven by Dependabot alerts and actual project needs. Each batch
+# refreshes license metadata, regenerates the audit, and passes the normal
+# merge gates.
+#
+# Repository-level settings, controlled outside this file:
+#   - Dependabot alerts: ENABLED
+#   - Dependabot security updates: DISABLED
+#
+# The npm ignore rules below preserve constraints that must still apply if
+# automated npm version updates are re-enabled in the future.
+#
+# node-pty is version-locked and excluded from automated npm updates. Its
+# native binding is source-built via node-gyp on the pinned Node 22.23.1
+# toolchain (pnpm-workspace.yaml onlyBuiltDependencies, D104.M.6) and verified
+# by the CI binding gate. Upgrade it only through a deliberate dependency PR
+# that re-runs the toolchain, binding, PTY-probe, and live-smoke gates across
+# the CI matrix.
 version: 2
 updates:
   - package-ecosystem: "npm"
     directory: "/"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 0
     commit-message:
       prefix: "chore(deps)"
       prefix-development: "chore(deps-dev)"
     ignore:
-      # node-pty: version-locked (see header). Manual upgrades only, never automated.
+      # Manual upgrades only; see the header.
       - dependency-name: "node-pty"
-      # typescript: hold the current 5.x major until the TypeScript 7 (native compiler)
-      # migration is done deliberately; 5.x minors and patches still flow.
+      # Hold the current 5.x major until the TypeScript 7 native-compiler
+      # migration is undertaken deliberately.
       - dependency-name: "typescript"
         update-types: ["version-update:semver-major"]
-      # @types/node: must track the pinned Node 22 runtime, so ignore majors and stay on
-      # 22.x. Changing the pinned Node runtime major is a deliberate M H7 matrix decision.
+      # Track the pinned Node 22 runtime. A Node major change is a deliberate
+      # M H7 matrix decision.
       - dependency-name: "@types/node"
         update-types: ["version-update:semver-major"]
 
