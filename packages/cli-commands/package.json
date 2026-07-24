@@ -48,10 +48,10 @@
     "@viberevert/reporters": "workspace:*",
     "@viberevert/session-format": "workspace:*",
     "clipanion": "3.2.1",
-    "picomatch": "4.0.4"
+    "picomatch": "4.0.5"
   },
   "devDependencies": {
-    "@types/picomatch": "4.0.2"
+    "@types/picomatch": "4.0.3"
   },
   "optionalDependencies": {
     "node-pty": "1.1.0"
