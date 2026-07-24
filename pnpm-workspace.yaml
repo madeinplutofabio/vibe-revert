@@ -8,3 +8,11 @@ packages:
 # reviewed native-dependency policy change.
 onlyBuiltDependencies:
   - "node-pty"
+
+# vite is a TRANSITIVE dependency (vitest -> vite; @vitest/mocker -> vite peer) and is
+# not declared in any workspace manifest, so an ordinary `pnpm update` cannot re-resolve
+# it. Both vitest consumers accept vite ^8, so this override pins the single transitive
+# vite to the exact patched 8.0.16 (server.fs.deny bypass + launch-editor advisories) --
+# a compatible, in-range patch, NOT a forced out-of-range upgrade.
+overrides:
+  vite: "8.0.16"
