@@ -43,7 +43,7 @@
     "@viberevert/session-format": "workspace:*",
     "ulid": "3.0.2",
     "yaml": "2.8.3",
-    "zod": "4.4.1"
+    "zod": "4.4.3"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
