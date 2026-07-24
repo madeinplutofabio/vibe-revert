@@ -26,6 +26,14 @@ updates:
     ignore:
       # node-pty: version-locked (see header). Manual upgrades only, never automated.
       - dependency-name: "node-pty"
+      # typescript: hold the current 5.x major until the TypeScript 7 (native compiler)
+      # migration is done deliberately; 5.x minors and patches still flow.
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
+      # @types/node: must track the pinned Node 22 runtime, so ignore majors and stay on
+      # 22.x. Changing the pinned Node runtime major is a deliberate M H7 matrix decision.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "github-actions"
     directory: "/"
