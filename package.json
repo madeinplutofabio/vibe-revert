@@ -33,7 +33,7 @@
     "changeset:publish": "changeset publish"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.4.13",
+    "@biomejs/biome": "2.5.5",
     "@changesets/cli": "2.31.0",
     "@types/node": "22.15.30",
     "tar": "7.5.21",
