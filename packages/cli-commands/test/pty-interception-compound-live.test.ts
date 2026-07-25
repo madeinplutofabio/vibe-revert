@@ -73,8 +73,8 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { PTY_INTERCEPTION_PROTOCOL_VERSION } from "../src/commands/pty-interception.js";
 import { generateBashInterceptionHook } from "../src/commands/pty-interception-hook.js";
-import { loadPtyModule, type PtyModule, type PtyProcess } from "../src/commands/pty-loader.js";
-import { resolveHostInteractiveShell } from "../src/commands/shell-pty.js";
+import type { PtyModule, PtyProcess } from "../src/commands/pty-loader.js";
+import { resolveLivePtyHost } from "./live-pty-host.js";
 
 const PROMPT = "viberevert$ ";
 const NONCE = "compoundcharnonce";
@@ -525,21 +525,6 @@ async function awaitCleanupExit(
   }
 }
 
-async function resolveHostBash(): Promise<{ pty: PtyModule; bashPath: string } | null> {
-  if (process.platform === "win32") {
-    return null;
-  }
-  const pty = await loadPtyModule();
-  if (pty === null) {
-    return null;
-  }
-  const shell = resolveHostInteractiveShell();
-  if (shell === null || shell.kind !== "bash") {
-    return null;
-  }
-  return { pty, bashPath: shell.path };
-}
-
 function requestsFor(active: PolicyParent, token: string): readonly RecordedRequest[] {
   return active.requests().filter((r) => r.rawLine.includes(token));
 }
@@ -783,9 +768,9 @@ describe("compound PTY interception -- `;` sequence characterization (M H1a)", (
   it(
     "allow-all: both simple commands are dispositioned, audited, write-started, and execute",
     async (ctx) => {
-      const host = await resolveHostBash();
-      if (host === null) {
-        reportEvidence("[compound `;` allow-all] SKIP: not a POSIX Bash + node-pty host");
+      const host = await resolveLivePtyHost();
+      if (!host.ok) {
+        reportEvidence(`[compound \`;\` allow-all] SKIP: ${host.reason}`);
         ctx.skip();
         return;
       }
@@ -819,9 +804,9 @@ describe("compound PTY interception -- `;` sequence characterization (M H1a)", (
   it(
     "policy-block B: every B-selected event is dispositioned block and starts no write; B never executes",
     async (ctx) => {
-      const host = await resolveHostBash();
-      if (host === null) {
-        reportEvidence("[compound `;` block-B] SKIP: not a POSIX Bash + node-pty host");
+      const host = await resolveLivePtyHost();
+      if (!host.ok) {
+        reportEvidence(`[compound \`;\` block-B] SKIP: ${host.reason}`);
         ctx.skip();
         return;
       }
@@ -873,9 +858,9 @@ describe("compound PTY interception -- `;` sequence characterization (M H1a)", (
   it(
     "audit-failure for B: every B-selected event is dispositioned close (audit attempted+failed), starts no write; B never executes",
     async (ctx) => {
-      const host = await resolveHostBash();
-      if (host === null) {
-        reportEvidence("[compound `;` audit-fail-B] SKIP: not a POSIX Bash + node-pty host");
+      const host = await resolveLivePtyHost();
+      if (!host.ok) {
+        reportEvidence(`[compound \`;\` audit-fail-B] SKIP: ${host.reason}`);
         ctx.skip();
         return;
       }
@@ -1695,11 +1680,9 @@ describe("compound PTY interception -- construct matrix on the PS1 driver (M H1b
     it(
       spec.caseId,
       async (ctx) => {
-        const host = await resolveHostBash();
-        if (host === null) {
-          reportEvidence(
-            `[compound-characterization] SKIP ${spec.caseId}: not a POSIX Bash + node-pty host`,
-          );
+        const host = await resolveLivePtyHost();
+        if (!host.ok) {
+          reportEvidence(`[compound-characterization] SKIP ${spec.caseId}: ${host.reason}`);
           ctx.skip();
           return;
         }
@@ -2810,11 +2793,9 @@ describe("compound PTY interception -- PS2 / multiline characterization (M H1b2)
     it(
       spec.caseId,
       async (ctx) => {
-        const host = await resolveHostBash();
-        if (host === null) {
-          reportEvidence(
-            `[multiline-characterization] SKIP ${spec.caseId}: not a POSIX Bash + node-pty host`,
-          );
+        const host = await resolveLivePtyHost();
+        if (!host.ok) {
+          reportEvidence(`[multiline-characterization] SKIP ${spec.caseId}: ${host.reason}`);
           ctx.skip();
           return;
         }
