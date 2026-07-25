@@ -215,6 +215,10 @@ describe("test-only alias is not part of the package's public surface", () => {
   it("`_assertArchiveEntriesForTests` is not exported from the @viberevert/git barrel", () => {
     expect("_assertArchiveEntriesForTests" in gitExports).toBe(false);
   });
+
+  it("`_extractUntrackedTarballForTests` is not exported from the @viberevert/git barrel", () => {
+    expect("_extractUntrackedTarballForTests" in gitExports).toBe(false);
+  });
 });
 
 // =============================================================================

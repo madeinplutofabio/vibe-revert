@@ -1308,3 +1308,17 @@ async function collectHashMismatches(
     }
   }
 }
+
+// =============================================================================
+// Test-only export
+// =============================================================================
+//
+// Direct alias of the private `extractUntrackedTarball` — NOT a wrapper, no
+// changed parameters. Exists solely so the extraction-time defense-in-depth
+// filter (regular-file-only, safe-path, non-`.viberevert/**`) can be exercised
+// DIRECTLY, bypassing loadRestorePreflight — which would otherwise reject a
+// hostile archive before extraction ever runs. Kept out of the package barrel
+// (`index.ts`) and `_`-prefixed per the test-only convention documented there;
+// package-local tests import it via `../src/restore.js`. Not part of the
+// supported API.
+export const _extractUntrackedTarballForTests = extractUntrackedTarball;
