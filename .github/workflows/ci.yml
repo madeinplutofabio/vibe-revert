@@ -24,16 +24,26 @@ permissions:
 # merge -- major aliases (e.g. @v5) MUST NOT be restored in executable `uses:`
 # fields.
 
-# M G4 Step 4f.1 (D104.M.6): node-pty is the sole build-script-approved
-# dependency (pnpm-workspace.yaml onlyBuiltDependencies). Its native binding is
-# provisioned during `pnpm install` -- a source build via node-gyp on Linux
-# (node-pty@1.1.0 ships no Linux prebuild) and a bundled prebuild on Windows.
-# Node is pinned to an EXACT version so the Linux source build uses a fixed
-# runtime/header target; any Node bump must re-run the toolchain, binding,
-# PTY-probe, and live-smoke gates.
+# node-pty is the sole build-script-approved dependency (pnpm-workspace.yaml
+# onlyBuiltDependencies). Its native binding is provisioned during `pnpm install`
+# (a node-gyp source build where no prebuild is available). Node 22.23.1 is the
+# pinned release toolchain. The Linux/Node 22.23.1 cell verifies that the native
+# build prerequisites are present, that node-pty installs, and that the resulting
+# binding loads -- it does NOT independently enforce compilation-from-source
+# (node-pty source-builds on Linux by necessity, shipping no Linux prebuild). How
+# node-pty is provisioned on the other cells is what this matrix ESTABLISHES, not
+# something it presumes.
+
+# M H7: two concerns, split.
+#   - gates: platform-independent code checks (lint, typecheck, dependency
+#     policy, license-audit freshness), run ONCE.
+#   - compat: a six-cell {ubuntu, macos, windows} x {Node 22.23.1, 24.x} matrix
+#     that installs, verifies the node-pty binding, builds, and runs the full
+#     test suite on every cell. The Windows/Node 22.23.1 cell (pinned release
+#     toolchain) additionally runs the PowerShell release smoke.
 jobs:
-  build-and-test:
-    name: Build and test (Linux, Node 22.23.1)
+  gates:
+    name: Gates (lint, typecheck, policy, audit)
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
@@ -41,7 +51,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Enable Corepack (uses runner's system Node; provides pnpm)
+      - name: Enable Corepack
+        # The repository pins pnpm@10.29.3 via packageManager and enforces the
+        # exact version through package-manager-strict-version. Corepack must run
+        # before setup-node because setup-node's pnpm cache lookup invokes pnpm.
         run: corepack enable
 
       - name: Set up Node 22.23.1 with pnpm cache
@@ -50,54 +63,8 @@ jobs:
           node-version: 22.23.1
           cache: pnpm
 
-      - name: Report native build toolchain (Linux source build)
-        run: |
-          node --version
-          pnpm --version
-          python3 --version
-          make --version | head -n 1
-          c++ --version | head -n 1
-
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-
-      - name: Check dependency boundary (M H5)
-        # Governance gate: the committed workspace manifests must satisfy
-        # dependency-boundary.json. Invoked via the canonical package script so CI
-        # and local contributors share one command and implementation changes stay
-        # invisible here. No --as-of: the check evaluates against the current date
-        # on purpose, so an expiring requiresReview override fails after its review
-        # date; pinning a fixed date would defeat that mechanism.
-        run: pnpm check:dependency-policy
-
-      - name: Check license audit freshness (M H5)
-        # Governance gate: LICENSE-AUDIT.md must be byte-identical to a fresh render
-        # from the committed inputs (pnpm-lock.yaml + workspace manifests +
-        # license-policy.json + license-metadata.json). Offline and deterministic; the
-        # network refresh (refresh:license-metadata) is a separate manual step and is
-        # NOT run in CI. Invoked via the canonical package script so CI and local
-        # contributors share one command.
-        run: pnpm check:license-audit
-
-      - name: Verify node-pty binding
-        working-directory: packages/cli-commands
-        shell: bash
-        run: |
-          node -e '
-            const pkg = require("node-pty/package.json");
-            if (pkg.version !== "1.1.0") {
-              throw new Error("unexpected node-pty version: " + pkg.version);
-            }
-            const mod = require("node-pty");
-            if (typeof mod.spawn !== "function") {
-              throw new Error("node-pty loaded without a callable spawn export");
-            }
-            console.log(
-              "[node-pty binding] PASS: version=" + pkg.version +
-              " spawn=function node=" + process.versions.node +
-              " platform=" + process.platform + " arch=" + process.arch
-            );
-          '
 
       - name: Lint
         run: pnpm lint
@@ -105,31 +72,73 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
-      - name: Build
-        run: pnpm build
+      - name: Check dependency boundary (M H5)
+        run: pnpm check:dependency-policy
 
-      - name: Test
-        run: pnpm test
+      - name: Check license audit freshness (M H5)
+        run: pnpm check:license-audit
 
-  release-dry-run:
-    name: Release dry-run (Windows, pack + smoke)
-    needs: build-and-test
-    runs-on: windows-latest
+  compat:
+    name: Build and test (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        # Node 22.23.1 is the exact release toolchain.
+        # Node 24.x tracks the latest available Node 24 patch for compatibility detection.
+        include:
+          - os: ubuntu-24.04
+            label: Linux, Node 22.23.1
+            node: 22.23.1
+            source_build: true
+          - os: ubuntu-24.04
+            label: Linux, Node 24
+            node: 24.x
+          - os: macos-latest
+            label: macOS, Node 22.23.1
+            node: 22.23.1
+          - os: macos-latest
+            label: macOS, Node 24
+            node: 24.x
+          - os: windows-latest
+            label: Windows, Node 22.23.1
+            node: 22.23.1
+            release_smoke: true
+          - os: windows-latest
+            label: Windows, Node 24
+            node: 24.x
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Enable Corepack (uses runner's system Node; provides pnpm)
+      - name: Enable Corepack
+        # The repository pins pnpm@10.29.3 via packageManager and enforces the
+        # exact version through package-manager-strict-version. Corepack must run
+        # before setup-node because setup-node's pnpm cache lookup invokes pnpm.
         run: corepack enable
 
-      - name: Set up Node 22.23.1 with pnpm cache
+      - name: Set up Node ${{ matrix.node }} with pnpm cache
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 22.23.1
+          node-version: ${{ matrix.node }}
           cache: pnpm
+
+      - name: Toolchain report
+        shell: bash
+        run: |
+          node --version
+          pnpm --version
+          echo "platform=$(node -p process.platform) arch=$(node -p process.arch)"
+
+      - name: Native build prerequisites (Linux)
+        if: matrix.source_build
+        run: |
+          python3 --version
+          make --version | head -n 1
+          c++ --version | head -n 1
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -154,8 +163,16 @@ jobs:
             );
           '
 
+      - name: Build
+        run: pnpm build
+
+      - name: Test
+        run: pnpm test
+
       - name: Smoke (PowerShell 7+, pwsh)
+        if: matrix.release_smoke
         run: pwsh -ExecutionPolicy Bypass -File scripts/smoke-test.ps1
 
       - name: Smoke (Windows PowerShell 5.1, powershell.exe)
+        if: matrix.release_smoke
         run: powershell.exe -ExecutionPolicy Bypass -File scripts/smoke-test.ps1
