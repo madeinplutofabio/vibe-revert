@@ -112,7 +112,7 @@
 //     on partial regex — the prefix/suffix is contract-locked but
 //     the embedded cause text isn't.
 
-import { mkdirSync, mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync } from "node:fs";
 import { access, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -272,7 +272,12 @@ function makeTempDir(): string {
  * surfaces as a clean failure rather than being masked.
  */
 function makeTempRepoRoot(): string {
-  const dir = makeTempDir();
+  // realpathSync canonicalizes the mkdtempSync root so the paths tests derive
+  // from repoRoot (via fixPromptPathFor / the report-path helper) match the
+  // command's resolved cwd — on macOS os.tmpdir() is /var/folders/… but
+  // resolveRepoRoot sees /private/var/…. No-op where tmpdir has no symlink;
+  // cleanup rms the same directory via the symlink.
+  const dir = realpathSync(makeTempDir());
   mkdirSync(join(dir, ".git"), { recursive: true });
   return dir;
 }

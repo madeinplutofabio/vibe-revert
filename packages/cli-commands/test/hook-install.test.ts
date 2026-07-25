@@ -109,11 +109,17 @@ afterEach(async () => {
 });
 
 async function makeTempRepoRoot(): Promise<string> {
-  const repoRoot = path.join(
+  const created = path.join(
     os.tmpdir(),
     `viberevert-hook-install-test-${crypto.randomBytes(8).toString("hex")}`,
   );
-  await fsPromises.mkdir(repoRoot, { recursive: true });
+  await fsPromises.mkdir(created, { recursive: true });
+  // Canonicalize so the emitted-path copy (built from the command's resolved
+  // cwd) matches the expected strings tests derive from repoRoot. On macOS
+  // os.tmpdir() is /var/folders/… but the resolved cwd is /private/var/…;
+  // realpath aligns both. No-op where tmpdir has no symlink. tempDirs gets the
+  // canonical path (same directory via the symlink), so cleanup is unaffected.
+  const repoRoot = await fsPromises.realpath(created);
   tempDirs.push(repoRoot);
   return repoRoot;
 }

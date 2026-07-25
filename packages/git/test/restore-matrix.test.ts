@@ -115,6 +115,8 @@ async function runGit(
  * pass them via `additionalGitignore`; they're committed as part of the
  * same initial commit so they don't appear as a modification.
  */
+// This fixture matrix tests byte-exact restoration with autocrlf disabled.
+// Real autocrlf=true checkout/smudge behavior is tracked separately.
 async function setupRepo(opts: { additionalGitignore?: string } = {}): Promise<RepoFixture> {
   const parentDir = await mkdtemp(join(tmpdir(), "viberevert-restore-matrix-"));
   const repoRoot = join(parentDir, "repo");
@@ -124,6 +126,20 @@ async function setupRepo(opts: { additionalGitignore?: string } = {}): Promise<R
   await runGit(repoRoot, ["config", "user.email", "test@example.com"]);
   await runGit(repoRoot, ["config", "user.name", "Test User"]);
   await runGit(repoRoot, ["config", "commit.gpgsign", "false"]);
+  // These rows write fixtures with raw LF and assert the post-restore working
+  // tree byte-for-byte. Pin core.autocrlf=false (repo-local, never global CI
+  // config) so the round-trip stays byte-exact: where core.autocrlf=true
+  // (GitHub's Windows runners, Git for Windows), restore's `git reset --hard
+  // HEAD` re-smudges the stored LF blob to CRLF, inflating a 3-byte file to 4
+  // and failing sha256 verification. This does NOT exercise real autocrlf=true
+  // product behavior — that is a separate fixture (tracked follow-up) which
+  // must let Git create the working tree naturally, not hand-write LF.
+  await runGit(repoRoot, ["config", "core.autocrlf", "false"]);
+  // Assert the pin immediately so a future helper refactor can't silently drop
+  // the assumption these byte-exact hash assertions depend on.
+  expect((await runGit(repoRoot, ["config", "--get", "core.autocrlf"])).stdout.trim()).toBe(
+    "false",
+  );
 
   const gitignoreContent = `.viberevert/\n${opts.additionalGitignore ?? ""}`;
   await writeFile(join(repoRoot, ".gitignore"), gitignoreContent);

@@ -31,7 +31,7 @@
 //     are monkey-patched; a noisy Command runs; assertion: zero calls
 //     to the real process streams.
 
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { type BaseContext, Command, type CommandClass } from "clipanion";
@@ -81,7 +81,10 @@ function makeTestCommand(
 }
 
 beforeEach(async () => {
-  tmpRoot = await mkdtemp(join(tmpdir(), "viberevert-rcip-"));
+  // realpath() canonicalizes the mkdtemp root so the cwd-equality assertions
+  // hold on macOS, where os.tmpdir() is /var/folders/… but the kernel resolves
+  // the process cwd to /private/var/folders/…. No-op where tmpdir has no symlink.
+  tmpRoot = await realpath(await mkdtemp(join(tmpdir(), "viberevert-rcip-")));
   originalCwd = process.cwd();
 });
 
@@ -375,7 +378,8 @@ describe("runCommandInProcess — multi-type writes", () => {
 
 describe("runCommandInProcess — concurrency: FIFO mutex serializes calls; each preserves its own cwd", () => {
   it("two concurrent calls with different cwds are serialized; each Command sees its own cwd BEFORE and AFTER an async delay (proves cwd cannot be clobbered mid-execution)", async () => {
-    const tmpRootB = await mkdtemp(join(tmpdir(), "viberevert-rcip-B-"));
+    // realpath() for the same macOS cwd-canonicalization reason as tmpRoot.
+    const tmpRootB = await realpath(await mkdtemp(join(tmpdir(), "viberevert-rcip-B-")));
     try {
       const observationsA: string[] = [];
       const observationsB: string[] = [];
