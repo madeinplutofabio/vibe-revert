@@ -19,8 +19,10 @@
 //
 // Expectations are grounded in a node-tar 7.5.21 characterization (see
 // hostile-archive.ts): `list()` preserves dot segments, repeated slashes,
-// leading slashes, and drive-qualified paths; it normalizes `\` to `/`, applies
-// PAX `path=` overrides to the effective `entry.path`, and reports
+// leading slashes, and drive-qualified paths; its handling of `\` is platform-
+// dependent (Windows rewrites it to `/`, while POSIX preserves it literally),
+// so backslash forms are asserted by rejection category only. It applies PAX
+// `path=` overrides to the effective `entry.path`, and reports
 // CharacterDevice/BlockDevice/etc. verbatim.
 
 import { execFile } from "node:child_process";
@@ -88,8 +90,8 @@ const NON_REGULAR_CASES: readonly (readonly [string, TarEntrySpec, string])[] = 
   ["block device", blockDeviceEntry("a"), "BlockDevice"],
 ];
 
-// Separator / platform path forms and the effective `entry.path` node-tar
-// reports (`\`->`/` on read; dot segments, `//`, leading `/`, drive preserved).
+// Forward-slash, dot, and drive forms node-tar reports identically on every
+// platform, so the effective `entry.path` is pinned.
 const UNSAFE_PATH_CASES: readonly (readonly [input: string, effectivePath: string])[] = [
   ["../evil", "../evil"],
   ["a/../../evil", "a/../../evil"],
@@ -97,10 +99,18 @@ const UNSAFE_PATH_CASES: readonly (readonly [input: string, effectivePath: strin
   ["./file", "./file"],
   ["a//b", "a//b"],
   ["a/../b", "a/../b"],
-  ["..\\evil", "../evil"],
-  ["C:\\evil", "C:/evil"],
   ["C:/evil", "C:/evil"],
-  ["\\\\server\\share\\evil", "//server/share/evil"],
+];
+
+// Backslash forms: node-tar's separator handling is platform-dependent — Windows
+// rewrites `\`->`/` (path arrives normalized), POSIX keeps `\` as a literal
+// filename character. Both platforms reject the path as non-canonical (Windows
+// for the `.`/`..`/`//`/drive it becomes; POSIX for the backslash), so pin the
+// rejection category only, not the OS-specific effective path.
+const UNSAFE_BACKSLASH_INPUTS: readonly string[] = [
+  "..\\evil",
+  "C:\\evil",
+  "\\\\server\\share\\evil",
 ];
 
 describe("assertArchiveEntries — hostile archive matrix (unit)", () => {
@@ -129,6 +139,12 @@ describe("assertArchiveEntries — hostile archive matrix (unit)", () => {
       [],
       new RegExp(`non-canonical path.*${escapeRegExp(effectivePath)}`),
     );
+  });
+
+  it.each(
+    UNSAFE_BACKSLASH_INPUTS,
+  )("rejects unsafe path (platform-dependent separator): %s", async (inputPath) => {
+    await reject([fileEntry(inputPath, "x")], [], /non-canonical path/);
   });
 
   it("internal-storage guard fires before the canonical check (`.viberevert/../x`)", async () => {
