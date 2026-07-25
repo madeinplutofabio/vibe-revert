@@ -721,3 +721,16 @@ function assertPatchDoesNotTargetVibeRevertInternalPaths(
     }
   }
 }
+
+// =============================================================================
+// Test-only export
+// =============================================================================
+//
+// Direct alias of the private `assertArchiveEntries` archive-shape guard —
+// NOT a wrapper, no divergent behavior. Exists solely so the hostile-archive
+// branch matrix (entry type / unsafe path / duplicate / set parity) can be
+// driven directly without constructing a full checkpoint per case. Kept out
+// of the package barrel (`index.ts`) and `_`-prefixed per the test-only
+// convention documented there; package-local tests import it via
+// `../src/restore-preflight.js`. Not part of the supported API.
+export const _assertArchiveEntriesForTests = assertArchiveEntries;
