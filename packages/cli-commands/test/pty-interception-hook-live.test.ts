@@ -32,8 +32,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { PTY_INTERCEPTION_PROTOCOL_VERSION } from "../src/commands/pty-interception.js";
 import { resolveAuditedCwd } from "../src/commands/pty-interception-audit.js";
 import { generateBashInterceptionHook } from "../src/commands/pty-interception-hook.js";
-import { loadPtyModule, type PtyModule, type PtyProcess } from "../src/commands/pty-loader.js";
-import { resolveHostInteractiveShell } from "../src/commands/shell-pty.js";
+import type { PtyProcess } from "../src/commands/pty-loader.js";
+import { resolveLivePtyHost } from "./live-pty-host.js";
 
 const PROMPT = "viberevert$ ";
 const MARKER_CMD = "echo VR_HOOK_$((6*7))_ok";
@@ -48,6 +48,13 @@ const EXIT_BACKSTOP_MS = 80_000;
 const CLEANUP_EXIT_MS = 5_000;
 const TEST_TIMEOUT_MS = 90_000;
 const MAX_OUTPUT_CHARS = 64_000;
+
+// One stable seam for CI-visible skip evidence: raw process.stdout.write is
+// emitted by `vitest run`, whereas console.log is intercepted by the runner and
+// not shown. (Mirrors shell-pty-live-smoke / pty-interception-compound-live.)
+function reportEvidence(message: string): void {
+  process.stdout.write(`${message}\n`);
+}
 
 /**
  * A guarded command that counts the interactive shell's OPEN socket descriptors
@@ -297,21 +304,6 @@ async function awaitCleanupExit(
   }
 }
 
-async function resolveHostBash(): Promise<{ pty: PtyModule; bashPath: string } | null> {
-  if (process.platform === "win32") {
-    return null;
-  }
-  const pty = await loadPtyModule();
-  if (pty === null) {
-    return null;
-  }
-  const shell = resolveHostInteractiveShell();
-  if (shell === null || shell.kind !== "bash") {
-    return null;
-  }
-  return { pty, bashPath: shell.path };
-}
-
 let rcDir = "";
 let parent: AllowParent | undefined;
 
@@ -330,8 +322,9 @@ describe("interception hook -- interactive prompt + descriptor lifecycle (M G4 S
   it(
     "returns to the interactive Bash prompt after an allowed guarded command",
     async (ctx) => {
-      const host = await resolveHostBash();
-      if (host === null) {
+      const host = await resolveLivePtyHost();
+      if (!host.ok) {
+        reportEvidence(`[interception hook: return-to-prompt] SKIP: ${host.reason}`);
         ctx.skip();
         return;
       }
@@ -489,8 +482,9 @@ describe("interception hook -- interactive prompt + descriptor lifecycle (M G4 S
   it(
     "frames a newline-containing cwd as ONE protocol line, and never allows the invalid cwd",
     async (ctx) => {
-      const host = await resolveHostBash();
-      if (host === null) {
+      const host = await resolveLivePtyHost();
+      if (!host.ok) {
+        reportEvidence(`[interception hook: newline-cwd] SKIP: ${host.reason}`);
         ctx.skip();
         return;
       }
