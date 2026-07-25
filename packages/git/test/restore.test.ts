@@ -576,6 +576,60 @@ describe("restoreCheckpoint — Step 3d targeted tests", () => {
         await repo.cleanup();
       }
     });
+
+    it("preserves a surfaced partial state when extraction is blocked", async () => {
+      const repo = await setupRepoWithCheckpoint();
+      try {
+        // Uncaptured untracked file — NOT in the manifest. deleteUncapturedUntracked
+        // runs BEFORE the extraction-conflict check, so it is removed before the
+        // throw: the working tree is partially mutated, proving restore is non-atomic.
+        const scratchAbs = join(repo.repoRoot, "scratch.txt");
+        await writeFile(scratchAbs, "uncaptured\n");
+
+        // Same residual blocker as the adjacent test: a non-empty directory at a
+        // captured file path that clearExtractionPathConflicts cannot rmdir.
+        const flatAbs = join(repo.repoRoot, repo.flatCapturedRel);
+        await rm(flatAbs);
+        await mkdir(flatAbs);
+        const blockerAbs = join(flatAbs, "blocker-dir");
+        await mkdir(blockerAbs);
+
+        let caught: unknown;
+        try {
+          await restoreCheckpoint(repo.checkpointDir, {
+            repoRoot: repo.repoRoot,
+            rollbackExcludePatterns: [],
+          });
+        } catch (e) {
+          caught = e;
+        }
+
+        // Typed rejection: the failure is surfaced structurally, never a false success.
+        expect(caught).toBeInstanceOf(RestoreExtractionConflictError);
+        const error = caught as RestoreExtractionConflictError;
+
+        // Intended conflict pinned (not merely "some conflict"): the blocked captured
+        // path, with the reason the adjacent non-empty-directory test locks.
+        expect(error.conflicts).toContainEqual(
+          expect.objectContaining({
+            manifestPath: repo.flatCapturedRel,
+            reason: expect.stringMatching(/could not be removed/i),
+          }),
+        );
+
+        // Non-atomic: the pre-extraction mutation phase already ran — the uncaptured
+        // untracked file was deleted before the conflict fired.
+        await expect(lstat(scratchAbs)).rejects.toMatchObject({ code: "ENOENT" });
+
+        // Partial state PRESERVED (not destructively cleaned, not rolled back): the
+        // blocker directory survives on disk for inspection or later recovery. This
+        // proves preservation at the git layer; actual recovery via the emergency
+        // checkpoint is CLI orchestration, tested elsewhere.
+        expect((await lstat(blockerAbs)).isDirectory()).toBe(true);
+      } finally {
+        await repo.cleanup();
+      }
+    });
   });
 });
 
