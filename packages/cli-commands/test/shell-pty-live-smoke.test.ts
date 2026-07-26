@@ -7,16 +7,23 @@
 // and drives: guarded prompt -> a benign guarded command that actually EXECUTES
 // -> the guarded prompt returns -> `exit` -> clean process termination (code 0).
 //
-// Prerequisites are decided BEFORE launch; each missing one is a LOGGED SKIP:
-// POSIX platform; node-pty loadable; host shell resolves to Bash;
-// resolveHostInteractiveShell guarantees an ABSOLUTE + re-verified EXECUTABLE
-// path; the environment can allocate + cleanly run a trivial PTY (probe exits 0);
-// git available; built CLI entry present. Once the CLI child launches, NOTHING
-// skips: a missing prompt, unexpected interceptor refusal, missing marker,
-// missing second prompt, early/abnormal exit, or teardown needing a force-kill
-// all FAIL, with per-phase deadlines. This box (Windows / node-pty absent) skips;
-// CI Linux is the first environment expected to execute the round-trip, and 4f
-// is not complete until it does.
+// Capability prerequisites are decided BEFORE launch and routed through the
+// M H7 Step 2.4 accounting boundary (`accountLivePtyHost`): POSIX platform;
+// node-pty loadable; host shell resolves to Bash (an absolute, re-verified
+// executable path); and the environment can allocate a trivial PTY. Per the
+// manifest's live-PTY disposition, synchronous allocation unavailability is a
+// permitted skip on the capability-gated platform (macOS), and the Bash-only
+// suite is a permitted not-applicable skip on Windows. Any unavailable outcome
+// is a violation on the required platform (Linux), and missing node-pty or Bash
+// is never silently accepted as a platform skip. A probe that allocates but then
+// exits nonzero or misses its deadline throws as an infrastructure failure.
+//
+// Once accounting permits execution, the smoke-only environment prerequisites
+// — Git availability and the built CLI entry — are test-environment requirements,
+// not platform dispositions, so either missing prerequisite throws. Once the CLI
+// child launches, nothing skips: a missing prompt, unexpected interceptor
+// refusal, missing marker, missing second prompt, early or abnormal exit, or
+// teardown requiring a force-kill all fail within bounded phase deadlines.
 //
 // Freshness: existsSync(CLI_ENTRY) proves presence, not freshness. The CI Linux
 // job builds packages/cli/dist/index.js in the SAME job (checkout -> install ->
@@ -44,6 +51,8 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { loadPtyModule, type PtyModule, type PtyProcess } from "../src/commands/pty-loader.js";
 import { resolveHostInteractiveShell } from "../src/commands/shell-pty.js";
+import { accountLivePtyHost } from "./live-pty-accounting.js";
+import type { LivePtyHostResult } from "./live-pty-host.js";
 
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
 const CLI_ENTRY = resolve(TEST_DIR, "..", "..", "cli", "dist", "index.js");
@@ -166,10 +175,6 @@ function waitForPtyExit(
   });
 }
 
-type Prereq =
-  | { readonly ok: true; readonly pty: PtyModule; readonly bashPath: string }
-  | { readonly ok: false; readonly reason: string };
-
 /** Allocate + cleanly run a trivial PTY (bash -lc "exit 0"); prove exit code 0. */
 async function probePtyAllocation(
   pty: PtyModule,
@@ -187,34 +192,52 @@ async function probePtyAllocation(
   } catch (err) {
     return { ok: false, reason: `PTY allocation failed at spawn: ${messageOf(err)}` };
   }
+  let exit: { exitCode: number; signal: number | undefined };
   try {
-    const exit = await waitForPtyExit(probe, PROBE_DEADLINE_MS);
-    if (exit.exitCode !== 0) {
-      return { ok: false, reason: `PTY probe exited ${exit.exitCode} (expected 0)` };
-    }
-    return { ok: true };
+    exit = await waitForPtyExit(probe, PROBE_DEADLINE_MS);
   } catch (err) {
     try {
       probe.kill();
     } catch {
       /* best-effort cleanup */
     }
-    return { ok: false, reason: `PTY probe did not exit cleanly: ${messageOf(err)}` };
+    // Allocated but did not exit within the bounded wait: an infrastructure
+    // failure, not a capability skip. Kill is best-effort cleanup only.
+    throw new Error(`PTY probe did not exit within the deadline: ${messageOf(err)}`);
   }
+  if (exit.exitCode !== 0) {
+    // Allocated but the trivial `exit 0` misbehaved: infrastructure, not a skip.
+    throw new Error(
+      `PTY probe exited ${exit.exitCode} (expected 0); treating as an infrastructure failure`,
+    );
+  }
+  return { ok: true };
 }
 
-/** Decide -- BEFORE any product launch -- whether this environment can run the round-trip. */
-async function checkPrerequisites(): Promise<Prereq> {
+/**
+ * Resolve THIS host's live-PTY capability for the smoke suite, with stable reason
+ * codes matching the shared resolver's contract. Keeps the smoke's own probe, but
+ * a non-zero exit / deadline THROWS (infrastructure) -- only a synchronous
+ * allocation failure is a capability-unavailable result. Git and the built CLI are
+ * NOT checked here: they are environment prerequisites for a CAPABLE host
+ * (assertSmokeEnv), never a platform disposition.
+ */
+async function resolveSmokeLivePtyHost(): Promise<LivePtyHostResult> {
   if (process.platform === "win32") {
     return {
       ok: false,
+      reasonCode: "requires_posix_bash",
       reason:
         "platform is win32 (public --pty resolves PowerShell; the bash-only installer refuses)",
     };
   }
   const pty = await loadPtyModule();
   if (pty === null) {
-    return { ok: false, reason: "node-pty unavailable / failed to load (loadPtyModule() -> null)" };
+    return {
+      ok: false,
+      reasonCode: "node_pty_unavailable",
+      reason: "node-pty unavailable / failed to load (loadPtyModule() -> null)",
+    };
   }
   // resolveHostInteractiveShell guarantees an ABSOLUTE, re-verified EXECUTABLE path
   // (or null); we additionally require it to be Bash (the only supported shell).
@@ -222,25 +245,33 @@ async function checkPrerequisites(): Promise<Prereq> {
   if (shell === null || shell.kind !== "bash") {
     return {
       ok: false,
+      reasonCode: "bash_unavailable",
       reason: `host interactive shell is not Bash (resolved: ${shell === null ? "none" : shell.kind})`,
-    };
-  }
-  try {
-    execFileSync("git", ["--version"], { stdio: "ignore" });
-  } catch {
-    return { ok: false, reason: "git is unavailable (needed for the session checkpoint)" };
-  }
-  if (!existsSync(CLI_ENTRY)) {
-    return {
-      ok: false,
-      reason: `built CLI entry missing at ${CLI_ENTRY} (run \`pnpm build\` first)`,
     };
   }
   const probe = await probePtyAllocation(pty, shell.path);
   if (!probe.ok) {
-    return { ok: false, reason: probe.reason };
+    return { ok: false, reasonCode: "pty_allocation_unavailable", reason: probe.reason };
   }
   return { ok: true, pty, bashPath: shell.path };
+}
+
+/**
+ * Environment prerequisites for a live-PTY-CAPABLE host to run the smoke: Git (the
+ * session checkpoint) and the built CLI entry. On a capable host a miss is a broken
+ * test environment, never a platform disposition, so it THROWS with the actionable
+ * diagnostic rather than skipping -- which would reopen the false-green path the
+ * accounting boundary closes.
+ */
+function assertSmokeEnv(): void {
+  try {
+    execFileSync("git", ["--version"], { stdio: "ignore" });
+  } catch {
+    throw new Error("git is unavailable (needed for the session checkpoint)");
+  }
+  if (!existsSync(CLI_ENTRY)) {
+    throw new Error(`built CLI entry missing at ${CLI_ENTRY} (run \`pnpm build\` first)`);
+  }
 }
 
 /** No installer refusal, no engine error, and no silent REPL fallback in the output. */
@@ -267,12 +298,11 @@ describe("viberevert shell --pty -- live PTY round-trip (M G4 Step 4f release ga
   it(
     "opens a guarded Bash prompt, runs a benign guarded command, and exits cleanly",
     async (ctx) => {
-      const prereq = await checkPrerequisites();
-      if (!prereq.ok) {
-        reportEvidence(`[shell --pty live smoke] SKIP: ${prereq.reason}`);
-        ctx.skip();
-        return;
-      }
+      const prereq = accountLivePtyHost(
+        { ctx, group: "shell-pty-live-smoke", label: "live-smoke" },
+        await resolveSmokeLivePtyHost(),
+      );
+      assertSmokeEnv();
       reportEvidence(
         `[shell --pty live smoke] RUN: bash=${prereq.bashPath} cliEntry=${CLI_ENTRY} node-pty=available`,
       );
@@ -422,12 +452,11 @@ describe("viberevert shell --pty -- live PTY round-trip (M G4 Step 4f release ga
   it(
     "audits accepted commands with the exact prompt-time cwd through the production session path (M G4 Step 5d)",
     async (ctx) => {
-      const prereq = await checkPrerequisites();
-      if (!prereq.ok) {
-        reportEvidence(`[shell --pty 5d cwd-audit] SKIP: ${prereq.reason}`);
-        ctx.skip();
-        return;
-      }
+      const prereq = accountLivePtyHost(
+        { ctx, group: "shell-pty-live-smoke", label: "cwd-audit" },
+        await resolveSmokeLivePtyHost(),
+      );
+      assertSmokeEnv();
 
       // Resolve the fixture root ONCE so the CLI's repo root and bash's startup
       // getcwd() (both PHYSICAL) agree byte-for-byte even when the OS tmpdir is
