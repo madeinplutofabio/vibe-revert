@@ -4,6 +4,11 @@
     "noEmit": true,
     "tsBuildInfoFile": "./.tsbuildinfo"
   },
-  "include": ["src", "test"],
+  "include": [
+    "src",
+    "test",
+    "../../scripts/support-manifest-live-pty.ts",
+    "../../scripts/support-manifest-parser.ts"
+  ],
   "exclude": ["dist", "node_modules"]
 }

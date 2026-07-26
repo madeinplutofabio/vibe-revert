@@ -74,7 +74,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { PTY_INTERCEPTION_PROTOCOL_VERSION } from "../src/commands/pty-interception.js";
 import { generateBashInterceptionHook } from "../src/commands/pty-interception-hook.js";
 import type { PtyModule, PtyProcess } from "../src/commands/pty-loader.js";
-import { resolveLivePtyHost } from "./live-pty-host.js";
+import { resolveAccountedLivePtyHost } from "./live-pty-accounting.js";
 
 const PROMPT = "viberevert$ ";
 const NONCE = "compoundcharnonce";
@@ -768,12 +768,11 @@ describe("compound PTY interception -- `;` sequence characterization (M H1a)", (
   it(
     "allow-all: both simple commands are dispositioned, audited, write-started, and execute",
     async (ctx) => {
-      const host = await resolveLivePtyHost();
-      if (!host.ok) {
-        reportEvidence(`[compound \`;\` allow-all] SKIP: ${host.reason}`);
-        ctx.skip();
-        return;
-      }
+      const host = await resolveAccountedLivePtyHost({
+        ctx,
+        group: "pty-interception-compound-live",
+        label: "allow-all",
+      });
       parent = await startPolicyParent();
       const { output, forceKilled } = await runGuardedSession(host, parent, [SEQUENCE_LINE]);
 
@@ -804,12 +803,11 @@ describe("compound PTY interception -- `;` sequence characterization (M H1a)", (
   it(
     "policy-block B: every B-selected event is dispositioned block and starts no write; B never executes",
     async (ctx) => {
-      const host = await resolveLivePtyHost();
-      if (!host.ok) {
-        reportEvidence(`[compound \`;\` block-B] SKIP: ${host.reason}`);
-        ctx.skip();
-        return;
-      }
+      const host = await resolveAccountedLivePtyHost({
+        ctx,
+        group: "pty-interception-compound-live",
+        label: "block-B",
+      });
       parent = await startPolicyParent({ block: (rawLine) => rawLine.includes(B_TOKEN) });
       const { output, forceKilled } = await runGuardedSession(host, parent, [SEQUENCE_LINE]);
 
@@ -858,12 +856,11 @@ describe("compound PTY interception -- `;` sequence characterization (M H1a)", (
   it(
     "audit-failure for B: every B-selected event is dispositioned close (audit attempted+failed), starts no write; B never executes",
     async (ctx) => {
-      const host = await resolveLivePtyHost();
-      if (!host.ok) {
-        reportEvidence(`[compound \`;\` audit-fail-B] SKIP: ${host.reason}`);
-        ctx.skip();
-        return;
-      }
+      const host = await resolveAccountedLivePtyHost({
+        ctx,
+        group: "pty-interception-compound-live",
+        label: "audit-fail-B",
+      });
       parent = await startPolicyParent({ failAudit: (rawLine) => rawLine.includes(B_TOKEN) });
       const { output, forceKilled } = await runGuardedSession(host, parent, [SEQUENCE_LINE]);
 
@@ -1680,12 +1677,11 @@ describe("compound PTY interception -- construct matrix on the PS1 driver (M H1b
     it(
       spec.caseId,
       async (ctx) => {
-        const host = await resolveLivePtyHost();
-        if (!host.ok) {
-          reportEvidence(`[compound-characterization] SKIP ${spec.caseId}: ${host.reason}`);
-          ctx.skip();
-          return;
-        }
+        const host = await resolveAccountedLivePtyHost({
+          ctx,
+          group: "pty-interception-compound-live",
+          label: `characterization:${spec.caseId}`,
+        });
         const meta = readRuntimeMeta(host);
         await runConstructCase(host, meta, spec);
       },
@@ -2793,12 +2789,11 @@ describe("compound PTY interception -- PS2 / multiline characterization (M H1b2)
     it(
       spec.caseId,
       async (ctx) => {
-        const host = await resolveLivePtyHost();
-        if (!host.ok) {
-          reportEvidence(`[multiline-characterization] SKIP ${spec.caseId}: ${host.reason}`);
-          ctx.skip();
-          return;
-        }
+        const host = await resolveAccountedLivePtyHost({
+          ctx,
+          group: "pty-interception-compound-live",
+          label: `multiline:${spec.caseId}`,
+        });
         const meta = readRuntimeMeta(host);
         await runMultilineCase(host, meta, spec);
       },
