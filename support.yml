@@ -1,0 +1,131 @@
+# support.yml — machine-readable support & CI-validation manifest (M H7 Step 2).
+#
+# AUTHORITY MODEL: this file DECLARES the intended validation contract. CI is not
+# generated from it; a validator asserts the workflow (and later actual test
+# execution) agrees with these declarations. Three concepts stay separate:
+#   - support/maturity      — what the project promises for a feature;
+#   - CI evidence (profile) — what one matrix cell executes;
+#   - execution disposition — how a feature runs on a logical platform.
+# A mutable hosted-runner observation (e.g. today's macos-latest PTY behaviour)
+# is NOT frozen here as a permanent expectation.
+schema_version: 1
+
+runtimes:
+  node:
+    minimum: ">=22"             # mirrors package.json engines.node verbatim
+    tested:
+      - version: "22.23.1"
+        channel: pinned          # exact pinned release-qualification runtime
+      - version: "24.x"
+        channel: compatibility   # moving compatibility runtime
+
+# Platform-independent checks, run once.
+gates:
+  runner: ubuntu-24.04
+  node: "22.23.1"
+  validates: [lint, typecheck, dependency_policy, license_audit_freshness]
+
+# Every validation profile runs this baseline (release profiles included).
+baseline_validation: [frozen_install, node_pty_binding_load, build, test_suite]
+
+# Validation profiles — each maps 1:1 to a compat matrix cell.
+#   platform            — logical platform (stable)
+#   runner              — CI runner selector (mutable; pinned to the workflow)
+#   validation_tier     — release (carries release-qualification evidence)
+#                       | compatibility (regularly tested compatibility target)
+#   live_pty_validation — required        (live suite must execute and pass)
+#                       | capability_gated (may run+pass, or skip with the
+#                                           permitted reason_code)
+#                       | not_applicable   (not counted as live validation)
+# Release qualification is DISTRIBUTED across cells; the flags say which
+# responsibility each carries. The validator pins these to the workflow's flags.
+profiles:
+  linux-node22:
+    platform: linux
+    runner: ubuntu-24.04
+    node: "22.23.1"
+    validation_tier: release
+    node_pty_source_build: true
+    live_pty_validation: required
+    release_smoke: false
+  linux-node24:
+    platform: linux
+    runner: ubuntu-24.04
+    node: "24.x"
+    validation_tier: compatibility
+    node_pty_source_build: false
+    live_pty_validation: required
+    release_smoke: false
+  macos-node22:
+    platform: macos
+    runner: macos-latest
+    node: "22.23.1"
+    validation_tier: compatibility
+    node_pty_source_build: false
+    live_pty_validation: capability_gated
+    release_smoke: false
+  macos-node24:
+    platform: macos
+    runner: macos-latest
+    node: "24.x"
+    validation_tier: compatibility
+    node_pty_source_build: false
+    live_pty_validation: capability_gated
+    release_smoke: false
+  windows-node22:
+    platform: windows
+    runner: windows-latest
+    node: "22.23.1"
+    validation_tier: release
+    node_pty_source_build: false
+    live_pty_validation: not_applicable
+    release_smoke: true
+  windows-node24:
+    platform: windows
+    runner: windows-latest
+    node: "24.x"
+    validation_tier: compatibility
+    node_pty_source_build: false
+    live_pty_validation: not_applicable
+    release_smoke: false
+
+# Stable reason-code registry. Feature entries may only reference codes defined
+# here; the validator requires every referenced reason_code to exist.
+reason_codes:
+  pty_allocation_unavailable:
+    meaning: PTY allocation probe could not allocate a usable PTY
+  requires_posix_bash:
+    meaning: validation suite applies only to a POSIX Bash host
+
+# Feature policy. maturity = product promise; per-platform disposition = how the
+# feature is exercised. reason_code (a key from `reason_codes`) is REQUIRED for
+# capability_gated + not_applicable, and MUST be absent for exercised.
+features:
+  core_non_live_pty:
+    maturity: beta
+    # `exercised` applies to the grouped portable-suite feature. It does NOT
+    # claim that every listed capability has identical per-test execution on
+    # every OS; Step 2.4 records and validates those finer-grained differences.
+    capabilities:
+      - init
+      - config
+      - detection
+      - checkpoint
+      - session
+      - check
+      - rollback
+      - prompt_fix
+      - hooks
+      - installers
+      - mcp
+      - shell_repl
+    platforms:
+      linux: { disposition: exercised }
+      macos: { disposition: exercised }
+      windows: { disposition: exercised }
+  live_pty_interception:
+    maturity: experimental
+    platforms:
+      linux: { disposition: exercised }
+      macos: { disposition: capability_gated, reason_code: pty_allocation_unavailable }
+      windows: { disposition: not_applicable, reason_code: requires_posix_bash }
