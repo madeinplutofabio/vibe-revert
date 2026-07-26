@@ -25,6 +25,7 @@
     "typecheck": "pnpm -r --if-present typecheck",
     "check:dependency-policy": "tsx scripts/check-dependency-policy.ts",
     "check:license-audit": "tsx scripts/regen-license-audit.ts --check",
+    "check:support-manifest": "tsx scripts/check-support-manifest.ts",
     "regen-goldens": "tsx scripts/regen-goldens.ts",
     "regen:license-audit": "tsx scripts/regen-license-audit.ts",
     "refresh:license-metadata": "tsx scripts/refresh-license-metadata.ts",
