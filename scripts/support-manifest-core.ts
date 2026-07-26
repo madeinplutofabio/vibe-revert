@@ -25,7 +25,13 @@ const VALIDATION_TIERS = ["release", "compatibility"] as const;
 const LIVE_PTY_VALIDATIONS = ["required", "capability_gated", "not_applicable"] as const;
 const MATURITIES = ["beta", "experimental"] as const;
 const DISPOSITIONS = ["exercised", "capability_gated", "not_applicable"] as const;
-const GATE_CHECKS = ["lint", "typecheck", "dependency_policy", "license_audit_freshness"] as const;
+const GATE_CHECKS = [
+  "lint",
+  "typecheck",
+  "dependency_policy",
+  "license_audit_freshness",
+  "support_manifest",
+] as const;
 const BASELINE_CHECKS = ["frozen_install", "node_pty_binding_load", "build", "test_suite"] as const;
 const FEATURE_NAMES = ["core_non_live_pty", "live_pty_interception"] as const;
 

@@ -23,7 +23,7 @@ runtimes:
 gates:
   runner: ubuntu-24.04
   node: "22.23.1"
-  validates: [lint, typecheck, dependency_policy, license_audit_freshness]
+  validates: [lint, typecheck, dependency_policy, license_audit_freshness, support_manifest]
 
 # Every validation profile runs this baseline (release profiles included).
 baseline_validation: [frozen_install, node_pty_binding_load, build, test_suite]
