@@ -78,6 +78,9 @@ jobs:
       - name: Check license audit freshness (M H5)
         run: pnpm check:license-audit
 
+      - name: Check support manifest (M H7)
+        run: pnpm check:support-manifest
+
   compat:
     name: Build and test (${{ matrix.label }})
     runs-on: ${{ matrix.os }}
