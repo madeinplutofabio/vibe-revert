@@ -35,9 +35,24 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, extname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  CheckCommand,
+  HookInstallCommand,
+  HookUninstallCommand,
+  InstallCommand,
+  PromptFixCommand,
+  ReportCommand,
+  RollbackCommand,
+  RunCommand,
+  ShellCommand,
+  StartCommand,
+  UninstallCommand,
+} from "@viberevert/cli-commands";
 import * as ts from "typescript";
 import { describe, expect, it } from "vitest";
 
+import { REGISTERED_COMMANDS } from "../src/build-cli.js";
+import { MCPCommand } from "../src/commands/mcp.js";
 import {
   collectModuleReferences,
   type ModuleReference,
@@ -200,29 +215,6 @@ function findOffenders(source: string, pattern: RegExp): Offender[] {
     })
     .filter(({ line }) => pattern.test(line))
     .map(({ line, lineNumber }) => ({ lineNumber, content: line.trim() }));
-}
-
-/**
- * Locate the CLI binary's single multi-line import statement from
- * `@viberevert/cli-commands` and return its named-imports body (the
- * comma-separated symbol list between the braces). Used by the M E
- * command-exposure and M F D98.M.9 hook-exposure invariants to
- * verify specific Command classes appear in the barrel import
- * exactly once each.
- *
- * Asserts there is exactly one such import statement; failure here
- * means a future maintainer split the barrel import into multiple
- * statements OR removed it entirely (M G1a Step 1 substep 9 lock).
- */
-function getCliCommandsBarrelImportBody(source: string): string {
-  const matches = [
-    ...source.matchAll(/import\s*\{([\s\S]*?)\}\s*from\s*["']@viberevert\/cli-commands["']/g),
-  ];
-  expect(
-    matches.length,
-    `packages/cli/src/index.ts must have exactly one @viberevert/cli-commands import statement (M G1a Step 1 substep 9). Found ${matches.length}.`,
-  ).toBe(1);
-  return matches[0]?.[1] ?? "";
 }
 
 /**
@@ -744,7 +736,6 @@ describe("Architectural invariants -- M E D90 prompt-fix module boundaries", () 
     PROMPT_FIX_TARGETS_REL,
     GENERATE_FIX_PROMPT_OPERATION_REL,
   ];
-  const CLI_INDEX_REL = "packages/cli/src/index.ts";
 
   /**
    * Known LLM-SDK package specifiers banned per D90.3 (imports) and
@@ -1358,50 +1349,41 @@ describe("Architectural invariants -- M E D90 prompt-fix module boundaries", () 
     // `indexOf` returning -1 (for a missing line) would silently
     // satisfy the `-1 < someIndex` comparison and the ordering
     // assertion would pass incorrectly.
-    const source = readSource(CLI_INDEX_REL);
-
-    // M G1a Step 1 substep 9: the CLI binary now imports its 17
-    // Command classes from the @viberevert/cli-commands barrel
-    // (not from local ./commands/*.js paths). Find that multi-line
-    // import block and assert PromptFixCommand appears in it
-    // exactly once.
-    const barrelImportBody = getCliCommandsBarrelImportBody(source);
-    const promptFixMatches = barrelImportBody.match(/\bPromptFixCommand\b/g) ?? [];
+    // Exposure + order are proven against REGISTERED_COMMANDS -- the canonical
+    // registration list in build-cli.ts that buildCli() provably consumes in
+    // order (see the registry-consumption invariant). PromptFixCommand appearing
+    // in that array is exactly what makes `viberevert prompt-fix` reachable
+    // through the binary.
+    const promptFixCount = REGISTERED_COMMANDS.filter((c) => c === PromptFixCommand).length;
     expect(
-      promptFixMatches.length,
-      `packages/cli/src/index.ts must import PromptFixCommand exactly once from @viberevert/cli-commands (M E command exposure). Found ${promptFixMatches.length}.`,
+      promptFixCount,
+      `REGISTERED_COMMANDS (build-cli.ts) must register PromptFixCommand exactly once (M E command exposure). Found ${promptFixCount}.`,
     ).toBe(1);
 
-    const registers = findOffenders(source, /\bcli\.register\s*\(\s*PromptFixCommand\s*\)/);
-    expect(
-      registers.length,
-      `packages/cli/src/index.ts must register PromptFixCommand via cli.register(PromptFixCommand) exactly once (M E command exposure). Found ${registers.length}.`,
-    ).toBe(1);
-
-    const reportIdx = source.indexOf("cli.register(ReportCommand);");
-    const promptFixIdx = source.indexOf("cli.register(PromptFixCommand);");
-    const rollbackIdx = source.indexOf("cli.register(RollbackCommand);");
+    const reportIdx = REGISTERED_COMMANDS.indexOf(ReportCommand);
+    const promptFixIdx = REGISTERED_COMMANDS.indexOf(PromptFixCommand);
+    const rollbackIdx = REGISTERED_COMMANDS.indexOf(RollbackCommand);
 
     expect(
       reportIdx,
-      "ReportCommand registration missing from index.ts (order check needs it as neighbor anchor)",
+      "ReportCommand missing from REGISTERED_COMMANDS (order-check anchor)",
     ).toBeGreaterThanOrEqual(0);
     expect(
       promptFixIdx,
-      "PromptFixCommand registration missing from index.ts",
+      "PromptFixCommand missing from REGISTERED_COMMANDS",
     ).toBeGreaterThanOrEqual(0);
     expect(
       rollbackIdx,
-      "RollbackCommand registration missing from index.ts (order check needs it as neighbor anchor)",
+      "RollbackCommand missing from REGISTERED_COMMANDS (order-check anchor)",
     ).toBeGreaterThanOrEqual(0);
 
     expect(
       reportIdx,
-      "ReportCommand must be registered BEFORE PromptFixCommand in index.ts (workflow order: check -> report -> prompt-fix -> rollback)",
+      "ReportCommand must be registered BEFORE PromptFixCommand (workflow order: check -> report -> prompt-fix -> rollback)",
     ).toBeLessThan(promptFixIdx);
     expect(
       promptFixIdx,
-      "PromptFixCommand must be registered BEFORE RollbackCommand in index.ts (workflow order: check -> report -> prompt-fix -> rollback)",
+      "PromptFixCommand must be registered BEFORE RollbackCommand (workflow order: check -> report -> prompt-fix -> rollback)",
     ).toBeLessThan(rollbackIdx);
   });
 });
@@ -1469,7 +1451,6 @@ describe("Architectural invariants -- M F D98.M hook subsystem boundaries", () =
     HOOK_UNINSTALL_REL,
     HOOK_MANAGERS_REL,
   ];
-  const CLI_INDEX_REL = "packages/cli/src/index.ts";
 
   /**
    * Known LLM-SDK package specifiers banned per D98.M.3. DUPLICATED
@@ -1986,42 +1967,19 @@ describe("Architectural invariants -- M F D98.M hook subsystem boundaries", () =
     // cli.register(...) line from index.ts EVERY test still passes
     // but the binary `viberevert hook install` / `viberevert hook
     // uninstall` becomes unreachable. This test closes that gap.
-    const source = readSource(CLI_INDEX_REL);
-
-    // M G1a Step 1 substep 9: same barrel-import shape change as
-    // M E's command-exposure lock. D98.M.9 checks BOTH HookInstall
-    // and HookUninstall appear in the @viberevert/cli-commands
-    // barrel import exactly once each.
-    const barrelImportBody = getCliCommandsBarrelImportBody(source);
-
-    const installMatches = barrelImportBody.match(/\bHookInstallCommand\b/g) ?? [];
+    // Exposure is proven against REGISTERED_COMMANDS (build-cli.ts): each hook
+    // command appearing exactly once is what makes `viberevert hook install` /
+    // `viberevert hook uninstall` reachable through the binary.
+    const installCount = REGISTERED_COMMANDS.filter((c) => c === HookInstallCommand).length;
     expect(
-      installMatches.length,
-      `index.ts must import HookInstallCommand exactly once from @viberevert/cli-commands (D98.M.9). Found ${installMatches.length}.`,
+      installCount,
+      `REGISTERED_COMMANDS must register HookInstallCommand exactly once (D98.M.9). Found ${installCount}.`,
     ).toBe(1);
 
-    const uninstallMatches = barrelImportBody.match(/\bHookUninstallCommand\b/g) ?? [];
+    const uninstallCount = REGISTERED_COMMANDS.filter((c) => c === HookUninstallCommand).length;
     expect(
-      uninstallMatches.length,
-      `index.ts must import HookUninstallCommand exactly once from @viberevert/cli-commands (D98.M.9). Found ${uninstallMatches.length}.`,
-    ).toBe(1);
-
-    const installRegisters = findOffenders(
-      source,
-      /\bcli\.register\s*\(\s*HookInstallCommand\s*\)/,
-    );
-    expect(
-      installRegisters.length,
-      `index.ts must register HookInstallCommand via cli.register(HookInstallCommand) exactly once (D98.M.9). Found ${installRegisters.length}.`,
-    ).toBe(1);
-
-    const uninstallRegisters = findOffenders(
-      source,
-      /\bcli\.register\s*\(\s*HookUninstallCommand\s*\)/,
-    );
-    expect(
-      uninstallRegisters.length,
-      `index.ts must register HookUninstallCommand via cli.register(HookUninstallCommand) exactly once (D98.M.9). Found ${uninstallRegisters.length}.`,
+      uninstallCount,
+      `REGISTERED_COMMANDS must register HookUninstallCommand exactly once (D98.M.9). Found ${uninstallCount}.`,
     ).toBe(1);
   });
 
@@ -2039,48 +1997,38 @@ describe("Architectural invariants -- M F D98.M hook subsystem boundaries", () =
     // Defensive: assert each anchor exists before comparing indices --
     // indexOf returning -1 would silently satisfy `-1 < n` when `n`
     // is also non-negative.
-    const source = readSource(CLI_INDEX_REL);
-
-    const rollbackIdx = source.indexOf("cli.register(RollbackCommand);");
-    const hookInstallIdx = source.indexOf("cli.register(HookInstallCommand);");
-    const hookUninstallIdx = source.indexOf("cli.register(HookUninstallCommand);");
+    const rollbackIdx = REGISTERED_COMMANDS.indexOf(RollbackCommand);
+    const hookInstallIdx = REGISTERED_COMMANDS.indexOf(HookInstallCommand);
+    const hookUninstallIdx = REGISTERED_COMMANDS.indexOf(HookUninstallCommand);
 
     expect(
       rollbackIdx,
-      "RollbackCommand registration missing from index.ts (D98.M.10 anchor)",
+      "RollbackCommand missing from REGISTERED_COMMANDS (D98.M.10 anchor)",
     ).toBeGreaterThanOrEqual(0);
     expect(
       hookInstallIdx,
-      "HookInstallCommand registration missing from index.ts (D98.M.10)",
+      "HookInstallCommand missing from REGISTERED_COMMANDS (D98.M.10)",
     ).toBeGreaterThanOrEqual(0);
     expect(
       hookUninstallIdx,
-      "HookUninstallCommand registration missing from index.ts (D98.M.10)",
+      "HookUninstallCommand missing from REGISTERED_COMMANDS (D98.M.10)",
     ).toBeGreaterThanOrEqual(0);
 
     expect(
       rollbackIdx,
-      "HookInstallCommand must be registered AFTER RollbackCommand in index.ts (D98.M.10)",
+      "HookInstallCommand must be registered AFTER RollbackCommand (D98.M.10)",
     ).toBeLessThan(hookInstallIdx);
     expect(
       hookInstallIdx,
-      "HookUninstallCommand must be registered AFTER HookInstallCommand in index.ts (D98.M.10)",
+      "HookUninstallCommand must be registered AFTER HookInstallCommand (D98.M.10)",
     ).toBeLessThan(hookUninstallIdx);
 
-    // "Immediately after" lock: between the HookInstall register line
-    // and the HookUninstall register line, there must be NO other
-    // cli.register(...) call. This enforces the "register them as a
-    // pair" intent vs. allowing arbitrary commands to be inserted
-    // between them.
-    const between = source.slice(
-      hookInstallIdx + "cli.register(HookInstallCommand);".length,
-      hookUninstallIdx,
-    );
-    const interlopingRegisters = findOffenders(between, /\bcli\.register\s*\(/);
+    // "Immediately after" lock: HookUninstallCommand sits at the index directly
+    // after HookInstallCommand -- no command may be inserted between the pair.
     expect(
-      interlopingRegisters,
-      `HookUninstallCommand must be registered IMMEDIATELY after HookInstallCommand with no other cli.register() between them (D98.M.10). Interloping registrations: ${JSON.stringify(interlopingRegisters)}`,
-    ).toEqual([]);
+      hookUninstallIdx,
+      `HookUninstallCommand must be registered IMMEDIATELY after HookInstallCommand -- adjacent REGISTERED_COMMANDS indices (D98.M.10). HookInstall index ${hookInstallIdx}, HookUninstall index ${hookUninstallIdx}.`,
+    ).toBe(hookInstallIdx + 1);
   });
 
   // ===========================================================================
@@ -4981,10 +4929,16 @@ describe("Architectural invariants -- M G1a Step 3.5 D57 policy resolver default
 // =============================================================================
 
 describe("Architectural invariants -- M G1a Step 5 D99.M CLI MCPCommand exposure (TypeScript AST)", () => {
-  const CLI_INDEX_REL = "packages/cli/src/index.ts";
   const MCP_COMMAND_REL = "packages/cli/src/commands/mcp.ts";
 
-  it('D99.M.12: AST -- (1) one named-no-alias-value MCPCommand binding from "./commands/mcp.js" in index.ts; (2) zero MCPCommand bindings from @viberevert/cli-commands in index.ts; (3) cold-start lock: zero static @viberevert/mcp ImportDeclaration nodes across index.ts AND commands/mcp.ts (typeof import + dynamic import allowed); (4) one cli.register(MCPCommand) PropertyAccess call with argumentCount === 1; (5) one cli.register(HookUninstallCommand) anchor with argumentCount === 1; (6) MCPCommand register strictly after HookUninstall register; (7) zero computed cli["register"](...) calls', () => {
+  it('D99.M.12: (1) one named-no-alias-value MCPCommand binding from "./commands/mcp.js" in build-cli.ts; (2) zero MCPCommand bindings from @viberevert/cli-commands in build-cli.ts; (3) cold-start lock: zero static @viberevert/mcp ImportDeclaration nodes across build-cli.ts AND commands/mcp.ts (typeof import + dynamic import allowed); (4) MCPCommand in REGISTERED_COMMANDS exactly once; (5) HookUninstallCommand in REGISTERED_COMMANDS exactly once; (6) MCPCommand registered strictly after HookUninstallCommand; (7) zero computed cli["register"](...) calls in build-cli.ts', () => {
+    // Registration authority moved from index.ts to build-cli.ts (import-safe seam
+    // for the H8 docs-coverage invariants). Import-location + cold-start concerns
+    // stay AST/source invariants against build-cli.ts + commands/mcp.ts; the MCP
+    // register presence/order is proven against the REGISTERED_COMMANDS array that
+    // buildCli() provably consumes in order (see the registry-consumption invariant).
+    const CLI_BUILD_REL = "packages/cli/src/build-cli.ts";
+
     type BindingKind = "default" | "namespace" | "named";
     type ImportBindingInfo = {
       readonly importedName: string;
@@ -4999,12 +4953,6 @@ describe("Architectural invariants -- M G1a Step 5 D99.M CLI MCPCommand exposure
       readonly moduleSpec: string;
       readonly bindings: readonly ImportBindingInfo[];
       readonly pos: string;
-    };
-    type RegisterCallInfo = {
-      readonly argName: string | null;
-      readonly argumentCount: number;
-      readonly pos: number;
-      readonly posLabel: string;
     };
 
     // requireFirst -- narrows arr[0] from `T | undefined` to `T` after
@@ -5110,40 +5058,25 @@ describe("Architectural invariants -- M G1a Step 5 D99.M CLI MCPCommand exposure
       return { sf, declarations };
     };
 
-    const indexParsed = walkImports(CLI_INDEX_REL);
+    const buildCliParsed = walkImports(CLI_BUILD_REL);
     const mcpFileParsed = walkImports(MCP_COMMAND_REL);
 
-    // ----- CallExpression walker for index.ts (recursive -- catches
-    //       conditional / wrapped invocations a top-level-only walk
-    //       would miss). Scoped to index.ts only because sub-checks
-    //       4-7 are about registration in the CLI entry, not about
-    //       calls inside the command file. -----
-    const propertyAccessRegisterCalls: RegisterCallInfo[] = [];
+    // ----- ElementAccess walker for build-cli.ts: catches a computed
+    //       cli["register"](...) that would bypass the dot-access
+    //       registration contract (sub-check 7). Registration presence +
+    //       order are proven against REGISTERED_COMMANDS below, so the
+    //       PropertyAccess register-call counting the pre-migration
+    //       D99.M.12 used is no longer needed. -----
     const computedAccessRegisterCalls: Array<{ readonly posLabel: string }> = [];
-    const indexFmtPos = (node: ts.Node): string => {
-      const start = node.getStart(indexParsed.sf);
-      const { line, character } = indexParsed.sf.getLineAndCharacterOfPosition(start);
-      return `${CLI_INDEX_REL}:L${line + 1}:${character + 1}`;
+    const buildCliFmtPos = (node: ts.Node): string => {
+      const start = node.getStart(buildCliParsed.sf);
+      const { line, character } = buildCliParsed.sf.getLineAndCharacterOfPosition(start);
+      return `${CLI_BUILD_REL}:L${line + 1}:${character + 1}`;
     };
     const visit = (node: ts.Node): void => {
       if (ts.isCallExpression(node)) {
         const callee = node.expression;
         if (
-          ts.isPropertyAccessExpression(callee) &&
-          ts.isIdentifier(callee.expression) &&
-          callee.expression.text === "cli" &&
-          callee.name.text === "register"
-        ) {
-          // PropertyAccess form: cli.register(<arg>, ...)
-          const firstArg = node.arguments[0];
-          const argName = firstArg && ts.isIdentifier(firstArg) ? firstArg.text : null;
-          propertyAccessRegisterCalls.push({
-            argName,
-            argumentCount: node.arguments.length,
-            pos: node.getStart(indexParsed.sf),
-            posLabel: indexFmtPos(node),
-          });
-        } else if (
           ts.isElementAccessExpression(callee) &&
           ts.isIdentifier(callee.expression) &&
           callee.expression.text === "cli"
@@ -5152,13 +5085,13 @@ describe("Architectural invariants -- M G1a Step 5 D99.M CLI MCPCommand exposure
           // -- TS AST collapses both quote styles to the same node.
           const accessArg = callee.argumentExpression;
           if (ts.isStringLiteral(accessArg) && accessArg.text === "register") {
-            computedAccessRegisterCalls.push({ posLabel: indexFmtPos(node) });
+            computedAccessRegisterCalls.push({ posLabel: buildCliFmtPos(node) });
           }
         }
       }
       ts.forEachChild(node, visit);
     };
-    visit(indexParsed.sf);
+    visit(buildCliParsed.sf);
 
     // Symmetric MCPCommand-binding predicate -- catches both alias
     // directions AND default/namespace shadows:
@@ -5172,12 +5105,12 @@ describe("Architectural invariants -- M G1a Step 5 D99.M CLI MCPCommand exposure
 
     // ===== Sub-check 1 -- exactly one MCPCommand binding from local
     //       module in index.ts, in the required shape =====
-    const localMcpBindings = indexParsed.declarations
+    const localMcpBindings = buildCliParsed.declarations
       .filter((d) => d.moduleSpec === "./commands/mcp.js")
       .flatMap((d) => d.bindings.filter(isMcpBinding));
     expect(
       localMcpBindings.length,
-      `D99.M.12 sub-check 1 (count): index.ts must contain EXACTLY ONE MCPCommand binding from "./commands/mcp.js" (TS AST; predicate: importedName === "MCPCommand" OR localName === "MCPCommand" -- catches default, namespace, and both alias directions). Found ${localMcpBindings.length}: ${JSON.stringify(localMcpBindings)}.`,
+      `D99.M.12 sub-check 1 (count): build-cli.ts must contain EXACTLY ONE MCPCommand binding from "./commands/mcp.js" (TS AST; predicate: importedName === "MCPCommand" OR localName === "MCPCommand" -- catches default, namespace, and both alias directions). Found ${localMcpBindings.length}: ${JSON.stringify(localMcpBindings)}.`,
     ).toBe(1);
     const local = requireFirst(localMcpBindings, "D99.M.12 sub-check 1");
     expect(
@@ -5195,12 +5128,12 @@ describe("Architectural invariants -- M G1a Step 5 D99.M CLI MCPCommand exposure
 
     // ===== Sub-check 2 -- zero MCPCommand bindings from
     //       @viberevert/cli-commands in index.ts =====
-    const cliCommandsMcpBindings = indexParsed.declarations
+    const cliCommandsMcpBindings = buildCliParsed.declarations
       .filter((d) => d.moduleSpec === "@viberevert/cli-commands")
       .flatMap((d) => d.bindings.filter(isMcpBinding));
     expect(
       cliCommandsMcpBindings.length,
-      `D99.M.12 sub-check 2 (cli-commands MCPCommand-binding negative): index.ts must NOT import any binding for MCPCommand from "@viberevert/cli-commands" -- ANY shape (default, namespace, named, aliased in either direction). D99.M.15 cross-check; MCPCommand lives in the CLI binary per D99.N -- relocating it into cli-commands would create the forbidden cli-commands -> mcp dependency edge. cli-commands is otherwise a legitimate import source for OTHER Command classes (just not MCPCommand). Found ${cliCommandsMcpBindings.length}: ${JSON.stringify(cliCommandsMcpBindings)}.`,
+      `D99.M.12 sub-check 2 (cli-commands MCPCommand-binding negative): build-cli.ts must NOT import any binding for MCPCommand from "@viberevert/cli-commands" -- ANY shape (default, namespace, named, aliased in either direction). D99.M.15 cross-check; MCPCommand lives in the CLI binary per D99.N -- relocating it into cli-commands would create the forbidden cli-commands -> mcp dependency edge. cli-commands is otherwise a legitimate import source for OTHER Command classes (just not MCPCommand). Found ${cliCommandsMcpBindings.length}: ${JSON.stringify(cliCommandsMcpBindings)}.`,
     ).toBe(0);
 
     // ===== Sub-check 3 -- cold-start lock: zero static
@@ -5219,75 +5152,172 @@ describe("Architectural invariants -- M G1a Step 5 D99.M CLI MCPCommand exposure
     //                      the D99.N loader seam, used by mcp.ts's
     //                      defaultLoader)
     const staticMcpPackageImports = [
-      ...indexParsed.declarations,
+      ...buildCliParsed.declarations,
       ...mcpFileParsed.declarations,
     ].filter((d) => d.moduleSpec === "@viberevert/mcp");
     expect(
       staticMcpPackageImports.length,
-      `D99.M.12 sub-check 3 (cold-start lock): static "@viberevert/mcp" ImportDeclaration nodes must be ZERO across BOTH ${CLI_INDEX_REL} AND ${MCP_COMMAND_REL} (any form -- named, default, namespace, side-effect). The mcp package is dynamically imported ONLY via the loader seam in ${MCP_COMMAND_REL} (D99.N). \`typeof import("@viberevert/mcp")\` (type position) and \`import("@viberevert/mcp")\` (dynamic-import CallExpression) are ALLOWED -- both are excluded by the ts.isImportDeclaration filter. A static import in EITHER file would pull the SDK + audit writer + Zod schemas into every viberevert cold start, slowing non-mcp invocations. Found ${staticMcpPackageImports.length}: ${JSON.stringify(staticMcpPackageImports.map((d) => ({ pos: d.pos, bindings: d.bindings })))}.`,
+      `D99.M.12 sub-check 3 (cold-start lock): static "@viberevert/mcp" ImportDeclaration nodes must be ZERO across BOTH ${CLI_BUILD_REL} AND ${MCP_COMMAND_REL} (any form -- named, default, namespace, side-effect). The mcp package is dynamically imported ONLY via the loader seam in ${MCP_COMMAND_REL} (D99.N). \`typeof import("@viberevert/mcp")\` (type position) and \`import("@viberevert/mcp")\` (dynamic-import CallExpression) are ALLOWED -- both are excluded by the ts.isImportDeclaration filter. A static import in EITHER file would pull the SDK + audit writer + Zod schemas into every viberevert cold start, slowing non-mcp invocations. Found ${staticMcpPackageImports.length}: ${JSON.stringify(staticMcpPackageImports.map((d) => ({ pos: d.pos, bindings: d.bindings })))}.`,
     ).toBe(0);
 
-    // ===== Sub-check 4 -- exactly one cli.register(MCPCommand)
-    //       PropertyAccess call AND argumentCount === 1 =====
-    const mcpRegisterCalls = propertyAccessRegisterCalls.filter((c) => c.argName === "MCPCommand");
+    // ===== Sub-checks 4-6 -- registration presence + order proven against
+    //       the REGISTERED_COMMANDS authority (build-cli.ts), which buildCli()
+    //       provably consumes in order (see the registry-consumption invariant).
+    //       The pre-migration PropertyAccess cli.register(X) counting no longer
+    //       applies: registration is a for-of over REGISTERED_COMMANDS, not
+    //       per-command calls. =====
+    const mcpCount = REGISTERED_COMMANDS.filter((c) => c === MCPCommand).length;
     expect(
-      mcpRegisterCalls.length,
-      `D99.M.12 sub-check 4 (MCPCommand register count): index.ts must contain EXACTLY ONE \`cli.register(MCPCommand)\` PropertyAccessExpression CallExpression with a bare Identifier first argument (TS AST). Wrapped forms (loops, spread, namespace-property access like \`m.MCPCommand\`) and renamed cli bindings (\`myCli.register(MCPCommand)\`) are intentionally NOT counted -- the contract is explicit, direct registration. Found ${mcpRegisterCalls.length}: ${JSON.stringify(mcpRegisterCalls.map((c) => ({ pos: c.posLabel, argumentCount: c.argumentCount })))}.`,
-    ).toBe(1);
-    const firstMcpRegister = requireFirst(mcpRegisterCalls, "D99.M.12 sub-check 4");
-    expect(
-      firstMcpRegister.argumentCount,
-      `D99.M.12 sub-check 4 (MCPCommand register shape): the \`cli.register(MCPCommand)\` call must be unary (argumentCount === 1). \`cli.register(MCPCommand, extra)\` and similar non-unary shapes are forbidden -- the registration contract is single-argument. Found argumentCount=${firstMcpRegister.argumentCount} at ${firstMcpRegister.posLabel}.`,
-    ).toBe(1);
-
-    // ===== Sub-check 5 -- exactly one cli.register(HookUninstallCommand)
-    //       anchor AND argumentCount === 1 =====
-    const hookUninstallRegisterCalls = propertyAccessRegisterCalls.filter(
-      (c) => c.argName === "HookUninstallCommand",
-    );
-    expect(
-      hookUninstallRegisterCalls.length,
-      `D99.M.12 sub-check 5 (HookUninstallCommand anchor): index.ts must contain EXACTLY ONE \`cli.register(HookUninstallCommand)\` PropertyAccessExpression call. D98.M.10 also asserts this -- a failure here likely co-occurs with D98.M.10 failures. Found ${hookUninstallRegisterCalls.length}: ${JSON.stringify(hookUninstallRegisterCalls.map((c) => ({ pos: c.posLabel, argumentCount: c.argumentCount })))}.`,
-    ).toBe(1);
-    const firstHookUninstallRegister = requireFirst(
-      hookUninstallRegisterCalls,
-      "D99.M.12 sub-check 5",
-    );
-    expect(
-      firstHookUninstallRegister.argumentCount,
-      `D99.M.12 sub-check 5 (HookUninstallCommand register shape): the \`cli.register(HookUninstallCommand)\` call must be unary (argumentCount === 1). Found argumentCount=${firstHookUninstallRegister.argumentCount} at ${firstHookUninstallRegister.posLabel}.`,
+      mcpCount,
+      `D99.M.12 sub-check 4 (MCPCommand register count): REGISTERED_COMMANDS must contain MCPCommand exactly once. Found ${mcpCount}.`,
     ).toBe(1);
 
-    // ===== Sub-check 6 -- MCPCommand registered STRICTLY AFTER
-    //       HookUninstallCommand (source order via AST positions) =====
-    //
-    // STRICT-AFTER, not "immediately after" and NOT "last" -- future
-    // work may insert other commands between HookUninstallCommand and
-    // MCPCommand without breaking this invariant. The contract is just
-    // "do not regress MCPCommand to a position before HookUninstallCommand".
-    //
-    // Reuses the firstHookUninstallRegister + firstMcpRegister consts
-    // captured by sub-checks 4 + 5 via requireFirst (type-safe narrowing
-    // from `T | undefined` to `T` after the prior count assertions).
-    const hookUninstallPos = firstHookUninstallRegister.pos;
-    const mcpPos = firstMcpRegister.pos;
+    const hookUninstallCount = REGISTERED_COMMANDS.filter((c) => c === HookUninstallCommand).length;
     expect(
-      hookUninstallPos,
-      `D99.M.12 sub-check 6 (ordering, strict-after): \`cli.register(MCPCommand)\` must appear STRICTLY AFTER \`cli.register(HookUninstallCommand)\` in source order (AST node getStart(sf) positions). HookUninstallCommand at ${firstHookUninstallRegister.posLabel} (pos ${hookUninstallPos}); MCPCommand at ${firstMcpRegister.posLabel} (pos ${mcpPos}). Strict-after, NOT immediately-after -- future commands may be inserted between the two without breaking the invariant.`,
-    ).toBeLessThan(mcpPos);
+      hookUninstallCount,
+      `D99.M.12 sub-check 5 (HookUninstallCommand anchor): REGISTERED_COMMANDS must contain HookUninstallCommand exactly once. Found ${hookUninstallCount}.`,
+    ).toBe(1);
 
-    // ===== Sub-check 7 -- zero computed cli["register"](...) calls =====
+    const hookUninstallIdx = REGISTERED_COMMANDS.indexOf(HookUninstallCommand);
+    const mcpIdx = REGISTERED_COMMANDS.indexOf(MCPCommand);
+    expect(
+      hookUninstallIdx,
+      `D99.M.12 sub-check 6 (ordering, strict-after): MCPCommand must be registered STRICTLY AFTER HookUninstallCommand in REGISTERED_COMMANDS (HookUninstall index ${hookUninstallIdx}, MCP index ${mcpIdx}). Strict-after, NOT immediately-after -- future commands may be inserted between the two.`,
+    ).toBeLessThan(mcpIdx);
+
+    // ===== Sub-check 7 -- zero computed cli["register"](...) calls in
+    //       build-cli.ts =====
     //
-    // PropertyAccessExpression-only collectors (sub-checks 4 and 5)
-    // would silently miss a future maintainer who switched to
-    // ElementAccess form. This sub-check is the wall against that
-    // bypass. TS AST collapses both quote styles (`cli["register"]`
-    // and `cli['register']`) to the same ElementAccessExpression
-    // node, so one check covers both.
+    // Registration must go through dot-access cli.register (the
+    // Builtins.HelpCommand call + the REGISTERED_COMMANDS for-of loop).
+    // TS AST collapses both quote styles (`cli["register"]` and
+    // `cli['register']`) to the same ElementAccessExpression node, so one
+    // check covers both. This bars a bracket-access bypass of the
+    // dot-access registration contract.
     expect(
       computedAccessRegisterCalls.length,
-      `D99.M.12 sub-check 7 (no computed-access bypass): index.ts must NOT call \`cli["register"](...)\` or \`cli['register'](...)\` (ElementAccessExpression with a string-literal "register" argument). Sub-checks 4 and 5 walk PropertyAccessExpression callees only; a future maintainer who switched to ElementAccess form would silently bypass those counters. This sub-check closes that gap. Found ${computedAccessRegisterCalls.length}: ${JSON.stringify(computedAccessRegisterCalls.map((c) => c.posLabel))}.`,
+      `D99.M.12 sub-check 7 (no computed-access bypass): build-cli.ts must NOT call \`cli["register"](...)\` or \`cli['register'](...)\` (ElementAccessExpression with a string-literal "register" argument). Registration must use dot-access cli.register (the Builtins.HelpCommand call + the REGISTERED_COMMANDS for-of loop). Found ${computedAccessRegisterCalls.length}: ${JSON.stringify(computedAccessRegisterCalls.map((c) => c.posLabel))}.`,
     ).toBe(0);
+  });
+
+  it("H8.1 registry consumption: build-cli.ts buildCli() registers Builtins.HelpCommand once BEFORE exactly one for-of over REGISTERED_COMMANDS whose body calls cli.register(<loopVar>) once, with exactly two cli.register calls total", () => {
+    // Welds REGISTERED_COMMANDS to actual runtime registration: the migrated
+    // order/exposure invariants assert against the array, and THIS proves
+    // buildCli() actually consumes that array in order (Help first, then the
+    // loop). Without it, those array checks could pass while buildCli() drifted
+    // to a different registration mechanism. Structural (AST) only -- no
+    // formatting or variable-name assertions beyond what the contract needs.
+    const CLI_BUILD_REL = "packages/cli/src/build-cli.ts";
+    const source = readSource(CLI_BUILD_REL);
+    const sf = ts.createSourceFile(
+      join(REPO_ROOT, CLI_BUILD_REL),
+      source,
+      ts.ScriptTarget.ES2023,
+      false,
+    );
+
+    // Pass 1 -- for-of loops iterating REGISTERED_COMMANDS (declared loop-var
+    // name + body span).
+    const registeredLoops: Array<{
+      readonly varName: string | null;
+      readonly body: ts.Node;
+      readonly pos: number;
+    }> = [];
+    const findLoops = (node: ts.Node): void => {
+      if (
+        ts.isForOfStatement(node) &&
+        ts.isIdentifier(node.expression) &&
+        node.expression.text === "REGISTERED_COMMANDS"
+      ) {
+        let varName: string | null = null;
+        if (ts.isVariableDeclarationList(node.initializer)) {
+          const decl = node.initializer.declarations[0];
+          if (decl !== undefined && ts.isIdentifier(decl.name)) {
+            varName = decl.name.text;
+          }
+        }
+        registeredLoops.push({ varName, body: node.statement, pos: node.getStart(sf) });
+      }
+      ts.forEachChild(node, findLoops);
+    };
+    findLoops(sf);
+
+    // Pass 2 -- every cli.register(...) PropertyAccess call: first-arg text +
+    // whether it sits inside a REGISTERED_COMMANDS loop body.
+    const registerCalls: Array<{
+      readonly argText: string;
+      readonly inLoop: boolean;
+      readonly pos: number;
+    }> = [];
+    const findRegisterCalls = (node: ts.Node): void => {
+      if (ts.isCallExpression(node)) {
+        const callee = node.expression;
+        if (
+          ts.isPropertyAccessExpression(callee) &&
+          ts.isIdentifier(callee.expression) &&
+          callee.expression.text === "cli" &&
+          callee.name.text === "register"
+        ) {
+          const arg0 = node.arguments[0];
+          const argText = arg0 !== undefined ? arg0.getText(sf) : "<none>";
+          const inLoop = registeredLoops.some(
+            (l) => node.getStart(sf) >= l.body.getStart(sf) && node.getEnd() <= l.body.getEnd(),
+          );
+          registerCalls.push({ argText, inLoop, pos: node.getStart(sf) });
+        }
+      }
+      ts.forEachChild(node, findRegisterCalls);
+    };
+    findRegisterCalls(sf);
+
+    // (3) exactly one for-of over REGISTERED_COMMANDS.
+    expect(
+      registeredLoops.length,
+      `buildCli() must contain EXACTLY ONE for-of over REGISTERED_COMMANDS. Found ${registeredLoops.length}.`,
+    ).toBe(1);
+    const loop = registeredLoops[0];
+    if (loop === undefined) {
+      throw new Error("unreachable: registeredLoops length asserted to be 1");
+    }
+
+    // (1) Builtins.HelpCommand registered exactly once.
+    const helpRegisters = registerCalls.filter((c) => c.argText === "Builtins.HelpCommand");
+    expect(
+      helpRegisters.length,
+      `buildCli() must register Builtins.HelpCommand exactly once. Found ${helpRegisters.length}: ${JSON.stringify(registerCalls.map((c) => c.argText))}.`,
+    ).toBe(1);
+    const help = helpRegisters[0];
+    if (help === undefined) {
+      throw new Error("unreachable: helpRegisters length asserted to be 1");
+    }
+
+    // (4) exactly one cli.register(...) inside the loop, arg is the loop variable.
+    const loopRegisters = registerCalls.filter((c) => c.inLoop);
+    expect(
+      loopRegisters.length,
+      `buildCli()'s REGISTERED_COMMANDS loop body must contain EXACTLY ONE cli.register(...) call. Found ${loopRegisters.length}.`,
+    ).toBe(1);
+    const loopReg = loopRegisters[0];
+    if (loopReg === undefined) {
+      throw new Error("unreachable: loopRegisters length asserted to be 1");
+    }
+    expect(
+      loopReg.argText,
+      `buildCli()'s loop cli.register(...) must pass the for-of loop variable (${JSON.stringify(loop.varName)}) -- i.e. register each iterated command. Found argument ${JSON.stringify(loopReg.argText)}.`,
+    ).toBe(loop.varName);
+
+    // (5) exactly two cli.register calls total: Help + the loop call. No other
+    //     per-command registration path is allowed.
+    expect(
+      registerCalls.length,
+      `buildCli() must contain EXACTLY TWO cli.register(...) calls (Builtins.HelpCommand + the REGISTERED_COMMANDS loop). Found ${registerCalls.length}: ${JSON.stringify(registerCalls.map((c) => c.argText))}.`,
+    ).toBe(2);
+
+    // (2) Help registered BEFORE the loop (source order).
+    expect(
+      help.pos,
+      "Builtins.HelpCommand must be registered BEFORE the REGISTERED_COMMANDS loop in buildCli().",
+    ).toBeLessThan(loop.pos);
   });
 });
 
@@ -5689,57 +5719,47 @@ describe("Architectural invariants -- D101.M.6 InstallCommand + UninstallCommand
   // integrations commands are registered as a pair (no other command
   // may be inserted between them).
 
-  const INDEX_REL = "packages/cli/src/index.ts";
-
   it("D101.M.6: index.ts registration ORDER -- HookUninstall < Install < Uninstall < MCP AND Uninstall IMMEDIATELY after Install", () => {
-    const source = readSource(INDEX_REL);
-
-    const hookUninstallIdx = source.indexOf("cli.register(HookUninstallCommand);");
-    const installIdx = source.indexOf("cli.register(InstallCommand);");
-    const uninstallIdx = source.indexOf("cli.register(UninstallCommand);");
-    const mcpIdx = source.indexOf("cli.register(MCPCommand);");
+    const hookUninstallIdx = REGISTERED_COMMANDS.indexOf(HookUninstallCommand);
+    const installIdx = REGISTERED_COMMANDS.indexOf(InstallCommand);
+    const uninstallIdx = REGISTERED_COMMANDS.indexOf(UninstallCommand);
+    const mcpIdx = REGISTERED_COMMANDS.indexOf(MCPCommand);
 
     expect(
       hookUninstallIdx,
-      "HookUninstallCommand registration missing from index.ts (D101.M.6 anchor)",
+      "HookUninstallCommand missing from REGISTERED_COMMANDS (D101.M.6 anchor)",
     ).toBeGreaterThanOrEqual(0);
     expect(
       installIdx,
-      "InstallCommand registration missing from index.ts (D101.M.6)",
+      "InstallCommand missing from REGISTERED_COMMANDS (D101.M.6)",
     ).toBeGreaterThanOrEqual(0);
     expect(
       uninstallIdx,
-      "UninstallCommand registration missing from index.ts (D101.M.6)",
+      "UninstallCommand missing from REGISTERED_COMMANDS (D101.M.6)",
     ).toBeGreaterThanOrEqual(0);
-    expect(
-      mcpIdx,
-      "MCPCommand registration missing from index.ts (D101.M.6)",
-    ).toBeGreaterThanOrEqual(0);
+    expect(mcpIdx, "MCPCommand missing from REGISTERED_COMMANDS (D101.M.6)").toBeGreaterThanOrEqual(
+      0,
+    );
 
     expect(
       hookUninstallIdx,
-      "InstallCommand must be registered AFTER HookUninstallCommand in index.ts (D101.M.6 / D101.I)",
+      "InstallCommand must be registered AFTER HookUninstallCommand (D101.M.6 / D101.I)",
     ).toBeLessThan(installIdx);
     expect(
       installIdx,
-      "UninstallCommand must be registered AFTER InstallCommand in index.ts (D101.M.6 / D101.I)",
+      "UninstallCommand must be registered AFTER InstallCommand (D101.M.6 / D101.I)",
     ).toBeLessThan(uninstallIdx);
     expect(
       uninstallIdx,
-      "MCPCommand must be registered AFTER UninstallCommand in index.ts (D101.M.6 / D101.I)",
+      "MCPCommand must be registered AFTER UninstallCommand (D101.M.6 / D101.I)",
     ).toBeLessThan(mcpIdx);
 
-    // "Immediately after" lock: between the InstallCommand register
-    // line and the UninstallCommand register line, there must be NO
-    // other cli.register(...) call. Mirrors D98.M.10's HookInstall/
-    // HookUninstall pair convention.
-    const installEnd = installIdx + "cli.register(InstallCommand);".length;
-    const between = source.slice(installEnd, uninstallIdx);
-    const interlopingRegisters = findOffenders(between, /\bcli\.register\s*\(/);
+    // "Immediately after" lock: UninstallCommand sits at the index directly after
+    // InstallCommand -- no command may be inserted between the pair.
     expect(
-      interlopingRegisters,
-      `UninstallCommand must be registered IMMEDIATELY after InstallCommand with no other cli.register() between them (D101.M.6). Interloping registrations: ${JSON.stringify(interlopingRegisters)}`,
-    ).toEqual([]);
+      uninstallIdx,
+      `UninstallCommand must be registered IMMEDIATELY after InstallCommand -- adjacent REGISTERED_COMMANDS indices (D101.M.6). Install index ${installIdx}, Uninstall index ${uninstallIdx}.`,
+    ).toBe(installIdx + 1);
   });
 });
 
@@ -6029,7 +6049,6 @@ describe("Architectural invariants -- M RH release-targets inventory drift", () 
 
 describe("Architectural invariants -- M G2 viberevert run wrapper (D102.M)", () => {
   const RUN_COMMAND_REL = "packages/cli-commands/src/commands/run.ts";
-  const CLI_INDEX_REL = "packages/cli/src/index.ts";
 
   it("D102.M.2: index.ts registration ORDER -- StartCommand < RunCommand < CheckCommand AND RunCommand IMMEDIATELY after StartCommand", () => {
     // D102.I workflow grouping: run sits between start and check
@@ -6042,44 +6061,37 @@ describe("Architectural invariants -- M G2 viberevert run wrapper (D102.M)", () 
     // Defensive: assert each anchor exists before comparing indices --
     // indexOf returning -1 would silently satisfy `-1 < n` when `n`
     // is also non-negative.
-    const source = readSource(CLI_INDEX_REL);
-
-    const startIdx = source.indexOf("cli.register(StartCommand);");
-    const runIdx = source.indexOf("cli.register(RunCommand);");
-    const checkIdx = source.indexOf("cli.register(CheckCommand);");
+    const startIdx = REGISTERED_COMMANDS.indexOf(StartCommand);
+    const runIdx = REGISTERED_COMMANDS.indexOf(RunCommand);
+    const checkIdx = REGISTERED_COMMANDS.indexOf(CheckCommand);
 
     expect(
       startIdx,
-      "StartCommand registration missing from index.ts (D102.M.2 anchor)",
+      "StartCommand missing from REGISTERED_COMMANDS (D102.M.2 anchor)",
     ).toBeGreaterThanOrEqual(0);
-    expect(
-      runIdx,
-      "RunCommand registration missing from index.ts (D102.M.2)",
-    ).toBeGreaterThanOrEqual(0);
+    expect(runIdx, "RunCommand missing from REGISTERED_COMMANDS (D102.M.2)").toBeGreaterThanOrEqual(
+      0,
+    );
     expect(
       checkIdx,
-      "CheckCommand registration missing from index.ts (D102.M.2 anchor)",
+      "CheckCommand missing from REGISTERED_COMMANDS (D102.M.2 anchor)",
     ).toBeGreaterThanOrEqual(0);
 
     expect(
       startIdx,
-      "RunCommand must be registered AFTER StartCommand in index.ts (D102.M.2 -- start -> run -> check workflow order)",
+      "RunCommand must be registered AFTER StartCommand (D102.M.2 -- start -> run -> check workflow order)",
     ).toBeLessThan(runIdx);
     expect(
       runIdx,
-      "RunCommand must be registered BEFORE CheckCommand in index.ts (D102.M.2 -- start -> run -> check workflow order)",
+      "RunCommand must be registered BEFORE CheckCommand (D102.M.2 -- start -> run -> check workflow order)",
     ).toBeLessThan(checkIdx);
 
-    // "Immediately after" lock: between the StartCommand register line
-    // and the RunCommand register line, there must be NO other
-    // cli.register(...) call.
-    const startEnd = startIdx + "cli.register(StartCommand);".length;
-    const between = source.slice(startEnd, runIdx);
-    const interlopingRegisters = findOffenders(between, /\bcli\.register\s*\(/);
+    // "Immediately after" lock: RunCommand sits at the index directly after
+    // StartCommand -- no command may be inserted between the pair.
     expect(
-      interlopingRegisters,
-      `RunCommand must be registered IMMEDIATELY after StartCommand with no other cli.register() between them (D102.M.2). Interloping registrations: ${JSON.stringify(interlopingRegisters)}`,
-    ).toEqual([]);
+      runIdx,
+      `RunCommand must be registered IMMEDIATELY after StartCommand -- adjacent REGISTERED_COMMANDS indices (D102.M.2). Start index ${startIdx}, Run index ${runIdx}.`,
+    ).toBe(startIdx + 1);
   });
 
   it("D102.M.3: run.ts spawns pipe-less and shell-less (stdio inherit + shell false) and never references a PTY implementation", () => {
@@ -6201,7 +6213,6 @@ describe("Architectural invariants -- M G2 viberevert run wrapper (D102.M)", () 
 
 describe("Architectural invariants -- M G3 viberevert shell guarded REPL (D103.M)", () => {
   const SHELL_COMMAND_REL = "packages/cli-commands/src/commands/shell.ts";
-  const CLI_INDEX_REL = "packages/cli/src/index.ts";
 
   it("D103.M.2: index.ts registration ORDER -- RunCommand < ShellCommand < CheckCommand AND ShellCommand IMMEDIATELY after RunCommand", () => {
     // Workflow grouping: shell sits between run and check (run a guarded
@@ -6214,44 +6225,38 @@ describe("Architectural invariants -- M G3 viberevert shell guarded REPL (D103.M
     //
     // Defensive: assert each anchor exists before comparing indices --
     // indexOf returning -1 would silently satisfy `-1 < n`.
-    const source = readSource(CLI_INDEX_REL);
-
-    const runIdx = source.indexOf("cli.register(RunCommand);");
-    const shellIdx = source.indexOf("cli.register(ShellCommand);");
-    const checkIdx = source.indexOf("cli.register(CheckCommand);");
+    const runIdx = REGISTERED_COMMANDS.indexOf(RunCommand);
+    const shellIdx = REGISTERED_COMMANDS.indexOf(ShellCommand);
+    const checkIdx = REGISTERED_COMMANDS.indexOf(CheckCommand);
 
     expect(
       runIdx,
-      "RunCommand registration missing from index.ts (D103.M.2 anchor)",
+      "RunCommand missing from REGISTERED_COMMANDS (D103.M.2 anchor)",
     ).toBeGreaterThanOrEqual(0);
     expect(
       shellIdx,
-      "ShellCommand registration missing from index.ts (D103.M.2)",
+      "ShellCommand missing from REGISTERED_COMMANDS (D103.M.2)",
     ).toBeGreaterThanOrEqual(0);
     expect(
       checkIdx,
-      "CheckCommand registration missing from index.ts (D103.M.2 anchor)",
+      "CheckCommand missing from REGISTERED_COMMANDS (D103.M.2 anchor)",
     ).toBeGreaterThanOrEqual(0);
 
     expect(
       runIdx,
-      "ShellCommand must be registered AFTER RunCommand in index.ts (D103.M.2 -- run -> shell -> check workflow order)",
+      "ShellCommand must be registered AFTER RunCommand (D103.M.2 -- run -> shell -> check workflow order)",
     ).toBeLessThan(shellIdx);
     expect(
       shellIdx,
-      "ShellCommand must be registered BEFORE CheckCommand in index.ts (D103.M.2 -- run -> shell -> check workflow order)",
+      "ShellCommand must be registered BEFORE CheckCommand (D103.M.2 -- run -> shell -> check workflow order)",
     ).toBeLessThan(checkIdx);
 
-    // "Immediately after" lock: between the RunCommand register line and
-    // the ShellCommand register line, there must be NO other
-    // cli.register(...) call.
-    const runEnd = runIdx + "cli.register(RunCommand);".length;
-    const between = source.slice(runEnd, shellIdx);
-    const interlopingRegisters = findOffenders(between, /\bcli\.register\s*\(/);
+    // "Immediately after" lock: ShellCommand sits at the index directly after
+    // RunCommand -- no command may be inserted between the pair.
     expect(
-      interlopingRegisters,
-      `ShellCommand must be registered IMMEDIATELY after RunCommand with no other cli.register() between them (D103.M.2). Interloping registrations: ${JSON.stringify(interlopingRegisters)}`,
-    ).toEqual([]);
+      shellIdx,
+      `ShellCommand must be registered IMMEDIATELY after RunCommand -- adjacent REGISTERED_COMMANDS indices (D103.M.2). Run index ${runIdx}, Shell index ${shellIdx}.`,
+    ).toBe(runIdx + 1);
   });
 
   it("D103.M.3: shell.ts spawns pipe-less and shell-less (stdio inherit + shell false) and never references a terminal-bridge implementation", () => {
