@@ -105,7 +105,8 @@ features:
     maturity: beta
     # `exercised` applies to the grouped portable-suite feature. It does NOT
     # claim that every listed capability has identical per-test execution on
-    # every OS; Step 2.4 records and validates those finer-grained differences.
+    # every OS; those finer-grained per-capability differences are not
+    # individually recorded or validated here.
     capabilities:
       - init
       - config
