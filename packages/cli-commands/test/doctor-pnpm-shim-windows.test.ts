@@ -1,25 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Fabio Marcello Salvadori
 
-// H11.1 RED regression fixture — `viberevert doctor` reports `pnpm: not found`
-// on Windows when pnpm is present only as a `.cmd` shim (finding `doctor-pnpm`;
-// see docs/security/regressions.md and
-// docs/adr/0005-windows-command-resolution-and-launch.md).
+// H11.2 GREEN regression — `viberevert doctor` resolves a PATH-backed
+// `pnpm.cmd` shim on Windows and probes it through bounded one-shot `cmd.exe`
+// mediation (ADR 0005 Decision 3).
 //
-// Windows-only: this reproduces a Windows shim-probe defect. It is skipped on
-// other platforms by design, not as a portability omission.
+// Windows-only: this pins the Windows PATH/PATHEXT + `.cmd` probe behavior.
+// It is skipped elsewhere by design, not as a portability omission.
 //
-// Mechanism:
-//   - A normal GREEN test proves the fixture `pnpm.cmd` shim is itself valid and
-//     resolvable through PATH + PATHEXT: launched by extensionless name through
-//     the absolute cmd.exe from a neutral cwd, it prints its sentinel version
-//     (only when `--version` reaches it) and exits 0.
-//   - An `it.fails()` test drives the REAL DoctorCommand against the same shim,
-//     resolved through PATH, and asserts ONLY the desired post-fix contract. It
-//     fails today (`spawnSync("pnpm", …, { shell:false })` cannot launch a
-//     `.cmd`, so the line reads `not found`), which keeps CI green; when H11.2
-//     wires in resolve-then-launch it will pass unexpectedly, turning the suite
-//     red and forcing removal of `.fails`.
+// A baseline test proves the fixture shim is valid, resolves extensionlessly
+// through PATH + PATHEXT, receives `--version`, prints its sentinel version,
+// and exits 0. The production test then drives the real DoctorCommand and
+// requires the `pnpm:` line to report that version rather than `not found`.
 
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -55,7 +47,7 @@ function sink(): Writable {
 }
 
 suite(
-  "doctor — PATH-resolved pnpm.cmd shim (win32-only: reproduces doctor-pnpm; RED until H11.2)",
+  "doctor — PATH-resolved pnpm.cmd shim (win32-only: pins doctor-pnpm resolve-then-mediate)",
   () => {
     let comSpec: string;
     let tmpRoot: string | undefined;
@@ -145,12 +137,12 @@ suite(
       expect(res.stdout.trim()).toBe(sentinel);
     });
 
-    // RED H11.2 tripwire: remove `.fails` when the production probe uses the
-    // approved resolve-then-launch path. An unexpected pass is intentional.
-    it.fails("reports the version from a PATH-resolved pnpm.cmd shim", async () => {
+    // GREEN (H11.2): doctor now resolves the shim and uses bounded one-shot
+    // cmd.exe mediation (ADR 0005 Decision 3), so the pnpm line reports the
+    // fixture's version instead of "not found".
+    it("reports the version from a PATH-resolved pnpm.cmd shim", async () => {
       const { exitCode, stdout } = await runDoctor();
       const pnpmLine = stdout.split(/\r?\n/).find((line) => line.startsWith("pnpm:")) ?? "";
-      // Desired post-fix contract ONLY (currently unmet on Windows):
       expect(exitCode).toBe(0);
       expect(pnpmLine).toContain(sentinel);
       expect(pnpmLine).not.toContain("not found");

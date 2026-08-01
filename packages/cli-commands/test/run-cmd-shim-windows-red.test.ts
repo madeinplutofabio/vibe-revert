@@ -22,7 +22,7 @@
 import { execFile, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join, win32 } from "node:path";
 import { PassThrough, Writable } from "node:stream";
@@ -67,7 +67,7 @@ function sink(): Writable {
 }
 
 suite(
-  "run — PATH-resolved .cmd agent (win32-only: reproduces run-agent-windows-shim; RED until H11.2)",
+  "run — PATH-resolved .cmd agent (win32-only: run-agent-windows-shim; interactive launch gated by Decision 7)",
   () => {
     let comSpec: string;
     let tmpRoot: string | undefined;
@@ -151,18 +151,25 @@ suite(
     });
 
     /** Drive the real RunCommand via a clipanion Cli (mirrors run-command.test.ts). */
-    async function runRun(args: string[]): Promise<{ exitCode: number }> {
+    async function runRun(args: string[]): Promise<{ exitCode: number; stderr: string }> {
       const cli = new Cli({ binaryName: "viberevert" });
       cli.register(RunCommand);
+      const stderrChunks: string[] = [];
+      const stderrSink = new Writable({
+        write(chunk, _encoding, callback) {
+          stderrChunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString());
+          callback();
+        },
+      });
       const stdin = new PassThrough() as PassThrough & { isTTY?: boolean };
       stdin.isTTY = false;
       stdin.end();
       const exitCode = await cli.run(["run", ...args], {
         stdin,
         stdout: sink(),
-        stderr: sink(),
+        stderr: stderrSink,
       });
-      return { exitCode };
+      return { exitCode, stderr: stderrChunks.join("") };
     }
 
     it("baseline: agent.cmd resolves and launches through PATH + PATHEXT via cmd.exe", () => {
@@ -179,12 +186,37 @@ suite(
       expect(marker.argv).toEqual([`--probe-token=${token}`]);
     });
 
-    // RED H11.2 tripwire: remove `.fails` when the production launcher uses the
-    // approved resolve-then-launch path. An unexpected pass is intentional.
+    // Two adjacent tests on the SAME resolved-.cmd path, pinning both contracts:
+    //   - GREEN (below): the CURRENT supported contract — resolve the shim and
+    //     deliberately block it under Decision 7, WITHOUT launching it.
+    //   - it.fails (further below): the FUTURE eligible contract — launch the
+    //     shim and propagate its exit status; intentionally still blocked, so it
+    //     stays an expected failure until Decision 7 opens.
+    it("gated: a PATH-resolved .cmd agent is rejected under Decision 7 and not launched", async () => {
+      const token = `probe-${randomUUID()}`;
+      const { exitCode, stderr } = await runRun(["agent", `--probe-token=${token}`]);
+      const expectedTarget = join(binDir, "agent.cmd");
+      // Resolution reaches the gate: agent -> agent.cmd, classified as a shim,
+      // rejected under Decision 7 — truthful, not a misleading "Command not found".
+      expect(exitCode).toBe(1);
+      expect(stderr).toContain("Windows .cmd shim");
+      expect(stderr).toContain("Decision 7");
+      // The bare name resolved to THIS fixture's agent.cmd (case-insensitive: the
+      // resolver reconstructs the PATHEXT extension casing, not part of the contract).
+      expect(stderr.toLowerCase()).toContain(expectedTarget.toLowerCase());
+      expect(stderr).not.toContain("Command not found");
+      // The shim was NOT launched: its marker does not exist.
+      await expect(stat(markerPath)).rejects.toThrow();
+    });
+
+    // RED tripwire for the FUTURE eligible contract: remove `.fails` when
+    // interactive `.cmd` execution via `run` becomes eligible (ADR 0005
+    // Decision 7 opens and `.cmd` mediation is wired into `run`). An unexpected
+    // pass is intentional and signals that landing.
     it.fails("launches a PATH-resolved .cmd agent and propagates its exit status", async () => {
       const token = `probe-${randomUUID()}`;
       const { exitCode } = await runRun(["agent", `--probe-token=${token}`]);
-      // Desired post-fix contract ONLY (currently unmet on Windows):
+      // Desired eventual contract ONLY (currently blocked by Decision 7):
       const marker = JSON.parse(await readFile(markerPath, "utf8")) as Marker;
       expect(marker.argv).toEqual([`--probe-token=${token}`]);
       expect(exitCode).toBe(42);

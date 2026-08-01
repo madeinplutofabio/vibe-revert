@@ -17,6 +17,9 @@ import {
 import { probeGitVersion } from "@viberevert/git";
 import { Command } from "clipanion";
 
+import { buildCommandLaunchPlan, classifyResolvedTarget } from "./command-launcher.js";
+import { createHostExecutablePathResolver } from "./executable-probe.js";
+
 /**
  * Reports environment status as a series of key:value lines.
  *
@@ -123,25 +126,87 @@ export class DoctorCommand extends Command {
 }
 
 /**
- * Spawns `<cmd> --version` and returns the first line of stdout, or
- * "not found" if the binary cannot be invoked or returns a non-zero exit.
- * Synchronous; doctor invokes a small fixed number of probes so async
- * concurrency is unnecessary.
+ * Resolve `<cmd>` to an exact path, then spawn `<resolved> --version` and return
+ * the first line of stdout, or "not found" if the command cannot be resolved or
+ * launched, or returns a non-zero exit. Resolve-then-launch per ADR 0005: a
+ * resolved native target is spawned directly; a resolved `.cmd` shim uses
+ * bounded one-shot `cmd.exe` mediation (Decision 3 — doctor's probe is a
+ * one-shot diagnostic with no lifecycle contract). Synchronous; doctor invokes a
+ * small fixed number of probes so async concurrency is unnecessary.
  */
 function probeVersion(cmd: string): string {
   try {
-    const result = spawnSync(cmd, ["--version"], {
+    const resolvedTarget = createHostExecutablePathResolver()(cmd);
+    if (resolvedTarget === null) {
+      return "not found";
+    }
+    const plan = buildProbeLaunchPlan(cmd, resolvedTarget);
+    if (plan === null) {
+      return "not found";
+    }
+    const result = spawnSync(plan.command, [...plan.args], {
       encoding: "utf8",
       windowsHide: true,
+      shell: false,
+      windowsVerbatimArguments: plan.windowsVerbatimArguments,
     });
     if (result.error || result.status !== 0) {
       return "not found";
     }
-    const firstLine = result.stdout.trim().split("\n")[0];
+    const firstLine = result.stdout.trim().split(/\r?\n/)[0];
     return firstLine !== undefined && firstLine.length > 0 ? firstLine : "(no output)";
   } catch {
     return "not found";
   }
+}
+
+/**
+ * Build a one-shot `--version` launch plan for a resolved probe target, or null
+ * if it cannot be launched. A native target spawns directly and does NOT depend
+ * on ComSpec; only a `.cmd` target reads `ComSpec` (the launch-plan builder
+ * validates it and constructs bounded `cmd.exe` mediation). Any other resolved
+ * kind (batch, ps1, script, ...) is not probed.
+ */
+function buildProbeLaunchPlan(
+  requestedCommand: string,
+  resolvedTarget: string,
+): { command: string; args: readonly string[]; windowsVerbatimArguments: boolean } | null {
+  const targetKind = classifyResolvedTarget(process.platform, resolvedTarget);
+  if (targetKind === "native") {
+    const result = buildCommandLaunchPlan({
+      platform: process.platform,
+      resolvedTarget,
+      requestedCommand,
+      args: ["--version"],
+    });
+    if (!result.ok || result.plan.kind !== "direct") {
+      return null;
+    }
+    return {
+      command: result.plan.command,
+      args: result.plan.args,
+      windowsVerbatimArguments: false,
+    };
+  }
+  if (targetKind === "cmd-shim") {
+    const resolvedComSpec = process.env["ComSpec"] ?? process.env["COMSPEC"] ?? null;
+    const result = buildCommandLaunchPlan({
+      platform: process.platform,
+      resolvedTarget,
+      requestedCommand,
+      args: ["--version"],
+      resolvedComSpec,
+    });
+    if (!result.ok || result.plan.kind !== "windows-cmd") {
+      return null;
+    }
+    return {
+      command: result.plan.command,
+      args: result.plan.args,
+      windowsVerbatimArguments: result.plan.windowsVerbatimArguments,
+    };
+  }
+  return null;
 }
 
 function safeIsDir(path: string): boolean {

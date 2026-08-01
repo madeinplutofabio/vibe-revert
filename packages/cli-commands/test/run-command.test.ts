@@ -456,15 +456,25 @@ describe("viberevert run (integration matrix)", () => {
   );
 
   it.runIf(process.platform === "win32")(
-    "(i) Windows: spawning a .cmd directly -> exit 1 + cmd /c hint, session ended",
+    "(i) Windows: a resolved .cmd is gated (ADR 0005 Decision 7) -> exit 1, not launched, session ended",
     async () => {
       const cmdPath = join(tmpRoot, "test.cmd");
-      await writeFile(cmdPath, "@echo off\r\nexit /b 0\r\n");
+      const markerPath = join(tmpRoot, "test-cmd-ran.txt");
+      const escapedMarker = markerPath.replaceAll("%", "%%");
+      await writeFile(cmdPath, `@echo off\r\necho ran>"${escapedMarker}"\r\nexit /b 0\r\n`);
       const result = await runRun([cmdPath]);
 
+      // H11.2: run resolves the .cmd, classifies it as a shim, and rejects it
+      // under Decision 7 (interactive .cmd mediation not yet eligible) rather
+      // than spawning it directly. Truthful, not a misleading "Command not
+      // found".
       expect(result.exitCode).toBe(1);
-      expect(result.stderr).toContain("Windows refuses .bat/.cmd with shell disabled");
+      expect(result.stderr).toContain("Windows .cmd shim");
+      expect(result.stderr).toContain("Decision 7");
+      expect(result.stderr).not.toContain("Command not found");
       expect(result.stderr).toContain("viberevert run cmd /c");
+      // The shim was NOT launched: the marker it would write does not exist.
+      await expect(stat(markerPath)).rejects.toThrow();
       await expectSessionEnded();
     },
   );

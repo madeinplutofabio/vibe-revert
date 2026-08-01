@@ -250,8 +250,13 @@ function checkResolvedTargetInvariants(
  * directly). Windows classifies by extension; v1 launches `native` and mediates
  * `cmd-shim`, and returns a specific kind for everything else so support can be
  * added later without changing existing outcomes.
+ *
+ * Exported (module-level — not a package barrel) so a caller that must branch on
+ * the resolved kind without building a launch plan — e.g. `run`'s ADR 0005
+ * Decision 7 `.cmd` gate — shares this exact classification rather than
+ * re-deriving extensions.
  */
-function classifyResolvedTarget(
+export function classifyResolvedTarget(
   platform: NodeJS.Platform,
   resolvedTarget: string,
 ): ResolvedTargetKind {

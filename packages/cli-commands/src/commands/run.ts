@@ -99,6 +99,8 @@ import { ConcurrentOperationError } from "../locks.js";
 import { EndSessionRaceError, endSessionOperation } from "../operations/end-session.js";
 import { START_LOCK_REL, startSessionOperation } from "../operations/start-session.js";
 import { RuntimeEnvInvalidError } from "../runtime-env.js";
+import { classifyResolvedTarget, type ResolvedTargetKind } from "./command-launcher.js";
+import { createHostExecutablePathResolver } from "./executable-probe.js";
 
 /** Confirmation phrase for commands.require_confirm matches (D102.D, USER-LOCKED). */
 const CONFIRM_PHRASE = "run anyway";
@@ -157,13 +159,20 @@ export function mapChildExitToCode(status: ChildExitStatus): number {
   return 1;
 }
 
-type SpawnOutcome =
+type RunOutcome =
   | {
       readonly kind: "exited";
       readonly code: number | null;
       readonly signal: NodeJS.Signals | null;
     }
-  | { readonly kind: "spawn-error"; readonly err: NodeJS.ErrnoException };
+  | { readonly kind: "spawn-error"; readonly err: NodeJS.ErrnoException }
+  | { readonly kind: "unresolved" }
+  | { readonly kind: "cmd-gated"; readonly resolvedTarget: string }
+  | {
+      readonly kind: "unsupported";
+      readonly resolvedTarget: string;
+      readonly targetKind: ResolvedTargetKind;
+    };
 
 export class RunCommand extends Command {
   static override paths = [["run"]];
@@ -410,46 +419,66 @@ export class RunCommand extends Command {
       return 1;
     }
 
-    // Step 6: spawn + wait (D102.A + D102.H). Sync try/catch for the
-    // Windows .cmd EINVAL throw; 'error' listener for async ENOENT /
-    // EACCES; record-only signal handlers so end-session always runs.
+    // Step 6: resolve the requested command to an exact path (no OS
+    // re-resolution), classify the RESOLVED target, and act by kind
+    // (ADR 0005 resolve-then-launch):
+    //   - unresolved -> command-not-found (no spawn).
+    //   - native     -> direct-spawn the resolved path (D102.A + D102.H).
+    //   - cmd-shim   -> Decision 7 gated reject (no spawn; interactive .cmd
+    //                   mediation not yet eligible).
+    //   - other      -> unsupported resolved target (no spawn).
     const argv0 = this.args[0] as string;
     const childArgs = this.args.slice(1);
-    let outcome: SpawnOutcome;
-    try {
-      const child = spawn(argv0, childArgs, {
-        stdio: "inherit",
-        shell: false,
-        cwd: invocationCwd,
-      });
-      outcome = await new Promise<SpawnOutcome>((resolveOutcome) => {
-        const recordOnly = (): void => {
-          // D102.H: recording handler. The terminal already delivered
-          // the signal to the child (shared process group / console);
-          // the wrapper just refuses to die before end-session runs.
-        };
-        process.on("SIGINT", recordOnly);
-        process.on("SIGTERM", recordOnly);
-        let settled = false;
-        const settle = (result: SpawnOutcome): void => {
-          // One-shot: 'error' and 'exit' can both fire in edge
-          // sequences; the first settles, later calls are no-ops.
-          if (settled) {
-            return;
-          }
-          settled = true;
-          process.removeListener("SIGINT", recordOnly);
-          process.removeListener("SIGTERM", recordOnly);
-          resolveOutcome(result);
-        };
-        child.once("error", (err) =>
-          settle({ kind: "spawn-error", err: err as NodeJS.ErrnoException }),
-        );
-        child.once("exit", (code, signal) => settle({ kind: "exited", code, signal }));
-      });
-    } catch (err) {
-      // Synchronous spawn throw (Node 24 Windows .cmd/.bat EINVAL).
-      outcome = { kind: "spawn-error", err: err as NodeJS.ErrnoException };
+    const resolvedTarget = createHostExecutablePathResolver()(argv0);
+    let outcome: RunOutcome;
+    if (resolvedTarget === null) {
+      outcome = { kind: "unresolved" };
+    } else {
+      const targetKind = classifyResolvedTarget(process.platform, resolvedTarget);
+      if (targetKind === "native") {
+        // Sync try/catch for a synchronous spawn throw; 'error' listener for
+        // async spawn failure; record-only signal handlers so end-session
+        // always runs.
+        try {
+          const child = spawn(resolvedTarget, childArgs, {
+            stdio: "inherit",
+            shell: false,
+            cwd: invocationCwd,
+          });
+          outcome = await new Promise<RunOutcome>((resolveOutcome) => {
+            const recordOnly = (): void => {
+              // D102.H: recording handler. The terminal already delivered
+              // the signal to the child (shared process group / console);
+              // the wrapper just refuses to die before end-session runs.
+            };
+            process.on("SIGINT", recordOnly);
+            process.on("SIGTERM", recordOnly);
+            let settled = false;
+            const settle = (result: RunOutcome): void => {
+              // One-shot: 'error' and 'exit' can both fire in edge
+              // sequences; the first settles, later calls are no-ops.
+              if (settled) {
+                return;
+              }
+              settled = true;
+              process.removeListener("SIGINT", recordOnly);
+              process.removeListener("SIGTERM", recordOnly);
+              resolveOutcome(result);
+            };
+            child.once("error", (err) =>
+              settle({ kind: "spawn-error", err: err as NodeJS.ErrnoException }),
+            );
+            child.once("exit", (code, signal) => settle({ kind: "exited", code, signal }));
+          });
+        } catch (err) {
+          // Synchronous spawn throw.
+          outcome = { kind: "spawn-error", err: err as NodeJS.ErrnoException };
+        }
+      } else if (targetKind === "cmd-shim") {
+        outcome = { kind: "cmd-gated", resolvedTarget };
+      } else {
+        outcome = { kind: "unsupported", resolvedTarget, targetKind };
+      }
     }
 
     // Step 7: end the session (finally-shaped: every outcome path
@@ -471,7 +500,37 @@ export class RunCommand extends Command {
 
     // Step 8: map the outcome + report (stderr only).
     let exitCode: number;
-    if (outcome.kind === "spawn-error") {
+    if (outcome.kind === "exited") {
+      exitCode = mapChildExitToCode(outcome);
+    } else if (outcome.kind === "unresolved") {
+      stderr.write(`Command not found: ${argv0}\n`);
+      exitCode = 127;
+    } else if (outcome.kind === "cmd-gated") {
+      stderr.write(`Resolved ${argv0} to a Windows .cmd shim: ${outcome.resolvedTarget}\n`);
+      stderr.write(
+        "Interactive .cmd execution via `viberevert run` is not yet eligible " +
+          "(blocked by ADR 0005 Decision 7, pending the manual Ctrl+C lifecycle gate).\n",
+      );
+      stderr.write(
+        "Run the command through the shell explicitly, for example: " +
+          "viberevert run cmd /c <command> ...\n",
+      );
+      stderr.write("(The guard then sees the explicit `cmd /c ...` form.)\n");
+      exitCode = 1;
+    } else if (outcome.kind === "unsupported") {
+      stderr.write(
+        `Resolved ${argv0} to ${outcome.resolvedTarget}, a ${outcome.targetKind} target that ` +
+          "`viberevert run` cannot execute directly.\n",
+      );
+      stderr.write(
+        "Run the command through the shell or an interpreter explicitly, for example: " +
+          "viberevert run cmd /c <command> ...\n",
+      );
+      exitCode = 1;
+    } else {
+      // spawn-error. The old `.cmd`-specific EINVAL branch is removed because
+      // resolved `.cmd` targets are gated before spawn() and never reach here;
+      // any other EINVAL falls through to the generic message below.
       const code = outcome.err.code;
       if (code === "ENOENT") {
         stderr.write(`Command not found: ${argv0}\n`);
@@ -479,23 +538,14 @@ export class RunCommand extends Command {
       } else if (code === "EACCES") {
         stderr.write(`Command found but not executable: ${argv0}\n`);
         exitCode = 126;
-      } else if (code === "EINVAL" && process.platform === "win32") {
-        stderr.write(
-          `Could not spawn ${argv0} directly (Windows refuses .bat/.cmd with shell disabled).\n`,
-        );
-        stderr.write("Run it through the shell explicitly, e.g.: viberevert run cmd /c npm test\n");
-        stderr.write("(The guard then sees the `cmd /c ...` form.)\n");
-        exitCode = 1;
       } else {
         stderr.write(`Could not spawn ${argv0}: ${outcome.err.message}\n`);
         exitCode = 1;
       }
-    } else {
-      exitCode = mapChildExitToCode(outcome);
     }
 
     if (endFailureMessage !== null) {
-      if (outcome.kind === "spawn-error") {
+      if (outcome.kind !== "exited") {
         stderr.write(
           `The wrapped command did not run, and the session could not be closed: ${endFailureMessage}\n`,
         );
