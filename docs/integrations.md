@@ -6,7 +6,7 @@ Per-integration ship status for the M G1b integration installer milestone.
 |---|---|---|---|
 | Cursor | Project-local `<repo>/.cursor/mcp.json` | shipped (M G1b) | See `docs/installers-contract.md` for per-adapter behavior. |
 | Claude Code | Project-local `<repo>/.mcp.json` | shipped (M G1b) | See `docs/installers-contract.md` for per-adapter behavior. |
-| GitHub Action workflow template | `<repo>/.github/workflows/viberevert.yml` | shipped (M G1b) | Pinned to exact CLI version; uses `--since` for PR/push diff ranges; `permissions: { contents: read }`; sentinel-replace on re-install. Explicit-only (excluded from `--all`). |
+| GitHub Action workflow template | `<repo>/.github/workflows/viberevert.yml` | shipped (M G1b) | Pinned to exact CLI version; uses `--since` for PR/push diff ranges; `permissions: { contents: read }`; wholly VibeRevert-owned, so install and reinstall both use whole-file `write-new`, with sentinel markers kept for recognition, not partial ownership. Explicit-only (excluded from `--all`). |
 | Husky | `<repo>/.husky/pre-commit` sentinel block | shipped (M G1b) | Refusal-on-detection (M F) flipped to delegation. `--migrate-from-hook-install` orchestrates removal of a prior VibeRevert direct hook. |
 | Lefthook | `<repo>/lefthook.yml` sentinel block under `pre-commit.commands` | shipped (M G1b) | Refuses with shape-specific `reasonCode` when the config shape is unsupported. Full YAML merge deferred to M G1b-followup-4. |
 | Direct hook | `<repo>/.git/hooks/pre-commit` | shipped (M G1b) | `viberevert install --direct` is records-based. `viberevert hook install` remains the legacy/backward-compatible M F path. Coexistence guard prevents conflict between the two surfaces. |

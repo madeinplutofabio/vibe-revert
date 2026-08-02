@@ -21,14 +21,18 @@
  * detect() flow (always positive):
  *   Returns { detected: true } regardless of intent. No on-disk
  *   evidence is needed -- the workflow is a fresh install (write-new)
- *   or a safe update (sentinel-block-replace). The --all exclusion is
+ *   or a whole-file update (write-new). The --all exclusion is
  *   a CLI-level concern, not an adapter-level one.
  *
  * plan() flow (four branches; D101.B force-flag discipline):
  *   1. File absent -> ApplicablePlan { write-new } with wrapped content.
- *   2. File exists WITH our sentinel -> ApplicablePlan
- *      { sentinel-block-replace } with interior only. Installer
- *      classifier decides noop/safe-update/refuse via SHA.
+ *   2. File exists WITH our sentinel -> ApplicablePlan { write-new }
+ *      with the full wrapped content. .github/workflows/viberevert.yml
+ *      is wholly VibeRevert-owned, so a recognized VibeRevert workflow
+ *      is replaced as a complete file -- install and update share one
+ *      op-kind (write-new). Installer classifier decides
+ *      noop/safe-update/refuse via the full-file SHA; a manual edit is
+ *      drift, refused without --force-reinstall.
  *   3. File exists WITHOUT our sentinel AND !forceReinstall ->
  *      RefusedPlan { non-vr-workflow-present }.
  *   4. File exists WITHOUT our sentinel AND forceReinstall ->
@@ -132,15 +136,19 @@ export const githubActionAdapter: Adapter = {
       existingContent = await readFile(targetPath, "utf8");
     }
 
-    // Branch 2: sentinel present -> sentinel-block-replace (interior
-    // only; installer wraps markers). Force flag doesn't change this
-    // branch -- sentinel-replace IS the safe-update path.
+    // Branch 2: our sentinel is present -> write-new (whole-file replace).
+    // .github/workflows/viberevert.yml is wholly VibeRevert-owned, so install
+    // and update use the same op-kind. This avoids a cross-kind record mismatch
+    // and preserves write-new's uninstall-to-absent behavior. The classifier
+    // decides noop, safe update, or drift refusal from the full-file SHA.
+    // Sentinel detection still distinguishes this generated workflow from a
+    // foreign file. Force does not change the planned operation.
     if (existingContent !== null && findSentinelBlock(existingContent, BLOCK_ID) !== null) {
       return {
         status: "applicable",
         adapterName: ADAPTER_NAME,
         humanSummary: HUMAN_SUMMARY_REPLACE,
-        ops: [{ kind: "sentinel-block-replace", target, blockId: BLOCK_ID, content: interior }],
+        ops: [{ kind: "write-new", target, content: wrapped }],
         recordKey: RECORD_KEY,
         meta: {},
       };

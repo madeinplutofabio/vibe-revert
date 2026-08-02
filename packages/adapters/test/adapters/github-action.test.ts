@@ -197,35 +197,39 @@ describe("githubActionAdapter.plan -- branch 1: file absent -> write-new", () =>
 });
 
 // ===========================================================================
-// F. plan() branch 2 -- sentinel present -> sentinel-block-replace
+// F. plan() branch 2 -- sentinel present -> write-new (whole-file replace)
 // ===========================================================================
 
-describe("githubActionAdapter.plan -- branch 2: sentinel present -> sentinel-block-replace", () => {
-  it("returns ApplicablePlan with sentinel-block-replace op carrying INTERIOR ONLY (no markers)", async () => {
+describe("githubActionAdapter.plan -- branch 2: sentinel present -> write-new (whole-file replace)", () => {
+  it("returns ApplicablePlan with a write-new op carrying the full wrapped content", async () => {
     const interior = renderGitHubActionWorkflowInterior(CLI_VERSION);
     const full = `${SENTINEL_BEGIN_LINE}\n${interior}\n${SENTINEL_END_LINE}\n`;
     await writeWorkflowFile(full);
 
     const plan = await githubActionAdapter.plan(makeCtx());
-    if (plan.status !== "applicable") throw new Error("expected applicable");
+    if (plan.status !== "applicable") {
+      throw new Error("expected applicable");
+    }
+
     expect(plan.ops).toHaveLength(1);
     const op = plan.ops[0];
-    if (op === undefined) return;
-    expect(op.kind).toBe("sentinel-block-replace");
-    if (op.kind !== "sentinel-block-replace") return;
-    // Target lock -- same canonical target as branches 1/4.
+    if (op === undefined) {
+      throw new Error("expected one GitHub Action operation");
+    }
+
+    expect(op.kind).toBe("write-new");
+    if (op.kind !== "write-new") {
+      throw new Error("expected write-new operation");
+    }
+
     expect(op.target.scope).toBe("repo");
     expect(op.target.pathRelative).toBe(".github/workflows/viberevert.yml");
     expect(op.target.pathTemplate).toBe("{repo}/.github/workflows/viberevert.yml");
     expect(op.target.pathTemplate).toBe(`{repo}/${op.target.pathRelative}`);
-    expect(op.blockId).toBe(BLOCK_ID);
-    expect(op.content).toBe(interior);
-    // Interior alone must NOT carry BEGIN/END markers -- installer wraps.
-    expect(op.content).not.toContain(SENTINEL_BEGIN_LINE);
-    expect(op.content).not.toContain(SENTINEL_END_LINE);
+    expect(op.content).toBe(full);
   });
 
-  it("forceReinstall does NOT change branch 2 (sentinel-replace either way -- prevents needless backup of VR-owned workflow)", async () => {
+  it("forceReinstall does NOT change branch 2's planned write-new operation", async () => {
     const interior = renderGitHubActionWorkflowInterior(CLI_VERSION);
     const full = `${SENTINEL_BEGIN_LINE}\n${interior}\n${SENTINEL_END_LINE}\n`;
     await writeWorkflowFile(full);
@@ -234,9 +238,11 @@ describe("githubActionAdapter.plan -- branch 2: sentinel present -> sentinel-blo
     const forcedPlan = await githubActionAdapter.plan(
       makeCtx({ options: { forceReinstall: true } }),
     );
-    if (plainPlan.status !== "applicable" || forcedPlan.status !== "applicable") return;
-    expect(plainPlan.ops[0]?.kind).toBe("sentinel-block-replace");
-    expect(forcedPlan.ops[0]?.kind).toBe("sentinel-block-replace");
+    if (plainPlan.status !== "applicable" || forcedPlan.status !== "applicable") {
+      throw new Error("expected both plain and forced plans to be applicable");
+    }
+    expect(plainPlan.ops[0]?.kind).toBe("write-new");
+    expect(forcedPlan.ops[0]?.kind).toBe("write-new");
     expect(plainPlan.ops).toEqual(forcedPlan.ops);
   });
 
@@ -246,9 +252,13 @@ describe("githubActionAdapter.plan -- branch 2: sentinel present -> sentinel-blo
     await writeWorkflowFile(oldFull);
 
     const plan = await githubActionAdapter.plan(makeCtx({ cliVersion: CLI_VERSION }));
-    if (plan.status !== "applicable") return;
+    if (plan.status !== "applicable") {
+      throw new Error("expected applicable");
+    }
     const op = plan.ops[0];
-    if (op === undefined || op.kind !== "sentinel-block-replace") return;
+    if (op === undefined || op.kind !== "write-new") {
+      throw new Error("expected write-new operation");
+    }
     expect(op.content).toContain(CLI_VERSION);
     expect(op.content).not.toContain("0.7.0-beta.0");
   });

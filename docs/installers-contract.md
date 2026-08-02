@@ -218,7 +218,7 @@ type FileEditOp =
 
 - **write-new** — create the target file fresh. If the target exists, the engine's classifier decides between adoption (bytes match), safe-update (previously VibeRevert-managed), or refusal (drift or user-owned bytes we did not write).
 - **sentinel-block-insert** — inject a sentinel-wrapped block into an existing (or absent) text file, anchored per `SentinelAnchor` (`append` or `after-marker`).
-- **sentinel-block-replace** — replace the interior of an existing sentinel block matched by `blockId`. Emitted when re-installing over prior VibeRevert-managed content.
+- **sentinel-block-replace** — replace the interior of an existing sentinel block matched by `blockId`. Engine-supported, but no currently shipped adapter emits it.
 - **backup-and-write** — back the current file up under `.viberevert/integration-backups/...` then overwrite. Preserves the original bytes for uninstall's restore path.
 - **json-key-merge** — structured-merge a value at `keyPath` into an existing JSON file. The value is canonicalized (see below) for SHA computation.
 
@@ -450,7 +450,7 @@ Locked security and behavior bits (from the emitted workflow):
 - Installs the CLI with `npm install -g viberevert@<ctx.cliVersion>` — the exact CLI version is pinned at install time, not `@latest` or `@beta`.
 - Uses `viberevert check --since` for both PR and push diff ranges (PR base SHA for `pull_request`; `github.event.before` for `push`; a guard step for the all-zeros initial-push SHA so first-push to a branch does not fail on a missing diff base).
 
-Re-installing over an existing VibeRevert-managed workflow uses `sentinel-block-replace` — the version bump is applied by editing the sentinel-wrapped region, not by rewriting the whole file. A user-authored workflow at the same path is refused with `non-vr-workflow-present`; `--force-reinstall` backs it up and installs.
+`.github/workflows/viberevert.yml` is wholly VibeRevert-owned: install and reinstall both use `write-new`. A recognized VibeRevert workflow is replaced as a complete file. The classifier uses the full-file SHA to decide whether the result is a noop, a safe update, or a drift refusal. A manual edit is therefore treated as drift and is refused without `--force-reinstall`, never silently overwritten. Sentinel markers identify a recognized VibeRevert-generated workflow; they do not define a user-editable region. A user-authored workflow at the same path is refused with `non-vr-workflow-present`; `--force-reinstall` backs it up and installs.
 
 The `github-action` adapter is **explicit-only**: `viberevert install --all` does not create the workflow. Users opt in with `viberevert install --github-action`.
 
@@ -543,7 +543,7 @@ All rows inherit the installer engine safety rules from the sections above: lock
 | Husky | `husky` | `<repo>/.husky/pre-commit` | `sentinel-block-insert` | yes |
 | Lefthook | `lefthook` | `<repo>/lefthook.yml` (or one of `.yaml` / `.lefthook.yml` / `.lefthook.yaml`) | `sentinel-block-insert` | yes |
 | Claude Code | `claude` | `<repo>/.mcp.json` | `json-key-merge` | yes |
-| GitHub Action | `github-action` | `<repo>/.github/workflows/viberevert.yml` | `write-new`, `sentinel-block-replace`, or `backup-and-write` | no (explicit-only) |
+| GitHub Action | `github-action` | `<repo>/.github/workflows/viberevert.yml` | `write-new` (install and reinstall), or `backup-and-write` (forced replacement of a foreign workflow) | no (explicit-only) |
 
 ### Cursor
 
@@ -627,7 +627,7 @@ Current shipped behavior:
 | Aspect | Behavior |
 |---|---|
 | Target path | `<repo>/.github/workflows/viberevert.yml` |
-| Operation kind | `write-new` when the file is absent; `sentinel-block-replace` when the file exists and contains the VibeRevert sentinel; `backup-and-write` when `--force-reinstall` is set against a user-authored workflow. |
+| Operation kind | `write-new` when the file is absent or contains the expected VibeRevert GitHub Action sentinel block; a recognized VibeRevert workflow is replaced as a whole file. `backup-and-write` is used when `--force-reinstall` replaces a user-authored workflow. |
 | Detection trigger | `detect` reports positive regardless of intent — creating a CI workflow is a user intent, not a discovered state. |
 | Adapter-layer refusals | An existing workflow file without the VibeRevert sentinel produces `RefusedPlan` with `reasonCode: "non-vr-workflow-present"` and a `manualSnippet` pointing at `viberevert install --github-action --force-reinstall`. |
 | Engine-layer refusals | Inherited from the engine safety rules. |

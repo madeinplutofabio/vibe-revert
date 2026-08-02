@@ -7,9 +7,14 @@
  * Renders the INTERIOR of the sentinel-wrapped workflow body -- the
  * lines between `# viberevert:begin:github-action-workflow` and
  * `# viberevert:end:github-action-workflow`. The github-action adapter
- * wraps this interior with sentinel markers via renderSentinelBlock()
- * for write-new / backup-and-write ops; sentinel-block-replace ops pass
- * this interior directly (installer wraps with markers).
+ * wraps this interior with sentinel markers via renderSentinelBlock() to
+ * form the complete workflow file, which it emits as write-new for both
+ * install and reinstall, and as backup-and-write when an explicitly
+ * forced install replaces a pre-existing foreign workflow.
+ *
+ * .github/workflows/viberevert.yml is wholly VibeRevert-owned: the
+ * sentinel markers identify a recognized VibeRevert-generated workflow;
+ * they do not define a user-editable region.
  *
  * Discipline locked (D101.K + D101.Q + D98.M.14):
  *   - ASCII-only content (grep-safe; no smart quotes).
