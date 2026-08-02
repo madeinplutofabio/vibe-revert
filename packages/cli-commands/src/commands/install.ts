@@ -107,6 +107,10 @@ import { Command, Option } from "clipanion";
 
 import pkg from "../../package.json" with { type: "json" };
 import { resolveNowForCliTimestamp } from "../runtime-env.js";
+import {
+  cursorWindowsLauncherWarningApplies,
+  printCursorWindowsLauncherWarning,
+} from "./cursor-launcher-warning.js";
 
 // ---------------------------------------------------------------------------
 // CLI version -- sourced from cli-commands package.json.
@@ -433,6 +437,13 @@ export class InstallCommand extends Command {
         outcomeByFlag.set(entry.flag, outcome);
         if (outcome.status === "applied") {
           this.context.stdout.write(formatApplied(name, outcome.receipt.humanSummary));
+          // H11.3: the Cursor adapter emits the Windows-specific `cmd /c`
+          // launcher on win32 (host-specific). Surface the portability advisory
+          // after a successful Cursor apply on Windows only — never for
+          // noop/refusal, other adapters, or non-Windows hosts.
+          if (cursorWindowsLauncherWarningApplies(entry.recordKey, process.platform)) {
+            printCursorWindowsLauncherWarning(this.context.stderr);
+          }
         } else if (outcome.status === "noop") {
           this.context.stdout.write(formatNoop(name, outcome.reason));
         } else {

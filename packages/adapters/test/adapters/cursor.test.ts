@@ -7,7 +7,7 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { cursorAdapter } from "../../src/adapters/cursor.js";
+import { buildCursorMcpLaunchValue, cursorAdapter } from "../../src/adapters/cursor.js";
 import type { AdapterContext } from "../../src/types.js";
 
 let repoRoot: string;
@@ -200,7 +200,7 @@ describe("cursorAdapter.plan -- shape + locked semantic fields", () => {
     expect(op.target.pathRelative).toBe(".cursor/mcp.json");
     expect(op.target.pathTemplate).toBe("{repo}/.cursor/mcp.json");
     expect(op.keyPath).toEqual(["mcpServers", "viberevert"]);
-    expect(op.value).toEqual({ command: "viberevert", args: ["mcp", "serve"] });
+    expect(op.value).toEqual(buildCursorMcpLaunchValue(process.platform));
   });
 
   it("plan.ops[0] target.pathRelative is repo-local POSIX (no leading slash/backslash/colon/tilde)", async () => {
@@ -280,7 +280,30 @@ describe("cursorAdapter.plan -- mutation safety (fresh nested structures per cal
     if (op2 === undefined) throw new Error("expected one op");
     if (op2.kind !== "json-key-merge") throw new Error("expected json-key-merge");
     expect(op2.keyPath).toEqual(["mcpServers", "viberevert"]);
-    expect(op2.value).toEqual({ command: "viberevert", args: ["mcp", "serve"] });
+    expect(op2.value).toEqual(buildCursorMcpLaunchValue(process.platform));
     expect(op2.target.pathRelative).toBe(".cursor/mcp.json");
+  });
+});
+
+describe("buildCursorMcpLaunchValue -- platform launch value", () => {
+  it("win32 -> cmd /c viberevert mcp serve (verified Cursor Windows form)", () => {
+    expect(buildCursorMcpLaunchValue("win32")).toEqual({
+      command: "cmd",
+      args: ["/c", "viberevert", "mcp", "serve"],
+    });
+  });
+
+  it("linux -> bare viberevert mcp serve", () => {
+    expect(buildCursorMcpLaunchValue("linux")).toEqual({
+      command: "viberevert",
+      args: ["mcp", "serve"],
+    });
+  });
+
+  it("darwin -> bare viberevert mcp serve", () => {
+    expect(buildCursorMcpLaunchValue("darwin")).toEqual({
+      command: "viberevert",
+      args: ["mcp", "serve"],
+    });
   });
 });

@@ -73,10 +73,12 @@
 // under test.
 
 import { Buffer } from "node:buffer";
+import { randomUUID } from "node:crypto";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 
-import type { AdapterContext } from "@viberevert/adapters";
+import type { AdapterContext, JsonValue } from "@viberevert/adapters";
 import { cursorAdapter } from "@viberevert/adapters";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
@@ -94,10 +96,6 @@ const FIXED_NOW = new Date("2026-06-29T12:00:00.000Z");
 const CURSOR_RECORD_KEY = "cursor" as const;
 const CURSOR_ADAPTER_NAME = "Cursor";
 const CURSOR_TARGET_REL = ".cursor/mcp.json";
-const CURSOR_DESIRED_VALUE = {
-  command: "viberevert",
-  args: ["mcp", "serve"],
-};
 const PRE_EXISTING_OTHER_SERVER = {
   command: "unrelated-foo",
   args: ["--baz"],
@@ -186,6 +184,33 @@ function requireObject(value: unknown, label: string): JsonObject {
   return value as JsonObject;
 }
 
+// Derive the canonical VibeRevert value the Cursor adapter writes into
+// .cursor/mcp.json from the adapter's own plan, rather than pinning it as a
+// literal here. cursorAdapter.plan() is purely declarative -- it reads
+// neither the filesystem nor ctx (see adapters/cursor.ts) -- so the probe
+// repoRoot below is never touched; it is a temp path only so a future
+// adapter that inspected ctx.repoRoot would receive a syntactically valid,
+// unique path. No directory is created for this probe. The returned value is
+// the platform-correct launcher form (bare `viberevert` on POSIX,
+// `cmd /c viberevert` on Windows). A plain helper (not a file-global hook)
+// single-sources the derivation while each consuming suite scopes its own
+// fixture via a local beforeAll.
+async function deriveCursorDesiredValue(): Promise<JsonValue> {
+  const planProbeRoot = join(tmpdir(), `vr-cursor-plan-probe-${randomUUID()}`);
+  const plan = await cursorAdapter.plan(adapterCtx(planProbeRoot));
+  if (plan.status !== "applicable") {
+    throw new Error("expected Cursor adapter plan to be applicable");
+  }
+  const op = plan.ops.find(
+    (candidate) =>
+      candidate.kind === "json-key-merge" && candidate.target.pathRelative === CURSOR_TARGET_REL,
+  );
+  if (op === undefined || op.kind !== "json-key-merge") {
+    throw new Error("expected Cursor MCP json-key-merge operation");
+  }
+  return structuredClone(op.value);
+}
+
 describe.sequential("cursor end-to-end lifecycle (stateful: shared temp repo)", () => {
   let repoRoot: string;
   let cleanup: () => Promise<void>;
@@ -194,6 +219,11 @@ describe.sequential("cursor end-to-end lifecycle (stateful: shared temp repo)", 
   let scenario1IntegrationsBytes: Buffer | undefined;
   let scenario3TargetBytes: Buffer | undefined;
   let scenario3IntegrationsBytes: Buffer | undefined;
+
+  let cursorDesiredValue: JsonValue;
+  beforeAll(async () => {
+    cursorDesiredValue = await deriveCursorDesiredValue();
+  });
 
   beforeAll(async () => {
     const tmp = await createTempRepo();
@@ -242,7 +272,7 @@ describe.sequential("cursor end-to-end lifecycle (stateful: shared temp repo)", 
     const parsed = await readTargetParsed(repoRoot);
     expect(parsed).toHaveProperty("mcpServers");
     const mcpServers = requireObject(parsed.mcpServers, "mcpServers") as CursorMcpServers;
-    expect(mcpServers.viberevert).toEqual(CURSOR_DESIRED_VALUE);
+    expect(mcpServers.viberevert).toEqual(cursorDesiredValue);
     expect(mcpServers["other-server"]).toEqual(PRE_EXISTING_OTHER_SERVER);
 
     // D101.A: NO _viberevert_managed sidecar key anywhere in the
@@ -347,7 +377,7 @@ describe.sequential("cursor end-to-end lifecycle (stateful: shared temp repo)", 
     // Canonical viberevert restored; other-server still preserved.
     const parsed = await readTargetParsed(repoRoot);
     const mcpServers = requireObject(parsed.mcpServers, "mcpServers") as CursorMcpServers;
-    expect(mcpServers.viberevert).toEqual(CURSOR_DESIRED_VALUE);
+    expect(mcpServers.viberevert).toEqual(cursorDesiredValue);
     expect(mcpServers["other-server"]).toEqual(PRE_EXISTING_OTHER_SERVER);
 
     // Integrations record present with non-null managedValueSha256;
@@ -423,6 +453,11 @@ describe("cursor end-to-end adoption case (fresh repo per test)", () => {
   let repoRoot: string;
   let cleanup: () => Promise<void>;
 
+  let cursorDesiredValue: JsonValue;
+  beforeAll(async () => {
+    cursorDesiredValue = await deriveCursorDesiredValue();
+  });
+
   beforeEach(async () => {
     const tmp = await createTempRepo();
     repoRoot = tmp.repoRoot;
@@ -434,7 +469,7 @@ describe("cursor end-to-end adoption case (fresh repo per test)", () => {
     // would-adopt.
     await mkdir(join(repoRoot, ".cursor"));
     const adoptedContent = `${JSON.stringify(
-      { mcpServers: { viberevert: CURSOR_DESIRED_VALUE } },
+      { mcpServers: { viberevert: structuredClone(cursorDesiredValue) } },
       null,
       2,
     )}\n`;

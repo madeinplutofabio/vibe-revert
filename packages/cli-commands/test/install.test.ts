@@ -684,3 +684,47 @@ describe("InstallCommand -- RepoRootNotFoundError", () => {
     expect(detectSpy).not.toHaveBeenCalled();
   });
 });
+
+describe("InstallCommand -- Cursor Windows launcher advisory", () => {
+  const CURSOR_ADVISORY_MARKER = "The VibeRevert Cursor MCP launcher was generated for Windows";
+
+  it.runIf(process.platform === "win32")(
+    "Windows: a successful Cursor apply emits the launcher portability advisory on stderr",
+    async () => {
+      vi.spyOn(adapters.cursorAdapter, "detect").mockResolvedValue({
+        detected: true,
+        signal: null,
+      });
+      vi.spyOn(installers, "apply").mockResolvedValue(
+        appliedOutcome("Cursor", "cursor", "installed"),
+      );
+
+      const { exitCode, stderr } = await runInstall("--cursor");
+      expect(exitCode).toBe(0);
+      expect(stderr).toContain(CURSOR_ADVISORY_MARKER);
+    },
+  );
+
+  it("a Cursor noop does not emit the launcher advisory", async () => {
+    vi.spyOn(adapters.cursorAdapter, "detect").mockResolvedValue({ detected: true, signal: null });
+    vi.spyOn(installers, "apply").mockResolvedValue({
+      status: "noop",
+      recordKey: "cursor",
+      adapterName: "Cursor",
+      reason: "already installed",
+    });
+
+    const { stderr } = await runInstall("--cursor");
+    expect(stderr).not.toContain(CURSOR_ADVISORY_MARKER);
+  });
+
+  it("a successfully applied non-Cursor adapter does not emit the Cursor advisory", async () => {
+    vi.spyOn(adapters.claudeAdapter, "detect").mockResolvedValue({ detected: true, signal: null });
+    vi.spyOn(installers, "apply").mockResolvedValue(
+      appliedOutcome("Claude Code", "claude", "installed"),
+    );
+
+    const { stderr } = await runInstall("--claude");
+    expect(stderr).not.toContain(CURSOR_ADVISORY_MARKER);
+  });
+});

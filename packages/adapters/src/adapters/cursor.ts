@@ -49,14 +49,7 @@ import type { Stats } from "node:fs";
 import { lstat } from "node:fs/promises";
 import { join } from "node:path";
 
-import type {
-  Adapter,
-  AdapterContext,
-  AdapterPlan,
-  DetectResult,
-  JsonValue,
-  RecordKey,
-} from "../types.js";
+import type { Adapter, AdapterContext, AdapterPlan, DetectResult, RecordKey } from "../types.js";
 
 // Display-only adapter name (CLI output + logs). Distinct from
 // RECORD_KEY which is the durable storage key.
@@ -87,6 +80,32 @@ async function lstatOrNull(path: string): Promise<Stats | null> {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw err;
   }
+}
+
+/**
+ * The `.cursor/mcp.json` launcher value for VibeRevert, by host platform.
+ *
+ * On Windows, Cursor cannot spawn the bare `viberevert` `.cmd` shim, so this
+ * emits the verified `cmd /c viberevert mcp serve` form (the consuming Cursor
+ * client owns the spawn; the installer only writes configuration data). On other
+ * platforms the bare form is kept. The shape is exactly the Run-1B-verified
+ * workaround — no `type`, no `/d`/`/s`, no quoting changes, no absolute paths,
+ * no `node`/`npx` — so it introduces no new mechanism requiring fresh Cursor
+ * validation.
+ *
+ * The Windows form is host-specific; the install command surfaces a portability
+ * warning when it is emitted. Claude MCP and the direct hook stay bare.
+ *
+ * Module-exported for direct unit tests only; not part of any package barrel.
+ */
+export function buildCursorMcpLaunchValue(platform: NodeJS.Platform): {
+  command: string;
+  args: string[];
+} {
+  if (platform === "win32") {
+    return { command: "cmd", args: ["/c", "viberevert", "mcp", "serve"] };
+  }
+  return { command: "viberevert", args: ["mcp", "serve"] };
 }
 
 export const cursorAdapter: Adapter = {
@@ -141,10 +160,7 @@ export const cursorAdapter: Adapter = {
             pathRelative: TARGET_PATH_RELATIVE,
           },
           keyPath: ["mcpServers", "viberevert"],
-          value: {
-            command: "viberevert",
-            args: ["mcp", "serve"],
-          } satisfies JsonValue,
+          value: buildCursorMcpLaunchValue(process.platform),
         },
       ],
       recordKey: RECORD_KEY,
