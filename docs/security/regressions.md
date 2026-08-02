@@ -5,10 +5,10 @@ affects, the regression test that pins it, whether a contract changed, and the r
 resolves it. Entries are intentionally terse and carry **no exploit-enabling detail before a
 fix ships**; reproduction and full analysis live in the linked evidence.
 
-This first version records the three Windows launcher findings in the active H11.1 unit. The
-remaining confirmed H10 findings (`github-action-reinstall-update`, `uninstall-restoration-gap`,
-and `rollback-empty-dirs`) will be added during H11 triage before their final dispositions are
-closed.
+This first version records the three Windows launcher findings in the active H11.1 unit; H11.4
+added `github-action-reinstall-update`. The remaining confirmed H10 findings
+(`uninstall-restoration-gap` and `rollback-empty-dirs`) will be added during later H11 triage
+before their final dispositions are closed.
 
 Fields per entry: `id` · `surface` · `severity` · `status` · `failure-class` ·
 `user-impact` · `test-added` · `contract-changed` · `fixed-release` · `fixed-commit` ·
@@ -16,9 +16,9 @@ Fields per entry: `id` · `surface` · `severity` · `status` · `failure-class`
 
 Status vocabulary: `open` (confirmed, not yet resolved in a released build) · `fixed`
 (resolved in the named release) · `blocked` (a resolved path exists but is gated on a
-separate, unsatisfied acceptance). Currently `doctor-pnpm` and `cursor-mcp-windows-shim` are
-`fixed`; `run-agent-windows-shim` remains `open` (partially resolved; interactive `.cmd` gated
-by ADR 0005 Decision 7).
+separate, unsatisfied acceptance). Currently `doctor-pnpm`, `cursor-mcp-windows-shim`, and
+`github-action-reinstall-update` are `fixed`; `run-agent-windows-shim` remains `open` (partially
+resolved; interactive `.cmd` gated by ADR 0005 Decision 7).
 
 Evidence outside the source tree lives in the external dogfood evidence workspace
 (`vr-dogfood/evidence/…`).
@@ -30,6 +30,7 @@ Evidence outside the source tree lives in the external dogfood evidence workspac
 | `run-agent-windows-shim` | `run <agent>` internal spawn | high | open — native resolution + truthful `.cmd` gating landed; interactive `.cmd` still blocked by ADR 0005 Decision 7 | — | — |
 | `doctor-pnpm` | `doctor` version probe | low | fixed | pending release | `0143c89a19081cfe392b84916727f3a7ff059033` |
 | `cursor-mcp-windows-shim` | `install --cursor` generated MCP config | high (Cursor) | fixed | pending release | `0aa382851ba7f87ce3cbe9a632d0e951ef037acb` |
+| `github-action-reinstall-update` | `install --github-action` reinstall/update | medium | fixed | pending release | `6b24f7870fe3d10c9e013722cc51e2140ced0117` |
 
 ## `run-agent-windows-shim`
 
@@ -120,3 +121,38 @@ Evidence outside the source tree lives in the external dogfood evidence workspac
   `run` interactive gate (Decision 7) does not decide this mechanism. The working Claude MCP
   configuration and the direct pre-commit hook are deliberately left unchanged.
 - **evidence:** `vr-dogfood/evidence/findings/finding-cursor-mcp-windows-shim.md`.
+
+## `github-action-reinstall-update`
+
+- **surface:** `viberevert install --github-action` reinstall/update
+  (`packages/adapters/src/adapters/github-action.ts`, `plan()`).
+- **severity:** medium
+- **status:** fixed
+- **failure-class:** the generated workflow advertises "rerun to update", but the adapter's
+  recognized-workflow branch emitted `sentinel-block-replace` while the first install recorded
+  `write-new`. The engine classifier refuses the cross-kind record-vs-plan transition as
+  `integrations-record-kind-mismatch`, which `--force-reinstall` cannot override.
+- **user-impact:** the advertised one-command update was unreachable; users had to remove the
+  existing installation state before installing again. No data loss.
+- **test-added:** GREEN. `packages/installers/test/github-action-end-to-end.test.ts` — the H11.4
+  lifecycle acceptance suite: first install plans and records `write-new`; same-input reinstall
+  is a noop; a changed `ctx.cliVersion` is a safe update that retains `write-new`; uninstall
+  deletes the workflow file and restores the absent state; a foreign workflow is refused; manual
+  drift is refused without `--force`; and forced replacement of a drifted recognized workflow
+  follows `write-new` semantics with no backup. `packages/adapters/test/adapters/github-action.test.ts`
+  pins the recognized-workflow branch to a `write-new` op carrying the full wrapped content.
+- **contract-changed:** no persisted-schema change. The adapter's recognized-workflow branch now
+  emits `write-new` (whole-file) instead of `sentinel-block-replace`;
+  `.github/workflows/viberevert.yml` is documented as wholly VibeRevert-owned (sentinel markers
+  identify a recognized workflow, not a user-editable region). `sentinel-block-replace` remains
+  engine-supported but is no longer emitted by any shipped adapter.
+- **fixed-release:** pending release
+- **fixed-commit:** `6b24f7870fe3d10c9e013722cc51e2140ced0117`
+- **disposition:** fixed in H11.4 (`6b24f78`): install and reinstall share one durable op-kind
+  (`write-new`), so the advertised rerun-to-update path is reachable — the classifier decides
+  from the full-file SHA whether the result is a noop, a safe update, or a drift refusal.
+  Uninstall reverses `write-new` by deleting the file (restores the absent state); a manual edit
+  is drift and is refused without `--force-reinstall`, never silently overwritten. A pre-existing
+  foreign workflow is still refused (`non-vr-workflow-present`) and `--force-reinstall` still
+  routes through `backup-and-write`. No engine, record-schema, or uninstall change was required.
+- **evidence:** `vr-dogfood/evidence/findings/finding-github-action-reinstall-update.md`.
