@@ -16,8 +16,9 @@ Fields per entry: `id` · `surface` · `severity` · `status` · `failure-class`
 
 Status vocabulary: `open` (confirmed, not yet resolved in a released build) · `fixed`
 (resolved in the named release) · `blocked` (a resolved path exists but is gated on a
-separate, unsatisfied acceptance). Currently `doctor-pnpm` is `fixed`; `run-agent-windows-shim`
-and `cursor-mcp-windows-shim` remain `open`.
+separate, unsatisfied acceptance). Currently `doctor-pnpm` and `cursor-mcp-windows-shim` are
+`fixed`; `run-agent-windows-shim` remains `open` (partially resolved; interactive `.cmd` gated
+by ADR 0005 Decision 7).
 
 Evidence outside the source tree lives in the external dogfood evidence workspace
 (`vr-dogfood/evidence/…`).
@@ -28,7 +29,7 @@ Evidence outside the source tree lives in the external dogfood evidence workspac
 |---|---|---|---|---|---|
 | `run-agent-windows-shim` | `run <agent>` internal spawn | high | open — native resolution + truthful `.cmd` gating landed; interactive `.cmd` still blocked by ADR 0005 Decision 7 | — | — |
 | `doctor-pnpm` | `doctor` version probe | low | fixed | pending release | `0143c89a19081cfe392b84916727f3a7ff059033` |
-| `cursor-mcp-windows-shim` | `install --cursor` generated MCP config | high (Cursor) | open — separate client-owned context; mechanism selected in H11.3 | — | — |
+| `cursor-mcp-windows-shim` | `install --cursor` generated MCP config | high (Cursor) | fixed | pending release | `0aa382851ba7f87ce3cbe9a632d0e951ef037acb` |
 
 ## `run-agent-windows-shim`
 
@@ -89,17 +90,33 @@ Evidence outside the source tree lives in the external dogfood evidence workspac
 - **surface:** `viberevert install --cursor` generated MCP configuration (`.cursor/mcp.json`);
   the spawn is owned by the Cursor client, not by VibeRevert.
 - **severity:** high (Cursor)
-- **status:** open
+- **status:** fixed
 - **failure-class:** the emitted `{ "command": "viberevert", … }` bare shim is not spawnable by
   Cursor on the observed Windows client.
 - **user-impact:** Cursor cannot start the VibeRevert MCP server on Windows.
-- **test-added:** pending H11.3 (Cursor config mechanism selection). Protect-guard tests pinning
-  the already-working Claude MCP + direct pre-commit-hook forms are pending (later H11.1 unit).
-- **contract-changed:** generated-output change to `.cursor/mcp.json` (mechanism selected in
-  H11.3, ADR 0005 Decision 5).
-- **fixed-release:** —
-- **disposition:** separate client-owned launcher context, unaffected by the `run` lifecycle
-  verdict; the consuming client owns the spawn and the installer only emits configuration data,
-  so the `run` interactive gate does not decide this mechanism; the working Claude MCP
-  configuration is left unchanged.
+- **test-added:** GREEN across four H11.3 suites, with the existing H11.1 cross-context protect
+  guard also remaining GREEN. `packages/adapters/test/adapters/cursor.test.ts` pins
+  `buildCursorMcpLaunchValue` (win32 → `cmd /c viberevert mcp serve`; linux/darwin → bare
+  `viberevert mcp serve`) and that the adapter plan value derives from it.
+  `packages/cli-commands/test/cursor-launcher-warning.test.ts` pins the advisory emitter's exact
+  two-line text + non-throwing contract and the cursor-plus-win32-only predicate.
+  `packages/cli-commands/test/install.test.ts` pins that a successful Windows Cursor apply emits
+  the advisory (noop and non-cursor applies do not).
+  `packages/installers/test/end-to-end.test.ts` pins the end-to-end cursor scenarios against the
+  value derived from the adapter's own plan. The already-working Claude MCP and direct
+  pre-commit-hook forms are pinned unchanged by
+  `packages/adapters/test/adapters/h11-windows-launcher-protect.test.ts` (H11.1).
+- **contract-changed:** generated-output change to `.cursor/mcp.json` (ADR 0005 Decision 5): on
+  Windows the VibeRevert entry now emits
+  `{ "command": "cmd", "args": ["/c", "viberevert", "mcp", "serve"] }`; on other platforms the
+  existing bare `viberevert` form is unchanged.
+- **fixed-release:** pending release
+- **fixed-commit:** `0aa382851ba7f87ce3cbe9a632d0e951ef037acb`
+- **disposition:** fixed in H11.3 (`0aa3828`): the Cursor adapter emits the verified
+  `cmd /c viberevert mcp serve` launcher on Windows and preserves the bare `viberevert` form on
+  other platforms, and `install --cursor` surfaces a non-blocking portability advisory after a
+  successful Windows Cursor apply. This remains a separate client-owned launcher context: the
+  consuming Cursor client owns the spawn and the installer only emits configuration data, so the
+  `run` interactive gate (Decision 7) does not decide this mechanism. The working Claude MCP
+  configuration and the direct pre-commit hook are deliberately left unchanged.
 - **evidence:** `vr-dogfood/evidence/findings/finding-cursor-mcp-windows-shim.md`.
