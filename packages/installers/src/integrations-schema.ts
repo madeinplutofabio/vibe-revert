@@ -55,6 +55,12 @@
 // MUST be null for all other kinds -- otherwise a malformed record
 // could parse but be impossible to uninstall safely.
 //
+// targetWasAbsentBeforeApply (H11.5) is a json-key-merge-only creation
+// marker: an OPTIONAL positive literal `true` (never `false`, never on
+// another kind). It records that the target was absent before apply and
+// permits uninstall to consider restoring absence; unlink still requires
+// an exact empty-scaffold match.
+//
 // jsonKeyPath uses JsonKeySegmentSchema to reject prototype-pollution
 // keys (__proto__, constructor, prototype), control characters, and
 // empty segments. jsonKeyPath array must itself be non-empty (an
@@ -250,6 +256,15 @@ export const IntegrationFileEditRecordSchema = z
     // captured via the backup file (for backup-and-write) or
     // implicit (for write-new on a fresh path).
     mode: z.number().int().min(0).max(0o777).nullable(),
+    // Creation-provenance marker for json-key-merge ONLY (H11.5).
+    // POSITIVE marker: `true` records the observed fact that the target
+    // file was absent immediately before the merge, which permits
+    // uninstall to restore absence only when the post-delete document
+    // exactly matches the expected empty scaffold. Absent means "unknown"
+    // and never authorizes deletion, so legacy records (written before
+    // this field existed) stay conservative. The superRefine forbids it
+    // on every other op kind.
+    targetWasAbsentBeforeApply: z.literal(true).optional(),
   })
   .strict()
   .superRefine((rec, ctx) => {
@@ -339,6 +354,16 @@ export const IntegrationFileEditRecordSchema = z
       }
       // mode may be set for write-new / backup-and-write (engine uses
       // it for chmod on POSIX hook installers); no null requirement.
+    }
+
+    // targetWasAbsentBeforeApply is a json-key-merge-only creation marker
+    // (H11.5). Any other op kind carrying it is a malformed record.
+    if (rec.kind !== "json-key-merge" && rec.targetWasAbsentBeforeApply !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["targetWasAbsentBeforeApply"],
+        message: `${rec.kind} requires targetWasAbsentBeforeApply to be absent.`,
+      });
     }
 
     // backup discipline: backup-and-write requires a backup record;

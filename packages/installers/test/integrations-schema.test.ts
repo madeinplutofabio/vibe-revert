@@ -474,6 +474,53 @@ describe("IntegrationFileEditRecordSchema -- per-kind superRefine", () => {
     });
   });
 
+  describe("targetWasAbsentBeforeApply marker (H11.5)", () => {
+    it("accepts and preserves json-key-merge with the marker set to true", () => {
+      const parsed = IntegrationFileEditRecordSchema.parse(
+        makeJsonKeyMergeOp({ targetWasAbsentBeforeApply: true }),
+      );
+
+      expect(parsed.targetWasAbsentBeforeApply).toBe(true);
+    });
+    it("accepts json-key-merge without the marker (optional; conservative default)", () => {
+      expect(() => IntegrationFileEditRecordSchema.parse(makeJsonKeyMergeOp())).not.toThrow();
+    });
+    it("rejects the literal false (positive marker only; no persisted false)", () => {
+      expect(() =>
+        IntegrationFileEditRecordSchema.parse({
+          ...makeJsonKeyMergeOp(),
+          targetWasAbsentBeforeApply: false,
+        }),
+      ).toThrow();
+    });
+    it("rejects the marker on write-new", () => {
+      expect(() =>
+        IntegrationFileEditRecordSchema.parse(makeWriteNewOp({ targetWasAbsentBeforeApply: true })),
+      ).toThrow();
+    });
+    it("rejects the marker on backup-and-write", () => {
+      expect(() =>
+        IntegrationFileEditRecordSchema.parse(
+          makeBackupAndWriteOp({ targetWasAbsentBeforeApply: true }),
+        ),
+      ).toThrow();
+    });
+    it("rejects the marker on sentinel-block-insert", () => {
+      expect(() =>
+        IntegrationFileEditRecordSchema.parse(
+          makeSentinelInsertOp({ targetWasAbsentBeforeApply: true }),
+        ),
+      ).toThrow();
+    });
+    it("rejects the marker on sentinel-block-replace", () => {
+      expect(() =>
+        IntegrationFileEditRecordSchema.parse(
+          makeSentinelReplaceOp({ targetWasAbsentBeforeApply: true }),
+        ),
+      ).toThrow();
+    });
+  });
+
   describe("exactly-one-SHA + cross-cutting", () => {
     it("rejects zero SHAs non-null", () => {
       expect(() =>

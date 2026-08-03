@@ -530,8 +530,12 @@ function constructIntegrationFileEditRecord(args: {
   op: FileEditOp;
   desiredManagedSha: string;
   backupPathSpec: PathSpec | null;
+  // H11.5: whether the target file was absent immediately before this
+  // operation was applied. json-key-merge persists this observed fact as
+  // targetWasAbsentBeforeApply; other operation kinds ignore it.
+  targetWasAbsent: boolean;
 }): IntegrationFileEditRecord {
-  const { op, desiredManagedSha, backupPathSpec } = args;
+  const { op, desiredManagedSha, backupPathSpec, targetWasAbsent } = args;
   switch (op.kind) {
     case "write-new":
       return {
@@ -597,6 +601,10 @@ function constructIntegrationFileEditRecord(args: {
         blockId: null,
         jsonKeyPath: [...op.keyPath],
         mode: null,
+        // Positive marker only: set true when the target was absent before
+        // the merge (this op created the file); omitted otherwise so a merge
+        // into a pre-existing file never authorizes unlink on uninstall.
+        ...(targetWasAbsent ? { targetWasAbsentBeforeApply: true } : {}),
       };
   }
 }
@@ -816,6 +824,7 @@ function buildOpExecutionPlans(args: {
       op,
       desiredManagedSha,
       backupPathSpec,
+      targetWasAbsent: currentBytes === null,
     });
 
     plans.push({

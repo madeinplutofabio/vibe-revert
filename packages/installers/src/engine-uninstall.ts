@@ -136,8 +136,14 @@
 //   json-key-merge
 //     reverse: writeFileAtomic(target, prettyJson(deleteAtKeyPath(
 //              parseJson(currentText), jsonKeyPath)) + "\n",
-//              normalized to current line-ending).
-//     receipt: filesRestored
+//              normalized to current line-ending). H11.5 create-case: if the
+//              record's targetWasAbsentBeforeApply marker is set AND the
+//              post-delete document is EXACTLY the empty-ancestor scaffold,
+//              unlink(target) instead -- restoring the pre-install absence of
+//              a file this op created. Any remaining unmanaged content makes
+//              the document differ from the scaffold, so the file is written
+//              back and preserved.
+//     receipt: filesRestored (write-back) OR filesRemoved (create-case unlink)
 //     drift basis: sha256OfCanonical(jsonValueAtKeyPath(parseJson(
 //                  currentText), jsonKeyPath)) vs managedValueSha256
 //
@@ -527,6 +533,27 @@ function deleteAtKeyPath(root: JsonObject, keyPath: ReadonlyArray<string>): Json
   const newChild = deleteAtKeyPath(childAsObject, keyPath.slice(1));
   if (newChild === childAsObject) return root;
   return { ...root, [head]: newChild };
+}
+
+/**
+ * The document that setAtKeyPath({}, keyPath, value) then
+ * deleteAtKeyPath(..., keyPath) yields: the keyPath's ancestor chain as
+ * nested objects with the innermost empty. For ["mcpServers","viberevert"]
+ * -> { mcpServers: {} }; for a single-segment keyPath -> {}. Used by the
+ * H11.5 create-case restoration check: a create-from-absence json-key-merge
+ * whose post-delete document has the same canonical content as this scaffold
+ * has no remaining unmanaged content, so uninstall may restore absence.
+ */
+function emptyAncestorScaffold(keyPath: ReadonlyArray<string>): JsonObject {
+  if (keyPath.length <= 1) {
+    return {};
+  }
+  const head = keyPath[0];
+  if (head === undefined) {
+    // Unreachable: length >= 2 guarantees keyPath[0] is defined.
+    return {};
+  }
+  return { [head]: emptyAncestorScaffold(keyPath.slice(1)) };
 }
 
 function parseJsonObjectOrEmpty(currentText: string): JsonObject {
@@ -1180,6 +1207,22 @@ export async function uninstall(
             }
             const parsed = parseJsonObjectOrEmpty(plan.currentText);
             const updated = deleteAtKeyPath(parsed, plan.recordOp.jsonKeyPath);
+            // H11.5 create-case restoration: when the record proves this
+            // operation created the file, compare the post-delete document
+            // with the precise empty-ancestor scaffold using the engine's
+            // canonical JSON digest. Matching content means no unmanaged JSON
+            // remains, so uninstall restores the original absence by
+            // unlinking. Any user addition, including an empty object, changes
+            // the canonical content and preserves the file through the
+            // write-back path below.
+            if (plan.recordOp.targetWasAbsentBeforeApply === true) {
+              const scaffold = emptyAncestorScaffold(plan.recordOp.jsonKeyPath);
+              if (sha256OfCanonical(updated) === sha256OfCanonical(scaffold)) {
+                await unlink(plan.absolutePath);
+                filesRemoved.push(plan.absolutePath);
+                break;
+              }
+            }
             const rendered = `${prettyJson(updated)}\n`;
             const normalized = normalizeToWriteFormat(rendered, plan.lineEnding);
             await writeFileAtomic(plan.absolutePath, normalized);
