@@ -59,6 +59,12 @@ Even within Case 1, a few properties shape the result:
   or move such edits aside before rolling back.
 - **Excluded paths are left untouched.** Anything matching `rollback.exclude` in
   your [configuration](config.md) is neither restored nor removed.
+- **Empty directories may remain.** Rollback restores recorded file content and
+  the Git index, not the exact directory tree. When it removes a file the
+  session created, a directory left empty by that removal stays in place. The
+  Git-visible baseline does not record that directory because Git does not
+  track empty directories. Your files and index still match the pre-session
+  baseline; remove any leftover empty directories manually if desired.
 
 ## Before you roll back
 

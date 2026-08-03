@@ -203,6 +203,10 @@ interface UninstallReceipt {
 
 Uninstall is recordKey-driven. `not-installed` means no record exists for the requested recordKey. The CLI formats it as `[noop: <adapterName>: <reason>]` because from the caller's perspective nothing needed to be done — a missing record is a no-op, not a refusal.
 
+Uninstall reverses recorded managed-file effects only. It does not infer ownership of the parent directories containing those files.
+
+Removing a file VibeRevert created can therefore leave an empty parent directory. For example, uninstalling a Cursor integration whose `.cursor/mcp.json` was created from absence removes the file but leaves `.cursor/`. Parent directories are not pruned because the record captures the managed file operation, not whether VibeRevert created the surrounding directory. A directory being empty is not evidence that VibeRevert created it. Remove leftover empty directories manually if desired.
+
 ## FileEditOp
 
 Each adapter's `ApplicablePlan.ops` is a small array of `FileEditOp` values. The union has exactly five variants — one per supported mutation kind. There is no sidecar key written into user configuration files; the managed-region SHA lives only in the installer's record.
