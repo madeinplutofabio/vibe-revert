@@ -6,9 +6,9 @@ resolves it. Entries are intentionally terse and carry **no exploit-enabling det
 fix ships**; reproduction and full analysis live in the linked evidence.
 
 This first version records the three Windows launcher findings in the active H11.1 unit; H11.4
-added `github-action-reinstall-update`. The remaining confirmed H10 findings
-(`uninstall-restoration-gap` and `rollback-empty-dirs`) will be added during later H11 triage
-before their final dispositions are closed.
+added `github-action-reinstall-update` and H11.5 added `uninstall-restoration-gap`. The
+remaining confirmed H10 finding (`rollback-empty-dirs`) will be added during later H11 triage
+before its final disposition is closed.
 
 Fields per entry: `id` · `surface` · `severity` · `status` · `failure-class` ·
 `user-impact` · `test-added` · `contract-changed` · `fixed-release` · `fixed-commit` ·
@@ -16,9 +16,10 @@ Fields per entry: `id` · `surface` · `severity` · `status` · `failure-class`
 
 Status vocabulary: `open` (confirmed, not yet resolved in a released build) · `fixed`
 (resolved in the named release) · `blocked` (a resolved path exists but is gated on a
-separate, unsatisfied acceptance). Currently `doctor-pnpm`, `cursor-mcp-windows-shim`, and
-`github-action-reinstall-update` are `fixed`; `run-agent-windows-shim` remains `open` (partially
-resolved; interactive `.cmd` gated by ADR 0005 Decision 7).
+separate, unsatisfied acceptance). Currently `doctor-pnpm`, `cursor-mcp-windows-shim`,
+`github-action-reinstall-update`, and `uninstall-restoration-gap` are `fixed`;
+`run-agent-windows-shim` remains `open` (partially resolved; interactive `.cmd` gated by
+ADR 0005 Decision 7).
 
 Evidence outside the source tree lives in the external dogfood evidence workspace
 (`vr-dogfood/evidence/…`).
@@ -31,6 +32,7 @@ Evidence outside the source tree lives in the external dogfood evidence workspac
 | `doctor-pnpm` | `doctor` version probe | low | fixed | pending release | `0143c89a19081cfe392b84916727f3a7ff059033` |
 | `cursor-mcp-windows-shim` | `install --cursor` generated MCP config | high (Cursor) | fixed | pending release | `0aa382851ba7f87ce3cbe9a632d0e951ef037acb` |
 | `github-action-reinstall-update` | `install --github-action` reinstall/update | medium | fixed | pending release | `6b24f7870fe3d10c9e013722cc51e2140ced0117` |
+| `uninstall-restoration-gap` | `uninstall` json-key-merge MCP config | low | fixed | pending release | `2c768a7750e0a5baa14c356efb18ddf6476e728e` |
 
 ## `run-agent-windows-shim`
 
@@ -156,3 +158,38 @@ Evidence outside the source tree lives in the external dogfood evidence workspac
   foreign workflow is still refused (`non-vr-workflow-present`) and `--force-reinstall` still
   routes through `backup-and-write`. No engine, record-schema, or uninstall change was required.
 - **evidence:** `vr-dogfood/evidence/findings/finding-github-action-reinstall-update.md`.
+
+## `uninstall-restoration-gap`
+
+- **surface:** `viberevert install`/`uninstall` for json-key-merge MCP config adapters
+  (`packages/installers/src/engine-uninstall.ts`, `reverse-json-key-merge`); Cursor
+  (`.cursor/mcp.json`) and Claude (`.mcp.json`).
+- **severity:** low
+- **status:** fixed
+- **failure-class:** a json-key-merge adapter that created its config file from absence left an
+  empty `{ "mcpServers": {} }` scaffold after uninstall -- `reverse-json-key-merge` deleted the
+  managed key but never pruned empty ancestors or unlinked, and the record stored no provenance
+  to distinguish "created from absence" from "merged into a user's file".
+- **user-impact:** low operational impact; uninstall exits 0 and reverses the managed record, but
+  leaves an empty config file and its created directory instead of restoring the pre-install
+  absence. No user-authored data is lost.
+- **test-added:** GREEN. `packages/installers/test/json-key-merge-restoration.test.ts` -- the
+  create-from-absence cases for Cursor and Claude assert uninstall unlinks the file and reports
+  it under `receipt.filesRemoved`; the preserve cases (a pre-existing user file, a post-install
+  user addition, a user-added empty object, and a legacy record without the marker) assert
+  write-back and `receipt.filesRestored`. `packages/installers/test/integrations-schema.test.ts`
+  pins the marker's per-kind discipline (accepted on json-key-merge, rejected on every other kind
+  and on the literal `false`).
+- **contract-changed:** additive persisted-record field within `schemaVersion 1`
+  (`targetWasAbsentBeforeApply`, a positive-only `true`-or-absent marker restricted to
+  json-key-merge records). No version bump; missing means "unknown" and never permits uninstall
+  to consider restoration to absence, so legacy/dev records stay conservative.
+- **fixed-release:** pending release
+- **fixed-commit:** `2c768a7750e0a5baa14c356efb18ddf6476e728e`
+- **disposition:** fixed in H11.5 (`2c768a7`): apply records `targetWasAbsentBeforeApply` when the
+  target was absent before the merge, and uninstall unlinks the file only when removing the
+  managed key leaves the empty-ancestor scaffold under the engine's canonical JSON digest.
+  Merges into pre-existing files, post-install user additions (including empty objects), and
+  legacy records without the marker are preserved via the existing write-back path. FILE
+  restoration only; parent-directory cleanup remains `rollback-empty-dirs` (H11.6).
+- **evidence:** `vr-dogfood/evidence/findings/finding-uninstall-restoration-gap.md`.
