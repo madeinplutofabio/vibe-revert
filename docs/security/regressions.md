@@ -6,9 +6,9 @@ resolves it. Entries are intentionally terse and carry **no exploit-enabling det
 fix ships**; reproduction and full analysis live in the linked evidence.
 
 This first version records the three Windows launcher findings in the active H11.1 unit; H11.4
-added `github-action-reinstall-update` and H11.5 added `uninstall-restoration-gap`. The
-remaining confirmed H10 finding (`rollback-empty-dirs`) will be added during later H11 triage
-before its final disposition is closed.
+added `github-action-reinstall-update`, H11.5 added `uninstall-restoration-gap`, and H11.6 added
+`rollback-empty-dirs` (an H11 triage observation classified contract-consistent, not a defect).
+All six H10 findings are now recorded.
 
 Fields per entry: `id` · `surface` · `severity` · `status` · `failure-class` ·
 `user-impact` · `test-added` · `contract-changed` · `fixed-release` · `fixed-commit` ·
@@ -18,7 +18,8 @@ Status vocabulary: `open` (confirmed, not yet resolved in a released build) · `
 (resolved in the named release) · `blocked` (a resolved path exists but is gated on a
 separate, unsatisfied acceptance). Currently `doctor-pnpm`, `cursor-mcp-windows-shim`,
 `github-action-reinstall-update`, and `uninstall-restoration-gap` are `fixed`;
-`run-agent-windows-shim` remains `open` (partially resolved; interactive `.cmd` gated by
+`rollback-empty-dirs` is closed as contract-consistent through documentation rather than a code
+change; `run-agent-windows-shim` remains `open` (partially resolved; interactive `.cmd` gated by
 ADR 0005 Decision 7).
 
 Evidence outside the source tree lives in the external dogfood evidence workspace
@@ -33,6 +34,7 @@ Evidence outside the source tree lives in the external dogfood evidence workspac
 | `cursor-mcp-windows-shim` | `install --cursor` generated MCP config | high (Cursor) | fixed | pending release | `0aa382851ba7f87ce3cbe9a632d0e951ef037acb` |
 | `github-action-reinstall-update` | `install --github-action` reinstall/update | medium | fixed | pending release | `6b24f7870fe3d10c9e013722cc51e2140ced0117` |
 | `uninstall-restoration-gap` | `uninstall` json-key-merge MCP config | low | fixed | pending release | `2c768a7750e0a5baa14c356efb18ddf6476e728e` |
+| `rollback-empty-dirs` | `rollback`/`uninstall` leftover empty directories | low | fixed | pending release | `430916ace44dabcbc967a725ac5de7cdad6cd284` |
 
 ## `run-agent-windows-shim`
 
@@ -193,3 +195,36 @@ Evidence outside the source tree lives in the external dogfood evidence workspac
   legacy records without the marker are preserved via the existing write-back path. FILE
   restoration only; parent-directory cleanup remains `rollback-empty-dirs` (H11.6).
 - **evidence:** `vr-dogfood/evidence/findings/finding-uninstall-restoration-gap.md`.
+
+## `rollback-empty-dirs`
+
+- **surface:** `viberevert rollback --apply` (`packages/git/`) and installer `uninstall`
+  (`packages/installers/`): a directory left empty after a removed file.
+- **severity:** low
+- **status:** fixed (documentation resolution; contract-consistent H11 triage observation, not a
+  code defect)
+- **failure-class:** none. Rollback and uninstall may remove the last managed file from a
+  directory without removing that directory. An empty directory such as `app/api/payments/` after
+  rollback or `.cursor/` after uninstall can therefore remain on disk.
+- **user-impact:** cosmetic. Rollback restores the recorded file content and Git index, and
+  uninstall reverses the managed file record, but an empty directory may remain visible on the
+  filesystem. It is outside the documented restoration contract. No user-authored data is lost.
+- **test-added:** none. The behavior is contract-consistent and unchanged; H11.6 documents it
+  (`docs/rollback-limitations.md`, `docs/installers-contract.md`) rather than altering it. The
+  H11.5 create-case restoration suite already asserts the file is unlinked; the now-empty
+  directory is intentionally not asserted.
+- **contract-changed:** none (behavior unchanged; documentation only). The contracts are
+  clarified: rollback restores recorded file content and the Git index, not the exact directory
+  tree; uninstall reverses recorded managed-file effects and does not infer ownership of parent
+  directories.
+- **fixed-release:** pending release
+- **fixed-commit:** `430916ace44dabcbc967a725ac5de7cdad6cd284`
+- **disposition:** contract-consistent, not a defect (H11 triage observation, low). Rollback
+  correctness passed: recorded file content and Git index state were restored. Exact directory
+  shape is outside that contract because the Git-visible baseline does not represent empty
+  directories. Installer uninstall separately lacks evidence that a parent directory was created
+  by VibeRevert. H11.6 documents both contracts and defers directory pruning as an enhancement.
+  Safe pruning would require explicit directory-creation provenance, protected path boundaries,
+  and an empty-directory check; emptiness alone is not ownership evidence. No schema or engine
+  change is made.
+- **evidence:** `vr-dogfood/evidence/findings/triage-rollback-empty-dirs.md`.
