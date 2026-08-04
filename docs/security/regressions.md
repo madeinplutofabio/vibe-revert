@@ -25,6 +25,10 @@ ADR 0005 Decision 7).
 Evidence outside the source tree lives in the external dogfood evidence workspace
 (`vr-dogfood/evidence/…`).
 
+The H11 candidate build identity (commit `3665690`) and the targeted replay of all six
+findings against it are recorded in
+[`h11-candidate-closeout.md`](./h11-candidate-closeout.md).
+
 ## Summary
 
 | id | surface | severity | status | fixed-release | fixed-commit |
