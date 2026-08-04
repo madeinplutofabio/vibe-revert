@@ -5,6 +5,14 @@
 - Scope: how the **interactive** lifecycle behavior of the bounded `.cmd`
   command-line mediation is verified on a real Windows console, and what evidence
   is retained.
+- **Status (2026-08-04): Decision 7 OPEN.** Stage A `windows-cmd-bounded-v1` is formally
+  ineligible (all four required hosts prompted and required forced recovery). A separate,
+  disposable **native control-router feasibility spike** then succeeded on one host for a
+  `.cmd → native descendant` launcher topology (real Ctrl+C reached the native child while
+  `cmd.exe`'s batch prompt was suppressed by a debugger). That spike is **not** attested Stage A
+  evidence and **not** product support; productionization is deferred to post-beta. The shipped
+  Windows contract is unchanged: native executables are direct-spawned, interactive `.cmd` is
+  gated. See **Recorded results** at the end of this document.
 
 ## Why this is manual
 
@@ -259,3 +267,97 @@ evidence:
 # A terminal-host configuration is eligible only after three consecutive eligible runs.
 eligibility: <eligible | blocked>
 ```
+
+## Recorded results — 2026-08-04 (Decision 7: OPEN)
+
+Two **separate** bodies of evidence. They are not merged into one verdict; the failed Stage A
+evidence retains its meaning, and any future architecture requires a **new strategy identity**.
+
+### 1. Stage A — `windows-cmd-bounded-v1` (formally ineligible)
+
+The Stage A matrix ran on a real Windows console across all four required terminal-host
+configurations, using source commit `811d463c0c147d2c129065158302000e71f9468b` and attestation
+digest `ef1260dcbb1e3aa576ed63ccaf708077d6fb56af0fdc179cd0d8bb941267a466`. One qualifying
+repetition was recorded per host. Each repetition produced the same blocking outcome. Three
+consecutive eligible repetitions were required for the pass branch; because every case failed at
+repetition 1 and no eligible sequence existed, repetitions 2 and 3 were unnecessary for the
+present go/no-go decision. This does not establish that the failure is deterministic,
+host-independent, or unreachable under every repetition.
+
+| matrixCaseId | interactive_delivery | wrapper_completion (operator) | candidate_wrapper_completion (machine) | eligibility |
+|---|---|---|---|---|
+| `windows-terminal__powershell` | received | batch_prompt_hang | forced_recovery | blocked |
+| `windows-terminal__cmd` | received | batch_prompt_hang | forced_recovery | blocked |
+| `conhost__cmd` | received | batch_prompt_hang | forced_recovery | blocked |
+| `vscode-integrated__powershell` | received | batch_prompt_hang | forced_recovery | blocked |
+
+Ctrl+C reached the fixture in every case, but `cmd.exe` displayed `Terminate batch job (Y/N)?`
+and hung until forced recovery — never `clean_exit`. Per the Eligibility rule, all four cases are
+**blocked**; `windows-cmd-bounded-v1` remains **ineligible**. Evidence (external, uncommitted):
+the operator evidence root (four sealed bundles) plus a `summarize-matrix.mjs --json` snapshot with
+`matrixEligible: false`. This meaning is unchanged by anything below.
+
+In the tested throwaway probes, the `& call set …=%%ERRORLEVEL%%` continuation suppressed the
+prompt when a batch file directly launched a native executable. It did not suppress the prompt in
+either tested `.cmd`-target topology: an outer wrapper calling the target `.cmd`, or a top-level
+`/c` compound command calling the target `.cmd`. No tested continuation topology established viable
+mediation of an existing `.cmd` target. This call-based continuation candidate is therefore not
+being pursued further.
+
+### 2. Native control-router feasibility spike (disposable; one host; NOT attested)
+
+A distinct architecture — debug **only** `cmd.exe`, swallow its `DBG_CONTROL_C`, and leave native
+descendants undebugged — was demonstrated by a **disposable, uncommitted** experiment. This is a
+research record, **not** attested Stage A evidence and **not** product support.
+
+- **Date / classification:** 2026-08-04 · Stage-1 feasibility demonstrated · one host · one
+  representative launcher topology · one run.
+- **Host:** Windows 10 Pro 10.0.19045 · Windows Terminal / PowerShell (Windows Terminal version
+  not recorded · PowerShell version not recorded) · Node v24.13.1 (x64) · ComSpec
+  `C:\WINDOWS\system32\cmd.exe`.
+- **Topology:** `router.exe → cmd.exe [DEBUG_ONLY_THIS_PROCESS] → agent.cmd → node.exe`.
+- **Compiler / command:**
+  `C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /nologo /platform:x64 /out:C:\vr-decision7-diag\router.exe C:\vr-decision7-diag\router.cs`
+  (csc v4.8.4084.0, C# 5).
+- **Artifact digests (SHA-256; throwaway `C:\vr-decision7-diag\`, not committed):**
+  - `router.cs`    `68e674ea7049d87ab6ebe22dec4c8030d61cdcd11e28ddd2d673782e1907b04a`
+  - `router.exe`   `3c49e02d41e5a845672463fad3da883b2eafc13e78269d9bbc7d240d4fba41f7`
+  - `agent.cmd`    `90be88b7b0c559e41d6d9d2e4544ce6183564799aea323c6e48d8ce9ef330a3a`
+  - `child-v2.mjs` `f1d946f5687bdabf3d0d2c8b683f320d531ab6cde3b04262fb864ced29a2bdac`
+- **Raw console transcript (operator user path redacted):**
+
+  ```text
+  PS <redacted>> C:\vr-decision7-diag\router.exe
+  [router] topology=debug-only-cmd flags=DEBUG_ONLY_THIS_PROCESS
+  [router] commandLine="C:\WINDOWS\system32\cmd.exe" /d /v:off /s /c ""C:\vr-decision7-diag\agent.cmd""
+  [router] Press Ctrl+C once after AGENT-READY.
+  [router] cmd.exe pid=31068 (debugged)
+  AGENT-READY (pid 87400)
+  Press Ctrl+C ONCE now.
+  AGENT-INTERRUPTED
+  [router] swallowed DBG_CONTROL_C for cmd.exe pid=31068
+  [router] cmd.exe exit code: 130  (130=cooperative SIGINT; -1073741510=STATUS_CONTROL_C_EXIT)
+  PS <redacted>>
+  ```
+
+- **Result:** `DBG_CONTROL_C` was handled specifically for the debugged `cmd.exe` (pid 31068); the
+  native descendant (`node`, pid 87400) stayed undebugged and received the ordinary Ctrl+C
+  (`AGENT-INTERRUPTED`); **no** batch prompt; the returning shell prompt shows autonomous return;
+  `cmd.exe` propagated the cooperative exit `130`. The router created `cmd.exe` as its debuggee
+  rather than attaching to an existing process; the experiment completed in the operator's
+  interactive PowerShell session.
+- **Not established here (deferred to post-beta):** the other three hosts; nonzero /
+  `STATUS_CONTROL_C_EXIT` exit variants; multi-generation trees; children that opt out via
+  `SetConsoleCtrlHandler(NULL, TRUE)`; the pure-batch limitation (no native descendant to
+  interrupt); no-residual-attachment / no-lingering over many runs; arguments; and all
+  productionization (native build, signing, AV/EDR reputation, Job-Object teardown) plus a formal
+  attested matrix.
+
+### Decision 7 status
+
+**OPEN — core native-router feasibility proven on one representative launcher topology and one
+host; pending post-beta productionization and formal validation.** Not closed; not passed. The
+beta ships on the current contract (native direct-spawn; interactive `.cmd` gated; no
+generic-`.cmd`-mediation claim). Any positive support decision requires a **new strategy identity**
+(e.g. `windows-cmd-debug-router-v1`), security review, a compatibility matrix, and a formal
+attested matrix — all post-beta.

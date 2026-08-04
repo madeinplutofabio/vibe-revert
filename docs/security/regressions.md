@@ -59,14 +59,27 @@ Evidence outside the source tree lives in the external dogfood evidence workspac
 - **contract-changed:** no public CLI or persisted-schema change; internal command resolution
   and launch semantics are newly specified by ADR 0005 Decisions 1–2 and gated by Decision 7.
 - **fixed-release:** —
-- **disposition:** partially resolved in H11.2 (`0143c89`): `run` now resolves the exact target
-  and direct-spawns native executables, and rejects a resolved `.cmd` with a truthful
-  Decision-7-gated message instead of a misleading "Command not found". The remaining open
-  portion is interactive `.cmd` execution: the manual gate remains open; `interactive_delivery`
-  and `wrapper_completion` have not yet been run (ADR 0005 Decision 7). Directly-spawnable native
-  executables (modern Claude Code) are the supported path.
+- **disposition:** partially resolved in H11.2 (`0143c89`): `run` resolves the exact target and
+  direct-spawns native executables, and rejects a resolved `.cmd` with a truthful
+  Decision-7-gated message instead of a misleading "Command not found". Native executable
+  mediation is supported; interactive `.cmd` mediation remains gated (ADR 0005 Decision 7,
+  which is open, not passed). Update (2026-08-04): the Stage A manual Ctrl+C matrix ran, and
+  `windows-cmd-bounded-v1` is formally ineligible. The first qualifying run on each of the four
+  required hosts produced the same blocking outcome: `Terminate batch job (Y/N)?`,
+  `batch_prompt_hang`, and `forced_recovery`. In follow-up throwaway probes, the `& call set`
+  continuation did not establish viable mediation in either tested `.cmd`-target topology—an
+  outer wrapper calling the target `.cmd`, or a direct top-level `/c` compound command calling
+  the target `.cmd`—and that continuation candidate is not being pursued further. A separate,
+  disposable native debug-router feasibility probe (one host, one representative launcher
+  topology, not attested) successfully preserved real Ctrl+C delivery to a native descendant
+  while suppressing `cmd.exe`'s batch prompt and propagating exit `130`. Production
+  implementation, a new strategy identity, and formal validation are deferred until after beta.
+  Directly-spawnable native executables (modern Claude Code) remain the supported path.
 - **evidence:** `vr-dogfood/evidence/findings/finding-run-agent-windows-shim.md`;
-  lifecycle `vr-dogfood/evidence/findings/finding-h11-windows-cmd-lifecycle-spike.md`.
+  lifecycle `vr-dogfood/evidence/findings/finding-h11-windows-cmd-lifecycle-spike.md`;
+  Stage A matrix result and native-router feasibility record in
+  `docs/security/windows-cmd-mediation-lifecycle.md` under
+  Recorded results — 2026-08-04.
 
 ## `doctor-pnpm`
 

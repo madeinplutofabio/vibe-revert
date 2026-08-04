@@ -2,15 +2,17 @@
 
 - Status: Accepted — 2026-07-30
 - Implementation status: Command-line mediation (accepted-subset arguments, stdout/stderr,
-  exact-target execution, and exit/error distinction) validated on the recorded bounded H11.1
-  Windows matrix. The automated portion of the Decision 7 lifecycle gate is complete
-  (`forced_recovery: tree_stopped_sentinel_survived`, `orphan_posture:
-  descendants_survived_observation_window`, on one bounded Windows host); the manual
-  interactive fields (`interactive_delivery`, `wrapper_completion`) remain open, so Decision 7
-  is unsatisfied and interactive `.cmd` production wiring in `run` stays blocked. Production
-  integration remains pending H11.2: native-target resolution and one-shot `doctor` mediation
-  may proceed independently, while interactive `.cmd` mediation in `run` remains blocked by
-  Decision 7. Cursor MCP configuration remains pending H11.3.
+  exact-target execution, and exit/error distinction) was validated on the recorded bounded
+  H11.1 Windows matrix. The automated portion of the original Decision 7 lifecycle gate was
+  completed on one bounded Windows host. The manual Stage A matrix has since run:
+  `windows-cmd-bounded-v1` is formally ineligible because the first qualifying run on each of
+  the four required hosts produced `interactive_delivery: received` but
+  `wrapper_completion: batch_prompt_hang` and machine
+  `candidate_wrapper_completion: forced_recovery`. Decision 7 remains open, not passed,
+  and interactive `.cmd` production wiring in `run` stays blocked. H11.2 native-target
+  resolution, native direct-spawn, and one-shot `doctor` mediation are implemented. A separate
+  native control-router feasibility result is recorded under Decision 7 below, but no
+  implementation decision is made here. Cursor MCP configuration remains pending H11.3.
 - Milestone: H11 (dogfood findings/fixes) — decision in H11.1
 - Related: [run contract](../run-contract.md); `packages/cli-commands/src/commands/executable-probe.ts` (the existing resolver), `packages/cli-commands/src/commands/run.ts`, `packages/cli-commands/src/commands/doctor.ts`, `packages/adapters/src/adapters/cursor.ts`
 
@@ -176,11 +178,35 @@ Two boundaries are load-bearing:
   flags, terminal host, or runtime.
 
 **Interactive Ctrl+C behavior and wrapper completion remain subject to manual
-inherited-console verification** and are not concluded here. If they do not reach `received`
-+ `clean_exit`, `.cmd` interactive `run` stays blocked, directly spawnable native executables
-remain preferred and supported (modern Claude Code is covered), and full support may require
-an explicit Windows lifecycle-ownership mechanism, such as a process-group helper or Job
-Object-backed launcher.
+inherited-console verification** and were not concluded at the time of this decision (see the
+2026-08-04 update below). If they do not reach `received` + `clean_exit`, `.cmd` interactive
+`run` stays blocked, directly spawnable native executables remain preferred and supported
+(modern Claude Code is covered), and full support may require an explicit Windows
+lifecycle-ownership mechanism, such as a process-group helper, native control router, or
+Job-Object-backed launcher.
+
+**Update (2026-08-04) — recorded results.** The manual Stage A matrix has run.
+`windows-cmd-bounded-v1` is formally ineligible: the first qualifying run on each of the
+four required hosts produced `interactive_delivery: received` but
+`wrapper_completion: batch_prompt_hang` and machine
+`candidate_wrapper_completion: forced_recovery`—never `clean_exit`. A `& call set`
+continuation candidate did not establish viable mediation in either tested `.cmd`-target
+topology and is not being pursued further.
+
+A separate, disposable native control-router feasibility spike—one host, one representative
+launcher topology, and not attested—demonstrated core feasibility for a distinct mechanism:
+debug only `cmd.exe`, handle its `DBG_CONTROL_C`, and leave the native descendant undebugged.
+In that run, real keyboard Ctrl+C reached the native descendant, `cmd.exe` did not display its
+batch-termination prompt, the processes returned autonomously, and `cmd.exe` propagated exit
+`130`.
+
+No implementation decision is made here. Decision 7 remains open: interactive `.cmd`
+mediation stays blocked and native direct-spawn remains the supported `run` path. Any positive
+support decision is deferred until after beta and requires a new strategy identity, security
+review, compatibility work across hosts, and a formal attested matrix, followed by a future
+amendment to this ADR. Results, digests, and the raw transcript are recorded in the
+[lifecycle runbook](../security/windows-cmd-mediation-lifecycle.md) under
+Recorded results — 2026-08-04.
 
 ## Alternatives considered
 
@@ -201,10 +227,10 @@ Object-backed launcher.
 
 ## Consequences
 
-- `run <agent>` will launch directly spawnable native agents through direct spawn and will
-  support `.cmd`-only agents through bounded mediation where the guarantee suite establishes
-  that the run contract can be preserved. Unsupported shim forms will fail with an accurate,
-  actionable error rather than degraded semantics.
+- `run <agent>` launches directly spawnable native agents through direct spawn. Interactive
+  `.cmd` targets remain gated and fail with an accurate, actionable error rather than degraded
+  semantics. Future `.cmd` launcher support may be added only under a new strategy that
+  satisfies both the command-line guarantee set and the Decision 7 lifecycle acceptance gate.
 - `doctor` will report `.cmd`-only tools correctly.
 - The Cursor MCP integration will be made launchable on the observed Windows client (mechanism
   selected in H11.3), while the working Claude MCP and pre-commit-hook launch paths stay
@@ -215,6 +241,7 @@ Object-backed launcher.
   direct-spawn path is used.
 - The decision reuses the existing `executable-probe` resolver rather than adding a second
   resolution mechanism.
-- Command-line mediation is validated on the bounded accepted-subset matrix. Interactive
-  `.cmd` execution remains ineligible until Decision 7 is satisfied; directly spawnable
-  native executables remain the supported Windows `run` path.
+- Command-line mediation is validated for the bounded accepted subset, but
+  `windows-cmd-bounded-v1` is lifecycle-ineligible. Interactive `.cmd` execution remains gated
+  until a future strategy satisfies Decision 7; directly spawnable native executables remain
+  the supported Windows `run` path.
