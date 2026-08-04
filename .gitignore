@@ -48,3 +48,7 @@ full_beta_plan.md
 
 # Local-only milestone plan archives
 plans/
+
+# Decision 7 Stage A evidence scratch: the default --evidence-dir. Real-matrix
+# evidence is written outside the repo via --evidence-dir; never commit run evidence.
+/.tmp/decision7-evidence/
