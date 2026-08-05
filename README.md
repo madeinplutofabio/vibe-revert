@@ -1,27 +1,43 @@
-# VibeRevert
+<p align="center">
+  <img
+    src="docs/assets/brand/viberevert-mark.png"
+    alt="VibeRevert logo"
+    width="120"
+  >
+</p>
 
-> The safety belt for vibe coding.
+<h1 align="center">VibeRevert</h1>
+
+<p align="center">
+  <strong>AI broke your project? Undo the session, not your week.</strong>
+</p>
 
 **Status:** `v0.7.1-beta.1` (beta).
 
-VibeRevert makes AI coding sessions **visible, reversible, and safer**.
+VibeRevert records an AI coding session, flags risky changes, and can restore your project files to exactly how they were before it started, including work you hadn't committed.
 
-A VibeRevert session is a local, versioned artifact that records the
-pre-session restore point, post-session changes, risk findings, generated
-fix prompt, and rollback metadata.
+<!-- H12.5: canonical terminal recording / screenshot of a real session (record → check flags a risky change → rollback restores the files) slots in here, above the fold. -->
 
-## Install
+## Quickstart
+
+Works inside a Git repository and requires Node.js 22+. VibeRevert itself keeps its records on your machine and requires no VibeRevert account or hosted service.
+
+Install it:
 
 ```bash
 npm install -g viberevert@beta
-viberevert --version
-viberevert doctor
-viberevert init --profile generic
-viberevert mcp serve
 ```
 
-Works with any Git repo today. MCP support is available for compatible clients. See [docs/integrations.md](docs/integrations.md) for integration status.
-The MCP server contract (8 tools, JSON-RPC over stdio) is in `docs/mcp-contract.md`.
+Set up your project once, then wrap each AI coding session:
+
+```bash
+viberevert init                # one-time setup in your project
+viberevert run <your-agent>    # records the session and saves your files' starting state
+viberevert check               # see what changed and what looks risky
+viberevert rollback <session>  # preview putting your files back; add --apply to restore
+```
+
+Protect my project before the next AI session.
 
 ## Install integrations
 
