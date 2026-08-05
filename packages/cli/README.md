@@ -32,7 +32,7 @@ See [`docs/shell-contract.md`](https://github.com/madeinplutofabio/vibe-revert/b
 
 ### `shell --pty` (experimental)
 
-`viberevert shell --pty` is an opt-in **experimental transparent PTY bridge with best-effort prompt-level guard interception**: it runs a real interactive Bash session inside `node-pty`, bridges your keystrokes raw, and checks the command text Bash reports at that prompt boundary against the same configured guard rules, using PTY mode's single-element command-text representation. Plain `viberevert shell` (no flag) remains the stable, native-dependency-free baseline on every platform.
+`viberevert shell --pty` is an opt-in **experimental transparent PTY bridge with best-effort prompt-level guard interception**: it runs a real interactive Bash session inside `node-pty`, bridges your keystrokes raw, and checks the command text Bash reports at that prompt boundary against the same configured guard rules, using PTY mode's single-element command-text representation. Plain `viberevert shell` (no flag) remains the stable, native-dependency-free baseline on Linux, macOS, and Windows.
 
 Read the caveat before using it: **interception coverage is best effort, and PTY mode is not a sandbox.** Its coverage is limited to command events that traverse the installed Bash prompt hook -- not commands run inside an already-running program, in nested processes or alternate shells, or by anything that bypasses the hook. What it *does* intercept is fail-closed: such a command is never released unless policy allows it and its audit succeeds. It is a prompt-level safety net, never security enforcement or complete command interception. In PTY v1, `require_confirm` matches are blocked rather than prompted.
 

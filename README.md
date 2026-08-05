@@ -49,9 +49,9 @@ viberevert install --all             # the five safe adapters above (no CI workf
 
 ## What it does not do
 
-- Prevent all AI coding mistakes.
-- Sandbox every tool.
-- Undo external side effects such as production database changes, deployments, third-party API calls, or sent emails.
+- It does not prevent every AI coding mistake.
+- It does not sandbox tools.
+- It does not undo external effects such as deployments, database writes, third-party API calls, payments, or sent emails.
 - Replace tests or code review.
 
 ## License
