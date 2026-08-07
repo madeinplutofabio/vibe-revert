@@ -723,6 +723,19 @@ export async function planRestoreCheckpoint(
     }
   }
 
+  // Paths dirty now but absent from the checkpoint's captured dirty set were
+  // clean at checkpoint. Apply resets them to HEAD (gitResetHardHead) and does
+  // not replay them, so their final state differs and preview must enumerate
+  // them (rc1d-preview-underreport). No exclusion is applied here: apply's
+  // tracked reset is unconditional (file header invariant #4), so parity uses
+  // the same raw gitListTrackedDirty surface as the post-restore parity check.
+  const capturedDirtySet = new Set(pre.manifest.snapshots.tracked_dirty_paths);
+  for (const path of await gitListTrackedDirty(opts.repoRoot)) {
+    if (!capturedDirtySet.has(path)) {
+      tracked_restored.push(path);
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Untracked classification: hash-compare every captured entry.
   // ---------------------------------------------------------------------------

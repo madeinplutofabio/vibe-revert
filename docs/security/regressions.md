@@ -8,7 +8,9 @@ fix ships**; reproduction and full analysis live in the linked evidence.
 This first version records the three Windows launcher findings in the active H11.1 unit; H11.4
 added `github-action-reinstall-update`, H11.5 added `uninstall-restoration-gap`, and H11.6 added
 `rollback-empty-dirs` (an H11 triage observation classified contract-consistent, not a defect).
-All six H10 findings are now recorded.
+All six H10 findings are now recorded. RC beta-validation (H12.4) added
+`rc1d-preview-underreport`, a preview/apply-parity gap found by Run 1D on the `0.7.1-beta.2`
+candidate — a preview-fidelity defect, not a restoration failure.
 
 Fields per entry: `id` · `surface` · `severity` · `status` · `failure-class` ·
 `user-impact` · `test-added` · `contract-changed` · `fixed-release` · `fixed-commit` ·
@@ -17,7 +19,8 @@ Fields per entry: `id` · `surface` · `severity` · `status` · `failure-class`
 Status vocabulary: `open` (confirmed, not yet resolved in a released build) · `fixed`
 (resolved in the named release) · `blocked` (a resolved path exists but is gated on a
 separate, unsatisfied acceptance). Currently `doctor-pnpm`, `cursor-mcp-windows-shim`,
-`github-action-reinstall-update`, and `uninstall-restoration-gap` are `fixed`;
+`github-action-reinstall-update`, `uninstall-restoration-gap`, and `rc1d-preview-underreport`
+are `fixed`;
 `rollback-empty-dirs` is closed as contract-consistent through documentation rather than a code
 change; `run-agent-windows-shim` remains `open` (partially resolved; interactive `.cmd` gated by
 ADR 0005 Decision 7).
@@ -39,6 +42,7 @@ findings against it are recorded in
 | `github-action-reinstall-update` | `install --github-action` reinstall/update | medium | fixed | pending release | `6b24f7870fe3d10c9e013722cc51e2140ced0117` |
 | `uninstall-restoration-gap` | `uninstall` json-key-merge MCP config | low | fixed | pending release | `2c768a7750e0a5baa14c356efb18ddf6476e728e` |
 | `rollback-empty-dirs` | `rollback`/`uninstall` leftover empty directories | low | fixed | pending release | `430916ace44dabcbc967a725ac5de7cdad6cd284` |
+| `rc1d-preview-underreport` | `rollback` dry-run preview classification | medium | fixed | pending release | pending |
 
 ## `run-agent-windows-shim`
 
@@ -245,3 +249,48 @@ findings against it are recorded in
   and an empty-directory check; emptiness alone is not ownership evidence. No schema or engine
   change is made.
 - **evidence:** `vr-dogfood/evidence/findings/triage-rollback-empty-dirs.md`.
+
+## `rc1d-preview-underreport`
+
+- **surface:** `viberevert rollback` dry-run preview classification
+  (`packages/git/src/restore.ts`, `planRestoreCheckpoint`).
+- **severity:** medium
+- **status:** fixed
+- **failure-class:** preview/apply parity gap. `planRestoreCheckpoint` classified only
+  the checkpoint's captured dirty set (`manifest.snapshots.tracked_dirty_paths` +
+  `file_hashes`) plus the untracked surface, so a tracked file that was clean at
+  checkpoint but modified during the session was omitted from the dry-run `results[]`,
+  even though `--apply`'s unconditional `git reset --hard HEAD` reverts it.
+- **user-impact:** the dry-run under-reported — a session-modified tracked file that was
+  clean at checkpoint did not appear in the receipt, contradicting the documented
+  "the dry-run describes what `--apply` would do" / "see exactly what would change"
+  (`docs/rollback-contract.md`, `docs/rollback-limitations.md`). A user relying on the
+  preview to decide whether to apply, or to identify edits to set aside first, could
+  miss such a file. Restoration itself was correct: `--apply` restored the file exactly
+  (RC Run 1D earned `Project-file state exact: yes`). This is a preview-fidelity defect,
+  not a restoration failure.
+- **test-added:** GREEN. `packages/git/test/restore.test.ts` — "preview/apply net-change
+  parity": a tracked file clean at checkpoint and modified after appears in
+  `plan.tracked_restored` (RED before the fix: `tracked_restored` was empty); controls
+  assert a checkpoint-dirty file still at its captured target stays `skipped_unchanged`
+  (control against falsely reporting this checkpoint-dirty case) and a clean, untouched
+  file is absent from both buckets; then `restoreCheckpoint` restores all three to the
+  expected bytes.
+- **contract-changed:** none. No public CLI or persisted-schema change. The dry-run
+  receipt now enumerates tracked paths it previously omitted, bringing the output into
+  line with the unchanged documented rollback contract.
+- **fixed-release:** pending release
+- **fixed-commit:** pending
+- **disposition:** fixed in RC hardening. `planRestoreCheckpoint` additionally enumerates
+  the current `gitListTrackedDirty` surface: any tracked path not in the checkpoint's
+  captured dirty set is classified `tracked_restored`, because apply's unconditional
+  `git reset --hard HEAD` reverts it and no captured patch replays it (net state change).
+  No exclusion filter is applied — matching apply's tracked surface (restore.ts file
+  header invariant #4) and the raw `gitListTrackedDirty` the post-restore parity check
+  uses. Classified **B (beta blocker, preview-only)** by maintainer decision: restoration
+  remained qualified (RC 1D exact), but the preview contract had to be met before beta.
+  Found by RC beta-validation Run 1D on the frozen `0.7.1-beta.2` candidate
+  (`package.json`: clean at checkpoint, `stripe` added by the agent, absent from the
+  dry-run receipt yet reverted by `--apply`).
+- **evidence:** `vr-dogfood/contract-review/rc1d-preview-underreport.md`; RC Run 1D
+  evidence `vr-dogfood/evidence/run1d-nextjs-rc/` (`manifest.json`, `findings.md`).

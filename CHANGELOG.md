@@ -67,6 +67,15 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   auditable command stays blocked -- including `exit`; leave with Ctrl-D. See
   `docs/pty-contract.md`.
 
+### Fixed
+
+- `viberevert rollback` dry-run (preview) could omit a tracked file that was
+  clean when the session started but modified afterward, even though `--apply`
+  would restore it to its pre-session state. The preview now includes these
+  previously omitted tracked-file changes, bringing the dry-run back into line
+  with the documented rollback behavior. Restoration itself was unaffected;
+  `--apply` already restored such files correctly.
+
 ## [0.7.1-beta.1] - 2026-07-04
 
 > Note: `v0.7.1-beta.0` was a partial release. The CI publish run

@@ -803,6 +803,62 @@ describe("planRestoreCheckpoint — M D dry-run sibling (D76)", () => {
     }
   });
 
+  it("preview/apply net-change parity: a tracked file clean at checkpoint but modified after IS enumerated (rc1d-preview-underreport regression)", async () => {
+    // apply begins with `git reset --hard HEAD`, so a tracked file that was
+    // CLEAN at checkpoint and modified AFTER it is reverted by apply. The
+    // pre-fix planner iterated only the checkpoint's captured dirty set and
+    // OMITTED such a file from the receipt. The preview must enumerate every
+    // path whose net final state changes under apply.
+    const tmp = await mkdtemp(join(tmpdir(), "viberevert-restore-parity-"));
+    const repoRoot = join(tmp, "repo");
+    const checkpointDir = join(tmp, "checkpoint");
+    try {
+      await mkdir(repoRoot, { recursive: true });
+      await runGit(repoRoot, ["init", "-b", "main"]);
+      await runGit(repoRoot, ["config", "user.email", "test@example.com"]);
+      await runGit(repoRoot, ["config", "user.name", "Test User"]);
+      await runGit(repoRoot, ["config", "commit.gpgsign", "false"]);
+
+      await writeFile(join(repoRoot, "cleanAtCp.txt"), "original\n"); // bug case
+      await writeFile(join(repoRoot, "dirtyAtCp.txt"), "committed\n"); // control: dirty at cp
+      await writeFile(join(repoRoot, "untouched.txt"), "untouched\n"); // control: never touched
+      await runGit(repoRoot, ["add", "."]);
+      await runGit(repoRoot, ["commit", "-m", "initial"]);
+
+      // dirtyAtCp.txt is dirty BEFORE the checkpoint (captured as tracked-dirty).
+      await writeFile(join(repoRoot, "dirtyAtCp.txt"), "dirty at checkpoint\n");
+
+      await mkdir(checkpointDir, { recursive: true });
+      await createCheckpoint({ repoRoot, checkpointDir, rollbackExcludePatterns: [] });
+
+      // AFTER the checkpoint: modify the clean-at-checkpoint file.
+      await writeFile(join(repoRoot, "cleanAtCp.txt"), "modified after checkpoint\n");
+
+      const plan = await planRestoreCheckpoint(checkpointDir, {
+        repoRoot,
+        rollbackExcludePatterns: [],
+      });
+
+      // FIX: clean-at-checkpoint-modified-after is enumerated as changing.
+      expect(plan.tracked_restored).toContain("cleanAtCp.txt");
+      // CONTROL: checkpoint-dirty file still at its captured target -> no net
+      // change -> skip, NOT falsely reported.
+      expect(plan.skipped_unchanged).toContain("dirtyAtCp.txt");
+      expect(plan.tracked_restored).not.toContain("dirtyAtCp.txt");
+      // CONTROL: clean, untouched tracked file is never reported at all.
+      expect(plan.tracked_restored).not.toContain("untouched.txt");
+      expect(plan.skipped_unchanged).not.toContain("untouched.txt");
+
+      // APPLY confirms the prediction (true net-result parity).
+      await restoreCheckpoint(checkpointDir, { repoRoot, rollbackExcludePatterns: [] });
+      expect(await readFile(join(repoRoot, "cleanAtCp.txt"), "utf8")).toBe("original\n");
+      expect(await readFile(join(repoRoot, "dirtyAtCp.txt"), "utf8")).toBe("dirty at checkpoint\n");
+      expect(await readFile(join(repoRoot, "untouched.txt"), "utf8")).toBe("untouched\n");
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
   it("allowHeadMismatch: true SUPPRESSES the head_mismatch preflight_failures entry while still reporting head_match: false (A6 contract)", async () => {
     const repo = await setupRepoWithCheckpoint();
     try {
