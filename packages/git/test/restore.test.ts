@@ -1374,3 +1374,78 @@ describe("`..` path-resolution safety boundary (M D Step 3 future-proofing)", ()
     }
   });
 });
+
+// =============================================================================
+// rc-eol-autocrlf-tracked-restore — exact byte restoration of tracked-dirty
+// regular files under git's clean/smudge (core.autocrlf) filters.
+//
+// Regression for the restoration defect first seen on Windows CI: with
+// core.autocrlf=true, `git reset --hard HEAD` + patch replay re-materialize a
+// tracked file's content through git's smudge filter (LF -> CRLF), so the
+// restored working tree drifts off the exact LF bytes captured at checkpoint.
+// Restore's hash verification then throws RestoreVerificationError — even
+// though the checkpoint holds the correct raw bytes in tracked-dirty.tar.gz
+// and snapshots.file_hashes.
+//
+// autocrlf=true is set explicitly (not left to the platform default) so the
+// smudge drift reproduces deterministically on every OS, not only Windows.
+// The captured dirty bytes are LF-only; a correct restore MUST reproduce them
+// byte-for-byte and MUST NOT throw.
+// =============================================================================
+describe("restoreCheckpoint — exact byte restoration under core.autocrlf (rc-eol-autocrlf-tracked-restore)", () => {
+  it("restores tracked-dirty regular-file content to the exact captured LF bytes without throwing", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "viberevert-autocrlf-restore-"));
+    const repoRoot = join(tmp, "repo");
+    const checkpointDir = join(tmp, "checkpoint");
+    try {
+      await mkdir(repoRoot, { recursive: true });
+      await runGit(repoRoot, ["init", "-b", "main"]);
+      await runGit(repoRoot, ["config", "user.email", "test@example.com"]);
+      await runGit(repoRoot, ["config", "user.name", "Test User"]);
+      await runGit(repoRoot, ["config", "commit.gpgsign", "false"]);
+      // The defect trigger: git smudges LF -> CRLF on checkout and cleans
+      // CRLF -> LF on add. Set explicitly so the repro is platform-independent.
+      await runGit(repoRoot, ["config", "core.autocrlf", "true"]);
+
+      // Commit a multi-line LF file; the clean filter stores an LF blob.
+      const dataRel = "data.txt";
+      await writeFile(join(repoRoot, dataRel), "alpha\nbeta\n");
+      await runGit(repoRoot, ["add", dataRel]);
+      await runGit(repoRoot, ["commit", "-m", "commit data.txt (LF)"]);
+
+      // Uncommitted work: dirty the tracked file with LF-only bytes. A real
+      // content change (appended line) so it registers as tracked-dirty and
+      // lands in snapshots.file_hashes.
+      const dirtyLf = "alpha\nbeta\ngamma\n";
+      await writeFile(join(repoRoot, dataRel), dirtyLf);
+
+      // Precondition: prove the working-tree bytes really are the LF bytes we
+      // intend to protect (no CR present), so this regression can never become
+      // vacuous later.
+      const capturedBytes = Buffer.from(dirtyLf, "utf8");
+      expect((await readFile(join(repoRoot, dataRel))).equals(capturedBytes)).toBe(true);
+      expect(capturedBytes.includes(0x0d)).toBe(false);
+
+      // Capture. snapshotTrackedDirty stores the exact working-tree LF bytes
+      // into tracked-dirty.tar.gz and their SHA-256 into
+      // snapshots.file_hashes[data.txt].
+      await mkdir(checkpointDir, { recursive: true });
+      await createCheckpoint({ repoRoot, checkpointDir, rollbackExcludePatterns: [] });
+
+      const capturedSha = await realSha256File(join(repoRoot, dataRel));
+
+      // MUST NOT throw. On b88d976 (tracked archive loaded but unused), the
+      // reset+patch smudge drift makes the on-disk bytes CRLF, so hash
+      // verification throws RestoreVerificationError here — the RED the
+      // minimal fix turns GREEN.
+      await restoreCheckpoint(checkpointDir, { repoRoot, rollbackExcludePatterns: [] });
+
+      // Exact raw LF bytes + hash after restore.
+      const restoredBytes = await readFile(join(repoRoot, dataRel));
+      expect(restoredBytes.equals(capturedBytes)).toBe(true);
+      expect(await realSha256File(join(repoRoot, dataRel))).toBe(capturedSha);
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+});

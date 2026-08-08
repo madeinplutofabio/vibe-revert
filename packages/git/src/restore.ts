@@ -233,31 +233,33 @@
 //    normalization is identical across all six application points.
 //
 // =============================================================================
-// What does NOT happen in M B (deferred to later milestones)
+// Tracked-dirty archive use during restore + what is NOT asserted
 // =============================================================================
 //
-//   - The tracked-dirty tarball is NOT extracted by restore. Tracked-side
-//     restoration is patch-driven (D-restore-2): `git reset --hard HEAD`
-//     wipes the tracked working tree and index, then the captured staged +
-//     unstaged patches replay the dirty state. The tracked-dirty tarball's
-//     bytes are evidence that the captured state was hashable; verification
-//     is done against `manifest.snapshots.file_hashes`, not the archive
-//     contents directly. A future milestone may use the archive as a
-//     fallback when patches fail to replay.
+//   - The tracked-dirty archive is used during restore for regular-file
+//     CONTENT only. Git reconstructs index / mode / type state via
+//     `git reset --hard HEAD` + staged/unstaged patch replay; VibeRevert then
+//     overwrites the captured tracked-dirty regular files
+//     (`snapshots.file_hashes` keys) with their raw archived bytes — via
+//     `restoreTrackedDirtyContent` — BEFORE hash verification. This makes
+//     restoration independent of git's clean/smudge (core.autocrlf) filters,
+//     which would otherwise drift the working tree off the captured hashes
+//     (rc-eol-autocrlf-tracked-restore). Archive mode/metadata is NOT applied
+//     to tracked files.
 //
-//   - The tracked-dirty tarball IS still validated for shape (exact entry-
-//     set parity with `file_hashes` keys, regular-file entries, safe paths,
-//     no `.viberevert/**`). Pure tampering detection — even though we
-//     don't extract it, a manifest declaring a tampered archive is itself
-//     suspicious.
+//   - The tracked-dirty archive is validated for shape in preflight (exact
+//     entry-set parity with `file_hashes` keys, regular-file entries, safe
+//     paths, no `.viberevert/**`) — a manifest declaring a tampered archive is
+//     itself corrupt evidence, independent of the content restore above.
 //
 //   - mtime / permissions metadata is NOT asserted by hash verification.
 //     Acceptance is byte-content identical only. (Documented in the M B
 //     plan's Risks section.)
 
 import type { Stats } from "node:fs";
-import { lstat, rm, rmdir } from "node:fs/promises";
-import { join } from "node:path";
+import { lstat, mkdir, mkdtemp, readFile, rm, rmdir, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import {
@@ -410,13 +412,7 @@ export async function restoreCheckpoint(
     throw new RestoreExcludeDriftError(pre.excludeDrift);
   }
 
-  const {
-    trackedArchiveBuf: _unusedTrackedBuf,
-    untrackedArchiveBuf,
-    stagedPatch,
-    unstagedPatch,
-  } = pre.artifacts;
-  void _unusedTrackedBuf; // tracked archive is shape-validated but never extracted in M B (see file header "what does NOT happen in M B").
+  const { trackedArchiveBuf, untrackedArchiveBuf, stagedPatch, unstagedPatch } = pre.artifacts;
   const expectedUntrackedSet = pre.expectedUntrackedSet;
   const isExcluded = pre.isExcluded;
 
@@ -445,6 +441,19 @@ export async function restoreCheckpoint(
   if (unstagedPatch.length > 0) {
     await gitApply(opts.repoRoot, unstagedPatch);
   }
+
+  // Rewrite the EXACT captured bytes of every tracked-dirty regular file over
+  // what reset+patch replay produced. git's clean/smudge (core.autocrlf)
+  // filters can re-materialize regular-file CONTENT with different line endings
+  // than were captured, drifting the working tree off the captured
+  // `snapshots.file_hashes` and failing the verification below. This
+  // content-only overwrite (index/mode/type stay git's) makes the working tree
+  // match the captured bytes exactly. (rc-eol-autocrlf-tracked-restore)
+  await restoreTrackedDirtyContent(
+    trackedArchiveBuf,
+    Object.keys(pre.manifest.snapshots.file_hashes),
+    opts.repoRoot,
+  );
 
   // Untracked side: the current working tree may have files created
   // during the session that aren't in the manifest. Enumerate
@@ -1201,6 +1210,83 @@ async function extractUntrackedTarball(buf: Buffer, repoRoot: string): Promise<v
       preservePaths: false,
     }),
   );
+}
+
+/**
+ * Content-only restore of the tracked-dirty regular files: overwrite the paths
+ * git reconstructed (reset --hard + patch replay) with their EXACT captured
+ * bytes from the tracked-dirty archive. Fixes the drift class where git's
+ * clean/smudge (core.autocrlf) filters re-materialize regular-file content with
+ * different bytes than were captured (rc-eol-autocrlf-tracked-restore).
+ *
+ * Scope: `expectedPaths` is exactly `Object.keys(manifest.snapshots.file_hashes)`
+ * — the regular-file subset the archive contains. Each such path was a regular
+ * file at checkpoint and is expected to be regular again after reset + patch
+ * replay, so this is a byte overwrite, not a general filesystem restoration
+ * engine.
+ *
+ * Safety:
+ *   - `archiveBuf` is the buffer preflight already validated (shape / entry-set
+ *     parity with `file_hashes` / safe paths / no `.viberevert/**`); never
+ *     re-read from disk (invariant #2).
+ *   - `clearExtractionPathConflicts` runs BEFORE any write — unlinks a hostile
+ *     symlink or empty dir at a destination path and any intermediate symlink,
+ *     and refuses unresolvable blockers — so no symlink is ever followed and no
+ *     write escapes the repo. Unresolvable conflicts throw before any content
+ *     is written.
+ *   - The archive is extracted to an isolated OS temp dir; only file CONTENT is
+ *     copied into the repo. Archive mode/metadata is never applied to tracked
+ *     files (they keep git's mode/type).
+ *
+ * Temp cleanup is best-effort: the staging dir is disposable scratch state
+ * outside the project, so a cleanup failure (e.g. a Windows async-delete race)
+ * must never turn a successful restore into a failed rollback. The `rm` gets
+ * Windows retries; the `finally`'s own try/catch guarantees a cleanup failure
+ * can never replace or mask an error thrown by the extract/copy work — the
+ * original restore error, if any, is what the caller receives.
+ */
+async function restoreTrackedDirtyContent(
+  archiveBuf: Buffer,
+  expectedPaths: readonly string[],
+  repoRoot: string,
+): Promise<void> {
+  if (expectedPaths.length === 0) return;
+
+  const conflicts = await clearExtractionPathConflicts(repoRoot, expectedPaths, () => false);
+  if (conflicts.length > 0) {
+    throw new RestoreExtractionConflictError(conflicts);
+  }
+
+  const staging = await mkdtemp(join(tmpdir(), "viberevert-tracked-restore-"));
+  try {
+    await pipeline(
+      Readable.from([archiveBuf]),
+      tar.extract({
+        cwd: staging,
+        filter: (path: string, entry: tar.ReadEntry | Stats) =>
+          "type" in entry &&
+          entry.type === "File" &&
+          isSafeStoredRelativePath(path) &&
+          !isVibeRevertInternalPath(path),
+        preservePaths: false,
+      }),
+    );
+    for (const rel of expectedPaths) {
+      const to = join(repoRoot, rel);
+      await mkdir(dirname(to), { recursive: true });
+      await writeFile(to, await readFile(join(staging, rel)));
+    }
+  } finally {
+    // Best-effort scratch cleanup ONLY. A leaked OS-temp dir is preferable to
+    // failing an otherwise-successful rollback. The inner try/catch ensures a
+    // cleanup failure can never replace or mask the error (if any) propagating
+    // from the try block above.
+    try {
+      await rm(staging, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    } catch {
+      // ignore: disposable temp state; cleanup must not determine restore outcome
+    }
+  }
 }
 
 // =============================================================================
