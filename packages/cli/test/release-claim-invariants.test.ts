@@ -30,7 +30,7 @@ import { validateSupportManifest } from "../../../scripts/support-manifest-core.
 import { parseSupportManifest } from "../../../scripts/support-manifest-parser.js";
 
 const REPO_ROOT_URL = new URL("../../../", import.meta.url);
-const GUARDED_SURFACES = ["README.md", "packages/cli/README.md"] as const;
+const GUARDED_SURFACES = ["README.md", "packages/cli/README.md", "docs/beta-report.md"] as const;
 
 // --- support.yml facts (parse → VALIDATE → extract) ---
 interface RawManifest {
