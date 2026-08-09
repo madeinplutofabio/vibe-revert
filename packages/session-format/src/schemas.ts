@@ -355,11 +355,14 @@ export type CheckResult = z.infer<typeof CheckResultSchema>;
 //     dirty tracked entry, regardless of whether the path currently exists
 //     on disk as a regular file. Restore uses this for exact set-parity
 //     verification of the tracked-dirty surface.
-//   - `file_hashes` is a STRICT SUBSET — only the regular-file entries
-//     whose bytes were captured into `tracked_dirty_archive_path`
-//     (snapshots.ts's `filterRegularFiles` skips deletions, symlinks,
-//     non-regular entries). Restore uses this for content-level SHA-256
-//     verification.
+//   - `file_hashes` records the ARCHIVED set: every PRESENT tracked regular
+//     file's bytes (dirty AND clean) captured into `tracked_dirty_archive_path`
+//     (snapshots.ts's `filterRegularFiles` skips deletions, symlinks, and other
+//     non-regular entries). Restore uses this for raw-byte restoration +
+//     content-level SHA-256 verification. It is INDEPENDENT of
+//     `tracked_dirty_paths` — NOT a subset or superset: a clean tracked file is
+//     in `file_hashes` but not `tracked_dirty_paths`; a tracked deletion is in
+//     `tracked_dirty_paths` but not `file_hashes`.
 //   - Both fields are required because they answer different questions and
 //     verify different things. Removing `tracked_dirty_paths` would re-open
 //     the soundness hole where a tampered patch could smuggle an

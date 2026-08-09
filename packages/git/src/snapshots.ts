@@ -4,10 +4,16 @@
 // Tarball creation for VibeRevert checkpoint snapshots (D2/D3).
 //
 // Two snapshots per checkpoint:
-//   1. tracked-dirty.tar.gz — bytes of every tracked file with unstaged or
-//      staged changes, captured from the working tree as of checkpoint time.
-//      Pairs with the unstaged.patch + staged.patch artifacts (which encode
-//      the deltas) to fully reconstruct the pre-checkpoint working tree.
+//   1. tracked-dirty.tar.gz — raw working-tree bytes of every PRESENT tracked
+//      regular file (NOT only the dirty ones), captured as of checkpoint time.
+//      The filename is historical: the archive's contents were broadened from
+//      the dirty subset to all present tracked regular files WITHOUT a format
+//      rename (kept to avoid a schema change). Capturing clean tracked files'
+//      bytes too is what lets restore reproduce a file's EXACT pre-session
+//      content even when Git would re-materialize it differently on
+//      `reset --hard` (e.g. under core.autocrlf, LF<->CRLF) — a file Git treats
+//      as clean can still have on-disk bytes a HEAD checkout would not
+//      reproduce, so those bytes must be recorded now or they are lost.
 //   2. untracked.tar.gz — bytes of every untracked file that is NOT
 //      gitignored AND NOT matched by `rollback.exclude` patterns.
 //
@@ -15,6 +21,8 @@
 // `rollback.exclude` is symmetric — what's excluded from capture is also
 // the same set restore is forbidden to mutate. snapshotUntracked enforces
 // the capture half here; restore.ts enforces the mutation half there.
+// **D3 applies to the UNTRACKED surface only — the tracked archive is never
+// filtered by `rollback.exclude`.**
 //
 // Per D4: file hashes are SHA-256 (lowercase hex) computed via streaming.
 // Returned in the result so the caller (checkpoint.ts) can build the
@@ -36,9 +44,12 @@
 // This is what gets stored in `manifest.snapshots.tracked_dirty_paths`
 // and what restore uses for exact set-parity verification (closes the
 // tampering hole where a malicious patch could smuggle an unauthorized
-// tracked deletion past file_hashes-only checks). The `files` /
-// `fileHashes` pair remains the regular-file-only subset captured into
-// the tarball.
+// tracked deletion past file_hashes-only checks). The `files` / `fileHashes`
+// pair is a SEPARATE surface: the regular-file subset of ALL present tracked
+// files (dirty AND clean), used for raw-byte restoration + content hash
+// verification. The two answer different questions and are NOT constrained to
+// be subsets of each other — `trackedDirtyPaths` is the git-dirty parity set;
+// `fileHashes` keys are every archived regular file.
 //
 // Path conventions: git emits POSIX paths (forward slashes). node-tar
 // stores archive members with the same POSIX paths. Node's `lstat` on
@@ -51,7 +62,7 @@ import { promisify } from "node:util";
 import { gzip as gzipCallback } from "node:zlib";
 import picomatch from "picomatch";
 import * as tar from "tar";
-import { gitListTrackedDirty, gitListUntracked } from "./git-cli.js";
+import { gitListTracked, gitListTrackedDirty, gitListUntracked } from "./git-cli.js";
 import { sha256File } from "./hashes.js";
 
 /**
@@ -77,40 +88,54 @@ export type SnapshotResult = {
 
 /**
  * Result shape for snapshotTrackedDirty. Extends `SnapshotResult` with the
- * `trackedDirtyPaths` field — the FULL tracked-dirty path set from
- * `gitListTrackedDirty` (sorted, deduped) including paths that did NOT
- * make it into the tarball or the `fileHashes` record because they
- * weren't regular files on disk at capture time (deletions, symlink
- * changes, mode-only changes). Stored verbatim in
- * `manifest.snapshots.tracked_dirty_paths`; consumed by restore's set-
- * parity check.
+ * `trackedDirtyPaths` field — the FULL git-dirty tracked path set from
+ * `gitListTrackedDirty` (sorted, deduped), including paths that did NOT make
+ * it into the tarball or the `fileHashes` record because they weren't regular
+ * files on disk at capture time (deletions, symlink changes, mode-only
+ * changes). Stored verbatim in `manifest.snapshots.tracked_dirty_paths`;
+ * consumed by restore's set-parity check.
+ *
+ * `trackedDirtyPaths` and `fileHashes` are INDEPENDENT sets: with the
+ * broadened capture, `files`/`fileHashes` cover ALL present tracked regular
+ * files, so `trackedDirtyPaths` is no longer a superset of `fileHashes` keys
+ * (nor vice versa). Neither the schema nor restore-preflight constrains them
+ * to a subset relationship.
  */
 export type SnapshotTrackedDirtyResult = SnapshotResult & {
   readonly trackedDirtyPaths: readonly string[];
 };
 
 /**
- * Snapshot all tracked files with unstaged or staged changes that are
- * regular files on disk.
+ * Snapshot the raw working-tree bytes of EVERY present tracked regular file
+ * (not only the dirty ones), and separately return the git-dirty tracked path
+ * set for restore's parity check.
  *
- * Filters out:
- *   - Files that no longer exist (e.g., staged-as-deleted) — node-tar
- *     would error trying to add them, and deletions are captured by the
- *     diff artifacts, not by the snapshot. The deleted paths DO appear
- *     in `trackedDirtyPaths` (see below) since they're part of the
- *     dirty-set restore must verify.
- *   - Symbolic links and other non-regular entries — see the file header
- *     comment for the M B "regular file bytes only" policy. These also
- *     DO appear in `trackedDirtyPaths`.
+ * Archive/hash source = `gitListTracked()` (all tracked paths from
+ * `git ls-files`) filtered to regular files. Capturing clean tracked files'
+ * bytes too is deliberate and load-bearing: a file Git considers clean can
+ * still have on-disk bytes that a HEAD checkout would not reproduce (e.g. under
+ * core.autocrlf), so those bytes must be recorded at checkpoint or they are
+ * lost — restore reproduces them exactly from this archive.
  *
- * Writes a gzipped tarball at `archivePath`. Creates the parent directory
- * of `archivePath` if missing (mkdir recursive). Returns:
- *   - `files` / `fileHashes`: regular-file subset captured into the
- *     tarball (used for content-level hash verification at restore).
- *   - `trackedDirtyPaths`: FULL tracked-dirty set from
+ * Filters out (via filterRegularFiles' `lstat`):
+ *   - Non-existent paths (ENOENT) — e.g. a tracked file deleted on disk, or a
+ *     staged-as-deleted path. The deleted path still appears in
+ *     `trackedDirtyPaths` (it is dirty) so restore can verify it; it simply has
+ *     no bytes to archive.
+ *   - Symbolic links, gitlinks/submodule directories, and other non-regular
+ *     entries — per the M B "regular file bytes only" policy. Dirty non-regular
+ *     entries still appear in `trackedDirtyPaths`.
+ *
+ * Writes a gzipped tarball at `archivePath` (parent dir created if missing).
+ * `rollback.exclude` is NOT applied here — it governs the untracked surface
+ * only. Returns:
+ *   - `files` / `fileHashes`: the regular-file set captured into the tarball
+ *     (used for raw-byte restoration + content-level hash verification). NOT a
+ *     subset or superset of `trackedDirtyPaths`.
+ *   - `trackedDirtyPaths`: the FULL git-dirty tracked set from
  *     `gitListTrackedDirty`, sorted-deduped (used for exact set-parity
- *     verification at restore — closes the soundness hole where a
- *     tampered patch could smuggle an unauthorized tracked deletion).
+ *     verification at restore — closes the soundness hole where a tampered
+ *     patch could smuggle an unauthorized tracked deletion).
  *
  * An empty result still produces a valid empty .tar.gz at `archivePath`
  * (restore code relies on the file existing).
@@ -119,18 +144,35 @@ export async function snapshotTrackedDirty(opts: {
   repoRoot: string;
   archivePath: string;
 }): Promise<SnapshotTrackedDirtyResult> {
-  const candidates = await gitListTrackedDirty(opts.repoRoot);
-  const files = await filterRegularFiles(opts.repoRoot, candidates);
+  // Two independent git surfaces, fetched together:
+  //   - dirtyPaths: the git-DIRTY tracked set (parity). Returned verbatim as
+  //     trackedDirtyPaths; restore compares it against gitListTrackedDirty() at
+  //     restore time. Includes deletions/symlink/mode/type changes that are not
+  //     regular files on disk and therefore are NOT archived.
+  //   - trackedPaths: EVERY tracked path (git ls-files). Filtered to regular
+  //     files below → the archive/hash source.
+  const [dirtyPaths, trackedPaths] = await Promise.all([
+    gitListTrackedDirty(opts.repoRoot),
+    gitListTracked(opts.repoRoot),
+  ]);
+
+  // Archive + hash the EXACT same regular-file list. filterRegularFiles lstat's
+  // each candidate, so symlinks, gitlinks/submodule dirs, and missing paths
+  // (tracked-but-deleted) are skipped — never archived as regular files. Raw
+  // bytes come from the working tree (writeTarball's cwd + hashAll), never from
+  // Git blobs. Deterministic order: gitListTracked returns sorted-deduped paths
+  // (same contract as gitListTrackedDirty), so `files` is stable across runs.
+  const files = await filterRegularFiles(opts.repoRoot, trackedPaths);
   await writeTarball(opts.repoRoot, opts.archivePath, files);
   const fileHashes = await hashAll(opts.repoRoot, files);
-  // `candidates` is the raw output of gitListTrackedDirty — already sorted
-  // and deduped (see git-cli.ts's gitListTrackedDirty implementation),
-  // includes ALL dirty tracked paths (deletions, symlinks, mode-only
-  // changes, etc.). Returned verbatim as trackedDirtyPaths so
-  // checkpoint.ts can populate manifest.snapshots.tracked_dirty_paths
-  // directly (with one final defense-in-depth normalization at the
-  // persistence boundary in checkpoint.ts) without re-fetching.
-  return { files, fileHashes, trackedDirtyPaths: candidates };
+
+  // `dirtyPaths` is the raw gitListTrackedDirty output — already sorted and
+  // deduped, covering ALL dirty tracked paths (deletions, symlinks, mode-only
+  // changes, etc.). Returned verbatim as trackedDirtyPaths so checkpoint.ts can
+  // populate manifest.snapshots.tracked_dirty_paths directly (with one final
+  // defense-in-depth normalization at the persistence boundary in checkpoint.ts)
+  // without re-fetching. NOT constrained to be a superset of `fileHashes` keys.
+  return { files, fileHashes, trackedDirtyPaths: dirtyPaths };
 }
 
 /**
@@ -182,10 +224,9 @@ export async function snapshotUntracked(opts: {
  *     guaranteeing those two contracts agree.
  *   - Directories, sockets, FIFOs, block/char devices.
  *
- * Sequential `await` (not Promise.all): bounds concurrency, simpler error
- * surfacing, and M B checkpoint sizes are small (tens of files typical).
- * If profiling ever shows this is a bottleneck, switch to a bounded-pool
- * pattern.
+ * Sequential `await` (not Promise.all): bounds filesystem concurrency and
+ * keeps error surfacing simple. If profiling ever shows this is a bottleneck,
+ * switch to a bounded-pool pattern.
  */
 async function filterRegularFiles(
   repoRoot: string,
@@ -256,9 +297,9 @@ async function writeTarball(
   }
 
   // tar v7's tar.create rejects empty file lists with "no paths specified
-  // to add to archive". For the empty case (e.g., a clean tracked tree),
-  // write a minimal valid empty tar.gz directly: an empty tar archive is
-  // two consecutive 512-byte blocks of zeros (the standard EOF marker),
+  // to add to archive". For the empty case (e.g., no present tracked regular
+  // files), write a minimal valid empty tar.gz directly: an empty tar archive
+  // is two consecutive 512-byte blocks of zeros (the standard EOF marker),
   // gzipped. tar.list reads this as zero entries — exactly what restore's
   // assertArchiveEntries expects when the corresponding file_hashes is
   // also empty.
@@ -281,17 +322,23 @@ async function writeTarball(
 }
 
 /**
- * Compute SHA-256 hashes for every file in `files` in parallel. Returns a
+ * Compute SHA-256 hashes for every file in `files` sequentially. Returns a
  * record from path → lowercase hex. Path keys match the input paths
  * (repo-relative POSIX), preserving the canonical form used by the manifest
  * schema's `safeStoredRelativePath` validator.
+ *
+ * Sequential (not `Promise.all`): the tracked-file list can now span the whole
+ * repository, so a bounded, one-at-a-time walk avoids opening thousands of hash
+ * streams at once. If profiling ever shows checkpointing is too slow, switch to
+ * a bounded-pool pattern.
  */
 async function hashAll(
   repoRoot: string,
   files: readonly string[],
 ): Promise<Readonly<Record<string, string>>> {
-  const entries = await Promise.all(
-    files.map(async (p) => [p, await sha256File(`${repoRoot}/${p}`)] as const),
-  );
+  const entries: Array<readonly [string, string]> = [];
+  for (const p of files) {
+    entries.push([p, await sha256File(`${repoRoot}/${p}`)] as const);
+  }
   return Object.fromEntries(entries);
 }

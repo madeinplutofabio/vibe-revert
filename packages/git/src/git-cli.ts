@@ -37,7 +37,7 @@
 //     plus the StatusEntry and EndOfSessionSnapshot types and the
 //     CommitRefNotFoundError class.
 //   - Internal (re-exported only within this package): gitDiffUnstaged,
-//     gitDiffStaged, gitListUntracked, gitListTrackedDirty, gitApply,
+//     gitDiffStaged, gitListUntracked, gitListTracked, gitListTrackedDirty, gitApply,
 //     gitApplyWithIndex, gitResetHardHead, runGit, runGitText, splitNulList.
 //   The barrel (./index.ts) re-exports only the public set. The runGit /
 //   runGitText / splitNulList primitives are exposed package-internally
@@ -880,6 +880,26 @@ export async function gitListTrackedDirty(repoRoot: string): Promise<readonly st
   ]);
   const set = new Set<string>([...splitNulList(unstagedBuf), ...splitNulList(stagedBuf)]);
   return [...set].sort();
+}
+
+/**
+ * Internal: list ALL tracked files — the index-tracked population from
+ * `git ls-files -z`. Returns repo-relative POSIX paths, deduped + sorted (same
+ * contract as `gitListTrackedDirty`). Used by snapshots.ts to enumerate the
+ * regular files whose raw working-tree bytes are captured into the tracked
+ * archive (broadened from the dirty subset so restore can reproduce a
+ * clean-at-checkpoint file's exact bytes even when Git would re-materialize it
+ * differently on `reset --hard`, e.g. under core.autocrlf).
+ *
+ * `git ls-files` lists the paths currently represented in the index, including
+ * non-regular entries such as symlinks and gitlinks. snapshots.ts's
+ * `filterRegularFiles` lstat-narrows that population to regular files present
+ * on disk. Tracked deletions and other dirty state remain represented
+ * separately by `gitListTrackedDirty`.
+ */
+export async function gitListTracked(repoRoot: string): Promise<readonly string[]> {
+  const buf = await runGit(repoRoot, ["ls-files", "-z"]);
+  return [...new Set(splitNulList(buf))].sort();
 }
 
 /**

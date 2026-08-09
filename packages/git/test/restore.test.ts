@@ -1448,4 +1448,66 @@ describe("restoreCheckpoint — exact byte restoration under core.autocrlf (rc-e
       await rm(tmp, { recursive: true, force: true });
     }
   });
+
+  it("restores a CLEAN-at-checkpoint regular file's exact captured LF bytes after a post-checkpoint modification (manifestation #2)", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "viberevert-autocrlf-clean-"));
+    const repoRoot = join(tmp, "repo");
+    const checkpointDir = join(tmp, "checkpoint");
+    try {
+      await mkdir(repoRoot, { recursive: true });
+      await runGit(repoRoot, ["init", "-b", "main"]);
+      await runGit(repoRoot, ["config", "user.email", "test@example.com"]);
+      await runGit(repoRoot, ["config", "user.name", "Test User"]);
+      await runGit(repoRoot, ["config", "commit.gpgsign", "false"]);
+      await runGit(repoRoot, ["config", "core.autocrlf", "true"]);
+
+      // A tracked file that is CLEAN at checkpoint, with LF-only on-disk bytes.
+      // The clean filter stores an LF blob; the working-tree bytes stay LF and
+      // Git reports the file clean — so it is NOT in the tracked-dirty set. Its
+      // bytes are recorded only because the archive now covers ALL present
+      // tracked regular files (the capture broadening under test).
+      const cleanRel = "clean.txt";
+      const cleanLf = "alpha\nbeta\n";
+      await writeFile(join(repoRoot, cleanRel), cleanLf);
+      await runGit(repoRoot, ["add", cleanRel]);
+      await runGit(repoRoot, ["commit", "-m", "commit clean.txt (LF)"]);
+
+      // Precondition 1: the working-tree bytes really are LF-only (no CR).
+      const capturedBytes = Buffer.from(cleanLf, "utf8");
+      expect((await readFile(join(repoRoot, cleanRel))).equals(capturedBytes)).toBe(true);
+      expect(capturedBytes.includes(0x0d)).toBe(false);
+
+      // Precondition 2: Git considers the file CLEAN. Manifestation #2 needs
+      // both axes (LF-only bytes AND Git-clean); an empty porcelain status
+      // proves clean. runGit() discards stdout, so capture it via execFileAsync.
+      const cleanStatus = await execFileAsync("git", ["status", "--porcelain=v1", "--", cleanRel], {
+        cwd: repoRoot,
+        windowsHide: true,
+      });
+      expect(cleanStatus.stdout.length).toBe(0);
+
+      // Checkpoint the CLEAN tree (nothing dirty). snapshotTrackedDirty still
+      // captures clean.txt's raw LF bytes into the archive + file_hashes.
+      await mkdir(checkpointDir, { recursive: true });
+      await createCheckpoint({ repoRoot, checkpointDir, rollbackExcludePatterns: [] });
+
+      const capturedSha = await realSha256File(join(repoRoot, cleanRel));
+
+      // AFTER the checkpoint: modify the previously-clean file.
+      await writeFile(join(repoRoot, cleanRel), "alpha\nbeta\nmodified after checkpoint\n");
+
+      // MUST restore the EXACT original LF bytes without throwing. Before the
+      // capture was broadened, a clean-at-checkpoint file's bytes were never
+      // recorded, so rollback's `git reset --hard` re-materialized it as CRLF
+      // under core.autocrlf and the original LF bytes were lost (manifestation
+      // #2). The content-overwrite from the broadened archive restores them.
+      await restoreCheckpoint(checkpointDir, { repoRoot, rollbackExcludePatterns: [] });
+
+      const restoredBytes = await readFile(join(repoRoot, cleanRel));
+      expect(restoredBytes.equals(capturedBytes)).toBe(true);
+      expect(await realSha256File(join(repoRoot, cleanRel))).toBe(capturedSha);
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
 });

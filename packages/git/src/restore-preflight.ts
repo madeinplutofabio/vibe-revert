@@ -347,16 +347,18 @@ export async function loadRestorePreflight(
   //    as checkpoint content. See file header "VibeRevert internal path
   //    is corrupt evidence" block for the full lock.
   //
-  //    THREE loops because `tracked_dirty_paths` is by construction a
-  //    SUPERSET of `manifest.snapshots.file_hashes` keys (it covers
-  //    deletions, mode-only changes, symlinks, type changes — none of
-  //    which have hash entries or archive entries). A tampered manifest
-  //    declaring `.viberevert/...` as a deletion would slip through
-  //    file_hashes + archive validation entirely; the patch replay phase
-  //    would then execute that deletion against VibeRevert's own
-  //    storage. This loop is the only thing that catches the manifest-
-  //    declared form of that attack. (The patch-direct form is caught
-  //    by step 5 below.)
+  //    THREE loops because `file_hashes` keys and `tracked_dirty_paths` are
+  //    INDEPENDENT sets — neither is a subset of the other. `file_hashes`
+  //    covers every present tracked regular file (dirty AND clean);
+  //    `tracked_dirty_paths` covers the git-dirty surface, including deletions,
+  //    mode-only changes, symlinks, and type changes that have no hash or
+  //    archive entry. So each set needs its own scan: a tampered manifest
+  //    declaring `.viberevert/...` as a deletion would slip through the
+  //    file_hashes + archive validation entirely; the patch replay phase would
+  //    then execute that deletion against VibeRevert's own storage. The
+  //    `tracked_dirty_paths` loop is the only thing that catches the manifest-
+  //    declared form of that attack. (The patch-direct form is caught by
+  //    step 5 below.)
   //
   //    Runs BEFORE artifact reads + archive validation so the throw
   //    points at the declaring manifest field rather than at a

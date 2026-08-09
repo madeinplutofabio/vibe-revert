@@ -707,24 +707,33 @@ export async function planRestoreCheckpoint(
 
   const tracked_restored: string[] = [];
   const skipped_unchanged: string[] = [];
+  const dirtyAtCheckpoint = new Set(pre.manifest.snapshots.tracked_dirty_paths);
 
-  // Subset with captured hashes (regular files). Compare current bytes
-  // against captured hash.
+  // `file_hashes` now covers ALL present tracked regular files (dirty AND clean
+  // — the archive was broadened so restore can reproduce exact bytes). Compare
+  // each captured file's current bytes against its captured hash:
+  //   - differ                         → raw bytes will change    → tracked_restored
+  //   - equal AND dirty-at-checkpoint  → captured bytes already match → skipped_unchanged
+  //   - equal AND clean-at-checkpoint  → no byte-level result here
+  //                                      (Git-state leg below may still report it)
+  // The last branch stops clean, unchanged tracked files from flooding the
+  // preview with hundreds of skipped_unchanged entries.
   for (const [path, expectedHash] of Object.entries(pre.manifest.snapshots.file_hashes)) {
     const abs = join(opts.repoRoot, path);
     const actualHash = await hashFileIfRegular(abs);
-    if (actualHash === expectedHash) {
-      skipped_unchanged.push(path);
-    } else {
+    if (actualHash !== expectedHash) {
       tracked_restored.push(path);
+    } else if (dirtyAtCheckpoint.has(path)) {
+      skipped_unchanged.push(path);
     }
   }
 
-  // Tracked-dirty paths NOT in file_hashes (deletions, mode-only,
-  // symlinks, type changes). Can't predict patch no-op without
-  // simulating; classify conservatively as tracked_restored. This is
-  // the locked "would be patched" interpretation per the M D Step 3
-  // contract.
+  // Tracked-dirty paths with NO regular-file hash entry: deletions, symlink
+  // changes, gitlink/type changes — anything dirty at checkpoint that is not a
+  // present tracked regular file (and so is absent from file_hashes + the
+  // archive). Can't predict patch no-op without simulating; classify
+  // conservatively as tracked_restored (the locked "would be patched"
+  // interpretation per the M D Step 3 contract).
   const trackedFileHashKeys = new Set(Object.keys(pre.manifest.snapshots.file_hashes));
   for (const path of pre.manifest.snapshots.tracked_dirty_paths) {
     if (!trackedFileHashKeys.has(path)) {
@@ -738,9 +747,8 @@ export async function planRestoreCheckpoint(
   // them (rc1d-preview-underreport). No exclusion is applied here: apply's
   // tracked reset is unconditional (file header invariant #4), so parity uses
   // the same raw gitListTrackedDirty surface as the post-restore parity check.
-  const capturedDirtySet = new Set(pre.manifest.snapshots.tracked_dirty_paths);
   for (const path of await gitListTrackedDirty(opts.repoRoot)) {
-    if (!capturedDirtySet.has(path)) {
+    if (!dirtyAtCheckpoint.has(path)) {
       tracked_restored.push(path);
     }
   }
