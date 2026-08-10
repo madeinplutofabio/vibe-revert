@@ -4,16 +4,26 @@
 
 <h1 align="center">VibeRevert</h1>
 
-<p align="center"><strong>AI broke your project? Undo the session, not your week.</strong></p>
+<h2 align="center">AI broke your project? Undo the session, not your week.</h2>
+
+<p align="center"><strong>Record · Check · Fix · Restore.</strong></p>
 
 <p align="center">
-  <a href="https://www.npmjs.com/package/viberevert"><img src="https://img.shields.io/npm/v/viberevert/beta?label=npm%20beta&logo=npm&color=cb3837" alt="npm beta"></a>
-  <a href="https://github.com/madeinplutofabio/vibe-revert/actions/workflows/ci.yml"><img src="https://github.com/madeinplutofabio/vibe-revert/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://www.npmjs.com/package/viberevert">
+    <img src="https://img.shields.io/npm/v/viberevert/beta?label=npm%20beta&logo=npm&color=cb3837" alt="npm beta">
+  </a>
+  <a href="https://github.com/madeinplutofabio/vibe-revert/actions/workflows/ci.yml">
+    <img src="https://github.com/madeinplutofabio/vibe-revert/actions/workflows/ci.yml/badge.svg" alt="CI">
+  </a>
   <img src="https://img.shields.io/badge/node-%E2%89%A522-brightgreen?logo=node.js&logoColor=white" alt="Node 22+">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0"></a>
+  <a href="LICENSE">
+    <img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0">
+  </a>
 </p>
 
 VibeRevert records an AI coding session, flags risky changes, and can restore your project files to exactly how they were before it started, including work you hadn't committed.
+
+**Keep using your coding agent.** VibeRevert adds the safety layer around the session — with Claude Code, Cursor, and other coding-agent workflows.
 
 ## See it work
 
