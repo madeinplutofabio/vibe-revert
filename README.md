@@ -1,34 +1,54 @@
 <p align="center">
-  <img
-    src="docs/assets/brand/viberevert-mark.png"
-    alt="VibeRevert logo"
-    width="120"
-  >
+  <img src="docs/assets/brand/viberevert-mark.png" alt="VibeRevert logo" width="120">
 </p>
 
 <h1 align="center">VibeRevert</h1>
 
-<p align="center">
-  <strong>AI broke your project? Undo the session, not your week.</strong>
-</p>
+<p align="center"><strong>AI broke your project? Undo the session, not your week.</strong></p>
 
-**Status:** `v0.7.1-beta.1` (beta).
+<p align="center">
+  <a href="https://www.npmjs.com/package/viberevert"><img src="https://img.shields.io/npm/v/viberevert/beta?label=npm%20beta&logo=npm&color=cb3837" alt="npm beta"></a>
+  <a href="https://github.com/madeinplutofabio/vibe-revert/actions/workflows/ci.yml"><img src="https://github.com/madeinplutofabio/vibe-revert/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <img src="https://img.shields.io/badge/node-%E2%89%A522-brightgreen?logo=node.js&logoColor=white" alt="Node 22+">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0"></a>
+</p>
 
 VibeRevert records an AI coding session, flags risky changes, and can restore your project files to exactly how they were before it started, including work you hadn't committed.
 
-<!-- H12.5: canonical terminal recording / screenshot of a real session (record → check flags a risky change → rollback restores the files) slots in here, above the fold. -->
+## See it work
+
+<p align="center">
+  <img src="docs/assets/how-it-works.png" alt="How VibeRevert protects an AI coding session: capture the project's starting file state, record the AI session, flag risky changes across payments, database, and infrastructure, preview the rollback, and restore the project files to their pre-session state — external effects are out of scope" width="900">
+</p>
+
+The actual CLI, condensed from a real beta payment run — `check` flags it, and `rollback` previews what it will change before you `--apply`:
+
+```text
+$ viberevert check
+risk: CRITICAL · payments
+  app/api/checkout/route.ts          payments   (critical)
+  app/api/webhooks/stripe/route.ts   payments   (critical)
+
+$ viberevert rollback <session>        # preview — nothing changed yet
+  package.json                       tracked_restored
+  app/page.tsx                       tracked_restored
+  app/api/checkout/route.ts          untracked_deleted
+  app/api/webhooks/stripe/route.ts   untracked_deleted
+  lib/stripe.ts                      untracked_deleted
+  .gitignore  README.md  (your uncommitted work)   skipped_unchanged
+```
+
+## Proof, not promises
+
+**3 real AI coding sessions. 3 exact project-file restorations.** Payments, database migrations, and deployment infrastructure — all with pre-existing uncommitted work preserved. [Read the beta report →](docs/beta-report.md)
 
 ## Quickstart
 
-Works inside a Git repository and requires Node.js 22+. VibeRevert itself keeps its records on your machine and requires no VibeRevert account or hosted service.
-
-Install it:
+Works inside a Git repository and requires Node.js 22+. VibeRevert keeps its records on your machine and requires no VibeRevert account or hosted service.
 
 ```bash
 npm install -g viberevert@beta
 ```
-
-Set up your project once, then wrap each AI coding session:
 
 ```bash
 viberevert init                # one-time setup in your project
@@ -37,70 +57,70 @@ viberevert check               # see what changed and what looks risky
 viberevert rollback <session>  # preview putting your files back; add --apply to restore
 ```
 
-Protect my project before the next AI session.
+## What it protects you from
 
-## What it does
+You let an AI agent work across your project, and it touched more than you expected — maybe payment code, a database migration, a deploy file — while your own half-finished work was sitting right there uncommitted. VibeRevert captures your project's starting file state first, so a session you don't like doesn't cost you your afternoon.
+
+## What VibeRevert does
 
 Around each AI coding session, VibeRevert:
 
 - **Checkpoints your project first** — working tree, staged changes, and untracked files, including work you haven't committed.
-- **Records the session** and the project files that changed while it was running.
+- **Records the session** and the project files that changed while it ran.
 - **Flags risky edits** — changes touching auth, payments, databases, secrets, dependencies, or infrastructure ([risk taxonomy](docs/risk-taxonomy.md)).
 - **Writes an agent-ready fix prompt** from those findings, to paste into your next iteration.
 - **Restores your files** to the checkpoint when you need it.
 
-It **warns** you; it does not silently block your work. An optional pre-commit hook can reject a commit that exceeds your configured risk threshold. It is opt-in, tunable, and bypassable like other local Git hooks.
+It **warns** you; it does not silently block your work. An optional pre-commit hook can reject a commit above your configured risk threshold — opt-in, tunable, and bypassable like any local Git hook.
 
-## What it restores — and what it doesn't
+## What rollback restores — and what it doesn't
 
-`viberevert rollback` restores your **local project files** — tracked, staged, and untracked, including uncommitted work — to how they were when the session started. It previews by default; `--apply` writes the change, and every apply first saves an emergency checkpoint of the current state.
+`viberevert rollback` restores your **local project files** — tracked, staged, and untracked, including uncommitted work — to how they were when the session started. It previews by default; `--apply` writes the change, and every apply first saves an emergency checkpoint.
 
-It does **not** reverse effects outside your project files. Deployments, database writes, third-party API calls, payments, and sent emails require their own recovery or compensation steps. Rollback is state-based rather than atomic, and it is a safety net around AI sessions, not a replacement for tests or code review. Read [what rollback can and can't restore](docs/rollback-limitations.md) before you rely on it.
+It does **not** reverse effects outside your project files. Deployments, database writes, third-party API calls, payments, and sent emails need their own recovery. Rollback is state-based rather than atomic, and it's a safety net around AI sessions, not a replacement for tests or review. Read [what rollback can and can't restore](docs/rollback-limitations.md) before you rely on it.
 
-## Records stay local
+## Works with your coding agent
 
-VibeRevert stores its own records in a `.viberevert/` directory inside your repository. It requires no VibeRevert account or hosted service. Your AI agent is separate software and may still communicate with its own provider.
+Keep using the coding tools you prefer. VibeRevert can wrap command-line agent sessions (`viberevert run <your-agent>`) and also integrates with tools such as Cursor and Claude through its installers. It doesn't replace your agent, and it doesn't need to understand it.
 
-## Records and reports
+## Why not just use your agent's Undo button?
 
-Each session leaves a local record you can inspect again. `viberevert check` shows the changed files, risk findings, and an agent-ready fix prompt. `viberevert rollback <session>` previews the planned restoration before it writes anything.
+Some coding agents already have checkpoints or a rewind feature. They're useful — use them. VibeRevert solves a *different* problem: **it doesn't belong to the agent.** It wraps the session, captures your project's starting file state including uncommitted work, records what changed, flags risky files, previews the rollback, and restores your project files to that pre-session state. So you can switch agents freely without making any one agent's history your only way back.
 
-See the [session format](docs/session-format.md) for the underlying record structure.
+| | Built-in agent checkpoints | VibeRevert |
+|---|---|---|
+| Part of a specific coding agent | Usually | No |
+| Restore code changes | Yes | Yes |
+| Preserve pre-session uncommitted work | Varies | Yes |
+| Flag risky project changes | Varies | Yes |
+| Preview planned file restoration | Varies | Yes |
+| Keep a local session/check record | Varies | Yes |
+| Recovery layer independent of one agent | No | Yes |
+
+> Built-in checkpoints protect you inside one coding agent. VibeRevert protects the project around the agent.
+
+Use one agent today and another tomorrow; the recovery layer stays with your project.
 
 ## Wire it into your tools
 
-`viberevert install` adds managed VibeRevert entries while preserving unrelated user configuration:
+VibeRevert installs non-destructively and can be removed cleanly. It integrates with Claude Code and Cursor (MCP server and hooks); every install previews its changes and keeps a recovery journal. See [getting started](docs/getting-started.md).
 
-```bash
-viberevert install --cursor          # merge MCP server into .cursor/mcp.json
-viberevert install --claude          # merge MCP server into .mcp.json
-viberevert install --direct          # write .git/hooks/pre-commit directly
-viberevert install --husky           # add a managed block to .husky/pre-commit
-viberevert install --lefthook        # add a managed block to lefthook.yml
-viberevert install --github-action   # write a pinned CI workflow (explicit-only)
-viberevert install --all             # the five non-CI adapters above
-```
-
-`viberevert uninstall` mirrors the same flags and removes only the entries managed by VibeRevert. Successful installs are recorded in `.viberevert/integrations.json`; reinstall and uninstall check for configuration drift and use a per-repository lock and recovery journal.
-
-See the [installers contract](docs/installers-contract.md) and [integration status](docs/integrations.md).
-
-## Experimental terminal bridge
-
-`viberevert shell --pty` is an experimental, opt-in bridge for interactive Bash sessions. It checks commands at the prompt on a best-effort basis. It is a prompt-level safety net, not a sandbox or complete command interceptor.
-
-The support matrix marks PTY as exercised on Linux, capability-gated on macOS, and unavailable on Windows. See the [shell `--pty` notes](packages/cli/README.md#shell---pty-experimental) and the [PTY contract](docs/pty-contract.md).
+An **experimental** terminal bridge (`--pty`) can intercept commands inside an interactive agent shell; it's best-effort and documented as such in the [PTY contract](docs/pty-contract.md).
 
 ## Platforms
 
-The standard `init` → `run` → `check` → `rollback` workflow runs on Linux, macOS, and Windows with Node.js 22+. See [compatibility and support levels](docs/compatibility.md).
+Linux, macOS, and Windows, on Node.js 22+. CI runs the suite across all three on Node 22 and 24; see [compatibility](docs/compatibility.md) for exactly what each platform is tested to do.
 
 ## Learn more
 
-- [Getting started](docs/getting-started.md) · [Commands](docs/commands.md) · [Configuration](docs/config.md) · [Session format](docs/session-format.md)
-- [Architecture](docs/architecture.md) · [Risk taxonomy](docs/risk-taxonomy.md) · [Rollback limitations](docs/rollback-limitations.md) · [Positioning](docs/positioning.md)
-- [Security](SECURITY.md) · [Threat model](THREAT_MODEL.md) · [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md)
+- [Getting started](docs/getting-started.md) · [Commands](docs/commands.md) · [Configuration](docs/config.md)
+- [What rollback can and can't restore](docs/rollback-limitations.md) · [Risk taxonomy](docs/risk-taxonomy.md)
+- [Security policy](SECURITY.md) · [Threat model](THREAT_MODEL.md) · [Contributing](CONTRIBUTING.md)
+
+## Support VibeRevert
+
+VibeRevert is Apache-2.0 open source. Sponsoring funds continued cross-platform testing, security work, rollback and recovery testing, and helping pay for independent review. **Sponsorship does not influence risk findings or release decisions.** → **[Sponsor VibeRevert](https://github.com/sponsors/madeinplutofabio?metadata_campaign=viberevert)** · [what your support funds](docs/funding.md)
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+[Apache-2.0](LICENSE). See [NOTICE](NOTICE) and the [license audit](LICENSE-AUDIT.md).
