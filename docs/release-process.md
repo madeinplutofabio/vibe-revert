@@ -345,6 +345,84 @@ Then fix the issue + bump to `0.7.0-beta.<N+1>` per the partial-publish policy.
   2. Bump all 10 publish-target versions to `0.7.0-beta.<N+1>`.
   3. Commit, tag `v0.7.0-beta.<N+1>`, push.
 
+## Release evidence and verification
+
+Every Release workflow run produces three independent evidence layers over that
+run's exact packed tarballs. Within a run, nothing is repacked between evidence
+generation, smoke testing, and publication. A `workflow_dispatch` rehearsal does
+not publish; the later tag-push run creates its own release bundle and publishes
+the exact tarballs from that tag-push run.
+
+| Layer | What it proves | Artifact |
+|---|---|---|
+| **Checksums** | Byte identity of the 10 tarballs | `checksums.txt` (SHA-256, basename-only) |
+| **Build-provenance attestation** | Provenance of those tarball subjects and the GitHub Actions workflow that produced them | GitHub attestation store (`actions/attest`), verified with `gh attestation verify` |
+| **SBOM** | Workspace/build dependency **inventory** of the release build | `sbom.cdx.json` (CycloneDX, via Syft) |
+
+These are distinct claims. The SBOM is a **workspace/build** inventory of the
+release build, **not** a per-tarball SBOM -- it does not assert the dependency
+set of any individual published package.
+
+### The RC bundle
+
+Each run uploads one artifact, `viberevert-rc-<version>` (10 `*.tgz` +
+`checksums.txt` + `sbom.cdx.json`, 90-day retention), **after** the tarballs pass
+checksum verification, SBOM generation, provenance attestation, and an
+install/smoke from those exact tarballs. So a preserved `viberevert-rc-<version>`
+bundle means those bytes passed that run's checksum, attestation, and
+install/smoke checks. On a tag-push run the GitHub Release attaches only
+`checksums.txt` + `sbom.cdx.json`; the tarballs are distributed via npm.
+
+### Pre-publish rehearsal (`workflow_dispatch`)
+
+Dispatch the Release workflow from `main` with `dry_run_release_tag` (e.g.
+`v0.7.1-beta.3`). It validates, packs, checksums, SBOMs, attests, installs/smokes
+that run's tarballs, and runs `gh attestation verify` on each -- but does **not**
+publish, smoke against npm, or create a Release. Download `viberevert-rc-<version>`
+to inspect the evidence before tagging. The rehearsal proves the machinery and
+the candidate source state; the tag-push run packs and publishes independently.
+
+### Verifying the evidence
+
+```sh
+# byte identity, from inside the unpacked bundle
+sha256sum -c checksums.txt
+
+# build provenance of a tarball subject
+gh attestation verify viberevert-<version>.tgz --repo madeinplutofabio/vibe-revert
+```
+
+`sbom.cdx.json` is a workspace/build inventory -- inspect it with any CycloneDX
+tooling; it is not a per-package SBOM.
+
+### GitHub artifact attestation vs npm registry provenance
+
+- **GitHub build-provenance attestation** (`actions/attest`) attests the packed
+  tarball subjects and is verifiable **pre-publish** with `gh attestation verify`.
+- **npm registry provenance** (`npm publish --provenance`, see [Provenance
+  attestation](#provenance-attestation)) is recorded by npm at publish time and
+  is only verifiable **after** publication (H15C: `npm audit signatures` + the
+  npm "Provenance" badge).
+
+Do not conflate them: the rehearsal proves the former, never the latter.
+
+### H15C: comparing the published tarballs against the tag-push bundle
+
+After publication, H15C fetches the published tarballs from npm and compares
+their SHA-256 against the `viberevert-rc-<version>` artifact from the successful
+tag-push release run. A match confirms npm served the exact bytes checked,
+attested, and smoke-tested in the publishing run. npm accepts a gzipped tarball
+as the publish input and records integrity for that tarball, so comparing the
+downloaded registry tarball against the tag-run checksum is the correct
+byte-identity check.
+
+### Staged publishing
+
+Evaluated for beta.3: available and Trusted-Publishing-compatible, but requires
+npm >= 11.15.0, Node >= 22.14.0, and maintainer 2FA approval, and would replace
+the tested M RH publish/recovery loop. Deferred to a later release to avoid
+changing the publication path immediately before beta.3.
+
 ## Tagging convention
 
 ### Format

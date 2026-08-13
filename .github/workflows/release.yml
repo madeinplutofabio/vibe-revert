@@ -51,7 +51,8 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
-      id-token: write   # npm --provenance requires OIDC token issuance
+      id-token: write       # npm provenance + GitHub artifact attestation
+      attestations: write   # actions/attest writes the build-provenance attestation record
     outputs:
       version: ${{ steps.validate.outputs.version }}
     steps:
@@ -339,6 +340,107 @@ jobs:
             fi
           done
 
+      - name: Generate + verify SHA-256 checksums for the 10 packed tarballs
+        shell: bash
+        run: |
+          set -euo pipefail
+          PACK_DIR="${RUNNER_TEMP}/viberevert-pack"
+          cd "$PACK_DIR"
+          # basename-only, deterministic (LC_ALL=C) order so checksums.txt is
+          # location-independent and deterministically ordered for the same packed bytes.
+          mapfile -t TARBALLS < <(printf '%s\n' *.tgz | LC_ALL=C sort)
+          if [ "${#TARBALLS[@]}" -ne 10 ]; then
+            echo "Expected 10 packed tarballs to checksum, found ${#TARBALLS[@]}:"
+            printf '  %s\n' "${TARBALLS[@]}"
+            exit 1
+          fi
+          sha256sum "${TARBALLS[@]}" > checksums.txt
+          echo "== checksums.txt =="
+          cat checksums.txt
+          # Verify immediately against the same bytes (defense-in-depth).
+          sha256sum -c checksums.txt
+          echo "10 tarball checksums generated (basename-only, LC_ALL=C sorted) and verified."
+
+      - name: Generate CycloneDX SBOM (Syft, pinned)
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: .
+          format: cyclonedx-json
+          output-file: ${{ runner.temp }}/viberevert-pack/sbom.cdx.json
+          syft-version: v1.51.0
+          dependency-snapshot: false
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Attest build provenance for the 10 packed tarballs
+        # actions/attest with only subject inputs (no sbom-path / predicate-*)
+        # produces auto-generated SLSA build provenance. subject-checksums
+        # reuses the checksums.txt manifest just verified by sha256sum -c, so
+        # the attested subjects are exactly the 10 tarballs -- no second
+        # independent definition of "the ten artifacts". Runs on push AND
+        # workflow_dispatch so the rehearsal can `gh attestation verify` pre-tag.
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-checksums: ${{ runner.temp }}/viberevert-pack/checksums.txt
+
+      - name: Install + smoke the exact packed tarballs (no repack)
+        shell: bash
+        env:
+          VERSION: ${{ steps.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+          PACK_DIR="${RUNNER_TEMP}/viberevert-pack"
+          SCRATCH="$(mktemp -d)"
+          # Derive the local-tarball closure from the packed tarballs (no second
+          # hard-coded package list, no repack) and write the scratch consumer.
+          node scripts/rc-smoke-consumer.mjs "$PACK_DIR" "${VERSION}" "$SCRATCH"
+          cd "$SCRATCH"
+          git init -q
+          git config user.email smoke@example.com
+          git config user.name "RC Smoke"
+          git config commit.gpgsign false
+          printf 'hello\n' > README.md
+          printf 'node_modules/\n' > .gitignore
+          git add -A
+          git commit -q -m "rc smoke baseline"
+          pnpm install --silent
+          # The CLI must be the exact packed candidate version -- proves the bytes
+          # about to be published are what we just installed and executed.
+          v="$(pnpm exec viberevert --version | tr -d '[:space:]')"
+          if [ "$v" != "${VERSION}" ]; then
+            echo "packed-tarball smoke: viberevert --version=$v != expected ${VERSION}"
+            exit 1
+          fi
+          pnpm exec viberevert doctor
+          pnpm exec viberevert init --profile generic
+          # .viberevert/ gitignored after init is a hard precondition (matches smoke-test.ps1).
+          git check-ignore -q .viberevert/foo || { echo ".viberevert/ not gitignored after init"; exit 1; }
+          echo "packed-tarball smoke OK: viberevert ${VERSION} installed from the exact closure and ran (version/doctor/init/gitignore)."
+
+      - name: Verify build-provenance attestations (rehearsal, workflow_dispatch only)
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          PACK_DIR="${RUNNER_TEMP}/viberevert-pack"
+          # gh attestation verify takes ONE artifact path per invocation; loop
+          # over the ten tarballs rather than shell-expanding a glob into it.
+          for tgz in "$PACK_DIR"/*.tgz; do
+            echo "Verifying attestation: $(basename "$tgz")"
+            gh attestation verify "$tgz" --repo "$GITHUB_REPOSITORY"
+          done
+          echo "All 10 tarball provenance attestations verified via gh attestation verify."
+
+      - name: Upload RC bundle (10 tarballs + checksums.txt + SBOM) for verification / H15C
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: viberevert-rc-${{ steps.validate.outputs.version }}
+          path: ${{ runner.temp }}/viberevert-pack/
+          if-no-files-found: error
+          retention-days: 90
+
       - name: Publish 10 packed tarballs in dependency-safe order (Trusted Publisher / OIDC)
         if: github.event_name == 'push'
         env:
@@ -452,6 +554,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Download the RC bundle preserved by the publish job (same run)
+        # Cross-job: ${RUNNER_TEMP}/viberevert-pack from the publish runner is
+        # NOT visible here. Pull the exact uploaded bundle -- no regeneration --
+        # and attach only checksums + SBOM below.
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: viberevert-rc-${{ needs.publish.outputs.version }}
+          path: rc-bundle
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
@@ -459,6 +570,11 @@ jobs:
           name: ${{ github.ref_name }}
           draft: false
           prerelease: true
+          # Attach only checksums + SBOM. The 10 npm tarballs are distributed
+          # via npm; the workflow artifact is their preserved RC evidence.
+          files: |
+            rc-bundle/checksums.txt
+            rc-bundle/sbom.cdx.json
           body: |
             VibeRevert ${{ github.ref_name }} beta release.
 
@@ -475,6 +591,13 @@ jobs:
             - `viberevert`
 
             Install: `npm install viberevert@beta`
+
+            Release assets (verification evidence for this release):
+            - `checksums.txt` — SHA-256 of the 10 release tarballs published to npm
+            - `sbom.cdx.json` — CycloneDX SBOM (workspace/build)
+
+            Build provenance for the published tarballs is attested via GitHub
+            artifact attestations (`gh attestation verify <tarball> --repo <this repo>`).
 
             Post-publish smoke (Windows PowerShell 5.1) passed against `viberevert@beta`:
             - `npm install` + version match
