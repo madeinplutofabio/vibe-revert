@@ -8,10 +8,10 @@
 | Input | Value |
 | --- | --- |
 | Generator schema version | `1` |
-| pnpm-lock.yaml SHA-256 | `e9b7ee3c584673b4596e7164a7841fb54254c0ea6034670d04e769c5e17f55dc` |
-| Workspace manifests digest (SHA-256) | `6411b06fc913208a6df101fabe88dd94144e256a0024ec5add182898a9e6eaf5` |
+| pnpm-lock.yaml SHA-256 | `9e65eeddf38ba7b189f9a1536eb1152f604dfbe61e02a0547df0f3568dc6d081` |
+| Workspace manifests digest (SHA-256) | `14d63a768a43790ec9bb396d34e63f76df376ebd2c510f1e7f4556db135c31af` |
 | license-policy.json SHA-256 | `8f210e8009e477a5339838d18731e9f383c03b918be605377391d76baca972e6` |
-| license-metadata.json SHA-256 | `4519a13ae2c46f643241654c5dc64199f98ffcdce6b1af5b530f7c2f41e082bd` |
+| license-metadata.json SHA-256 | `a92f713bef2d1493b8ef0c63d2582fe4c4ef4101b706ee903b90b7acffcb36ae` |
 | Reachable snapshot instances | `315` |
 | Aggregated package rows | `315` |
 
@@ -105,7 +105,7 @@
 | `@esbuild/win32-arm64` | `0.28.1` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `@esbuild/win32-ia32` | `0.28.1` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `@esbuild/win32-x64` | `0.28.1` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
-| `@hono/node-server` | `1.19.14` | `production` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
+| `@hono/node-server` | `1.19.15` | `production` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `@inquirer/external-editor` | `1.0.3` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `@isaacs/fs-minipass` | `4.0.1` | `production` | `allowed-with-obligations` | `ISC` | `include-license-text` | `no` |
 | `@jridgewell/sourcemap-codec` | `1.5.5` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
@@ -203,7 +203,7 @@
 | `extendable-error` | `0.1.7` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `fast-deep-equal` | `3.1.3` | `production` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `fast-glob` | `3.3.3` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
-| `fast-uri` | `3.1.4` | `production` | `allowed-with-obligations` | `BSD-3-Clause` | `include-license-text` | `no` |
+| `fast-uri` | `3.1.5` | `production` | `allowed-with-obligations` | `BSD-3-Clause` | `include-license-text` | `no` |
 | `fastq` | `1.20.1` | `development` | `allowed-with-obligations` | `ISC` | `include-license-text` | `no` |
 | `fdir` | `6.5.0` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `fill-range` | `7.1.1` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
@@ -223,13 +223,13 @@
 | `graceful-fs` | `4.2.11` | `development` | `allowed-with-obligations` | `ISC` | `include-license-text` | `no` |
 | `has-symbols` | `1.1.0` | `production` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `hasown` | `2.0.4` | `production` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
-| `hono` | `4.12.27` | `production` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
+| `hono` | `4.12.34` | `production` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `http-errors` | `2.0.1` | `production` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `human-id` | `4.1.3` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `iconv-lite` | `0.7.2` | `production` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `ignore` | `5.3.2` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `inherits` | `2.0.4` | `production` | `allowed-with-obligations` | `ISC` | `include-license-text` | `no` |
-| `ip-address` | `10.2.0` | `production` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
+| `ip-address` | `10.3.1` | `production` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `ipaddr.js` | `1.9.1` | `production` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `is-extglob` | `2.1.1` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `is-glob` | `4.0.3` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
