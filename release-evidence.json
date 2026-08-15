@@ -108,6 +108,6 @@
     },
     "published_tarball_sha256_vs_tag_run_rc_bundle": "10/10 byte-identical (npm-published tarballs verified against the tag-run checksums.txt; RC bundle self-consistent against its own checksums.txt)",
     "functional_smoke": "published viberevert@0.7.1-beta.3 installs from the registry and reports version 0.7.1-beta.3",
-    "oidc_token_lockdown": "pending (maintainer/external): confirm Trusted Publishing succeeded for all 10 packages, revoke obsolete automation tokens, audit the trusted-publisher config"
+    "oidc_token_lockdown": "complete (2026-08-15): Trusted Publisher confirmed = GitHub Actions / release.yml on madeinplutofabio/vibe-revert; no legacy automation or publish tokens existed (OIDC-only since M RH) so none to revoke; GitHub repo carries zero Actions secrets and release.yml references no token"
   }
 }
