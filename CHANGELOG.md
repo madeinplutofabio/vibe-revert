@@ -8,6 +8,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.1-beta.3] - 2026-08-15
+
 ### Added
 
 - `viberevert run [--task "..."] <command> [args...]` -- runs a single
@@ -75,6 +77,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   previously omitted tracked-file changes, bringing the dry-run back into line
   with the documented rollback behavior. Restoration itself was unaffected;
   `--apply` already restored such files correctly.
+- Rollback preserves exact tracked-file bytes when Git line-ending conversion
+  is enabled, including repositories using `core.autocrlf=true`.
 
 ## [0.7.1-beta.1] - 2026-07-04
 
@@ -263,6 +267,7 @@ locks.
 - ASCII-only at byte level across MCP source (D99.M.13) and per-tool
   hook scripts (D98.M.4).
 
-[Unreleased]: https://github.com/madeinplutofabio/vibe-revert/compare/v0.7.1-beta.1...HEAD
+[Unreleased]: https://github.com/madeinplutofabio/vibe-revert/compare/v0.7.1-beta.3...HEAD
+[0.7.1-beta.3]: https://github.com/madeinplutofabio/vibe-revert/compare/v0.7.1-beta.1...v0.7.1-beta.3
 [0.7.1-beta.1]: https://github.com/madeinplutofabio/vibe-revert/releases/tag/v0.7.1-beta.1
 [0.7.0-beta.0]: https://github.com/madeinplutofabio/vibe-revert/releases/tag/v0.7.0-beta.0

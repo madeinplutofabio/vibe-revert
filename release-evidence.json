@@ -1,0 +1,84 @@
+{
+  "evidence_schema": "viberevert-release-evidence-1",
+  "status": "pre-publish",
+  "candidate_version": "0.7.1-beta.3",
+  "tag": "v0.7.1-beta.3",
+  "tag_target_commit": {
+    "status": "pending_until_h15b"
+  },
+  "packages": {
+    "version": "0.7.1-beta.3",
+    "publish_targets": [
+      "@viberevert/session-format",
+      "@viberevert/core",
+      "@viberevert/git",
+      "@viberevert/checks",
+      "@viberevert/reporters",
+      "@viberevert/adapters",
+      "@viberevert/installers",
+      "@viberevert/cli-commands",
+      "@viberevert/mcp",
+      "viberevert"
+    ],
+    "private": ["@viberevert/policies-basic", "viberevert-monorepo"]
+  },
+  "ci": {
+    "workflow": "ci.yml",
+    "commit": "9a4f4d939fdefd026e7e0c51884ac56529a68db2",
+    "conclusion": "success",
+    "matrix": "{ubuntu, macos, windows} x {Node 22.23.1, Node 24} + Gates (lint/typecheck/policy/audit)"
+  },
+  "pre_publish_rehearsal": {
+    "workflow": "release.yml (workflow_dispatch)",
+    "run_id": 31699391727,
+    "commit": "5e6fad129b7209402dcca483f15499c3ceecf15f",
+    "conclusion": "success",
+    "verified": [
+      "sha256-checksums",
+      "cyclonedx-sbom",
+      "build-provenance-attestation",
+      "install-smoke-from-exact-tarballs",
+      "gh-attestation-verify"
+    ],
+    "note": "The rehearsal packs and verifies its own tarballs; the tag-push run packs and publishes its own bytes independently."
+  },
+  "dogfood": {
+    "runs": 3,
+    "exact_project_file_restorations": "3/3",
+    "candidate": "0.7.1-beta.3",
+    "environment": "Windows, Node 24.13.1",
+    "manifest_sha256": {
+      "1D_nextjs_payments": "bcb1bc5058ec179bce355d09d891d2f6502831dcb1b8f4de7a6486a862c51407",
+      "2D_laravel_migration": "0266cbe69d180f0abcfedf89e509d810a48bbfdae7bfb006574a3e21c7e49af0",
+      "3B_fastapi_deploy": "eb960ffadf2d5b78e63521a6d1b4f7c03c14148a1930c9b6ca6142b16597b10d"
+    }
+  },
+  "security": {
+    "prod_advisories": 0,
+    "audit_tool": "pnpm audit --prod",
+    "remediation_commit": "553a26b",
+    "scorecard": {
+      "score": 6.9,
+      "version": "v5.5.0",
+      "commit": "553a26b",
+      "review": "docs/security/scorecard-review.md",
+      "badge": "none"
+    }
+  },
+  "claim_guard": "green (release-claim-invariants; verified in ci.yml on 9a4f4d9)",
+  "license_audit": "up to date",
+  "accepted_limitations": [
+    "rollback leaves empty directories the AI created (documented limitation #6)",
+    "shell --pty interception is best-effort and experimental, not a sandbox",
+    "external effects (deployments, databases, API calls) are out of rollback scope",
+    "six dev-only advisories remain in the lockfile; none are shipped in any published package"
+  ],
+  "pending_until_h15c": {
+    "npm_publication": "pending",
+    "npm_provenance": "pending",
+    "npm_audit_signatures": "pending",
+    "published_tarball_sha256_vs_tag_run_rc_bundle": "pending",
+    "github_release": "pending",
+    "oidc_token_lockdown": "pending"
+  }
+}
