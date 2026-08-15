@@ -1,10 +1,15 @@
 {
   "evidence_schema": "viberevert-release-evidence-1",
-  "status": "pre-publish",
+  "status": "published",
   "candidate_version": "0.7.1-beta.3",
   "tag": "v0.7.1-beta.3",
   "tag_target_commit": {
-    "status": "pending_until_h15b"
+    "commit": "b9d942d673ba373c09afb27d896a6a3ea5e11d74",
+    "annotated_tag_object": "466729343109639228db732d1194d34263970068",
+    "annotated": true,
+    "git_tag_signature": "unsigned",
+    "tagger": "Fabio Marcello Salvadori",
+    "tagged_at": "2026-08-15T13:59:09+02:00"
   },
   "packages": {
     "version": "0.7.1-beta.3",
@@ -24,7 +29,7 @@
   },
   "ci": {
     "workflow": "ci.yml",
-    "commit": "9a4f4d939fdefd026e7e0c51884ac56529a68db2",
+    "commit": "b9d942d673ba373c09afb27d896a6a3ea5e11d74",
     "conclusion": "success",
     "matrix": "{ubuntu, macos, windows} x {Node 22.23.1, Node 24} + Gates (lint/typecheck/policy/audit)"
   },
@@ -65,7 +70,7 @@
       "badge": "none"
     }
   },
-  "claim_guard": "green (release-claim-invariants; verified in ci.yml on 9a4f4d9)",
+  "claim_guard": "green (release-claim-invariants; verified in ci.yml on b9d942d)",
   "license_audit": "up to date",
   "accepted_limitations": [
     "rollback leaves empty directories the AI created (documented limitation #6)",
@@ -73,12 +78,36 @@
     "external effects (deployments, databases, API calls) are out of rollback scope",
     "six dev-only advisories remain in the lockfile; none are shipped in any published package"
   ],
-  "pending_until_h15c": {
-    "npm_publication": "pending",
-    "npm_provenance": "pending",
-    "npm_audit_signatures": "pending",
-    "published_tarball_sha256_vs_tag_run_rc_bundle": "pending",
-    "github_release": "pending",
-    "oidc_token_lockdown": "pending"
+  "publication": {
+    "release_run_id": 31883443628,
+    "release_run_url": "https://github.com/madeinplutofabio/vibe-revert/actions/runs/31883443628",
+    "conclusion": "success",
+    "jobs": {
+      "publish_10_packages_ubuntu": "success",
+      "post_publish_smoke_windows_ps51": "success",
+      "create_github_release": "success"
+    },
+    "dist_tag": "beta",
+    "npm_publication": "10/10 publish targets live at 0.7.1-beta.3",
+    "github_release": {
+      "tag": "v0.7.1-beta.3",
+      "prerelease": true,
+      "published_at": "2026-08-15T12:04:19Z",
+      "assets": ["checksums.txt", "sbom.cdx.json"]
+    }
+  },
+  "post_publish_verification": {
+    "verified_at": "2026-08-15",
+    "result": "healthy",
+    "npm_provenance": "10/10 publish targets carry SLSA provenance/v1 attestations (registry dist.attestations)",
+    "npm_audit_signatures": {
+      "result": "pass",
+      "verified_registry_signatures": "119/119 installed packages",
+      "verified_attestations": 21,
+      "signing_keyid": "SHA256:DhQ8wR5APBvFHLF/+Tc+AYvPOdTpcIDqOhxsBHRwC7U"
+    },
+    "published_tarball_sha256_vs_tag_run_rc_bundle": "10/10 byte-identical (npm-published tarballs verified against the tag-run checksums.txt; RC bundle self-consistent against its own checksums.txt)",
+    "functional_smoke": "published viberevert@0.7.1-beta.3 installs from the registry and reports version 0.7.1-beta.3",
+    "oidc_token_lockdown": "pending (maintainer/external): confirm Trusted Publishing succeeded for all 10 packages, revoke obsolete automation tokens, audit the trusted-publisher config"
   }
 }
