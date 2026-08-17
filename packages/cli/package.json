@@ -22,7 +22,17 @@
     "rollback",
     "claude-code",
     "cursor",
-    "codex"
+    "codex",
+    "mcp",
+    "mcp-server",
+    "ai-agent",
+    "agentic",
+    "agent-safety",
+    "undo",
+    "snapshot",
+    "vibe-coding",
+    "git",
+    "cli"
   ],
   "engines": {
     "node": ">=22"
