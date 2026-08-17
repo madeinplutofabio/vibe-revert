@@ -8,7 +8,9 @@
 
 <p align="center"><strong>Record · Check · Fix · Restore.</strong></p>
 
-VibeRevert records an AI coding session, flags risky changes, and can restore your project files to exactly how they were before it started, including work you hadn't committed.
+VibeRevert records an AI coding session, flags risky changes with deterministic rules, and can restore your project files to exactly how they were before it started, including work you hadn't committed.
+
+**No AI judges the AI:** risk findings are reproducible, explainable, and based on rules you can inspect.
 
 **Keep using your coding agent.** VibeRevert adds the safety layer around the session — with Claude Code, Cursor, and other coding-agent workflows.
 
@@ -83,33 +85,27 @@ Around each AI coding session, VibeRevert:
 
 It **warns** you; it does not silently block your work. An optional pre-commit hook can reject a commit above your configured risk threshold — opt-in, tunable, and bypassable like any local Git hook.
 
+## Rules decide. Agents fix.
+
+VibeRevert does not ask another language model whether your agent's changes look risky. Its checks are deterministic: the same inputs and configuration produce the same findings, with an inspectable reason for every flag.
+
+When something needs attention, VibeRevert can turn those findings into an agent-ready fix prompt. The rules decide what to flag; you decide what happens next.
+
 ## What rollback restores — and what it doesn't
 
 `viberevert rollback` restores your **local project files** — tracked, staged, and untracked, including uncommitted work — to how they were when the session started. It previews by default; `--apply` writes the change, and every apply first saves an emergency checkpoint.
 
 It does **not** reverse effects outside your project files. Deployments, database writes, third-party API calls, payments, and sent emails need their own recovery. Rollback is state-based rather than atomic, and it's a safety net around AI sessions, not a replacement for tests or review. Read [what rollback can and can't restore](docs/rollback-limitations.md) before you rely on it.
 
-## Works with your coding agent
+## One recovery layer across your coding agents
 
-Keep using the coding tools you prefer. VibeRevert can wrap command-line agent sessions (`viberevert run <your-agent>`) and also integrates with tools such as Cursor and Claude through its installers. It doesn't replace your agent, and it doesn't need to understand it.
+Keep using the coding tools you prefer. VibeRevert can wrap command-line agent sessions (`viberevert run <your-agent>`) and integrates with tools such as Claude Code and Cursor through its installers.
 
-## Why not just use your agent's Undo button?
+Built-in checkpoints live inside the agent's workflow. **VibeRevert stays with the project.**
 
-Some coding agents already have checkpoints or a rewind feature. They're useful — use them. VibeRevert solves a *different* problem: **it doesn't belong to the agent.** It wraps the session, captures your project's starting file state including uncommitted work, records what changed, flags risky files, previews the rollback, and restores your project files to that pre-session state. So you can switch agents freely without making any one agent's history your only way back.
+It captures your project's starting state — including uncommitted work — then records the session, flags risky changes, previews the rollback, and keeps that recovery path outside the agent itself.
 
-| | Built-in agent checkpoints | VibeRevert |
-|---|---|---|
-| Part of a specific coding agent | Usually | No |
-| Restore code changes | Yes | Yes |
-| Preserve pre-session uncommitted work | Varies | Yes |
-| Flag risky project changes | Varies | Yes |
-| Preview planned file restoration | Varies | Yes |
-| Keep a local session/check record | Varies | Yes |
-| Recovery layer independent of one agent | No | Yes |
-
-> Built-in checkpoints protect you inside one coding agent. VibeRevert protects the project around the agent.
-
-Use one agent today and another tomorrow; the recovery layer stays with your project.
+Use Claude Code today, Cursor tomorrow, or wrap another terminal agent: **the safety layer stays with your project.**
 
 ## Wire it into your tools
 
