@@ -4,7 +4,7 @@
   "type": "module",
   "license": "Apache-2.0",
   "author": "Fabio Marcello Salvadori <fabio@madeinpluto.com>",
-  "description": "The safety belt for vibe coding. Visible, reversible, and safer AI coding sessions.",
+  "description": "Rollback and safety for AI coding agents: flag risky changes and restore project files, including uncommitted work, to their pre-session state.",
   "homepage": "https://github.com/madeinplutofabio/vibe-revert#readme",
   "repository": {
     "type": "git",

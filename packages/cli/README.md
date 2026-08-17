@@ -1,12 +1,27 @@
 # viberevert
 
-> The VibeRevert CLI.
+> Rollback and safety for AI coding agents: flag risky changes and restore project files, including uncommitted work, to their pre-session state.
 
-The user-facing command-line tool. Provides `init`, `checkpoint`, `run`, `shell`, `check`, `report`, `prompt-fix`, `rollback`, `hook install`, `hook uninstall`, `install`, `uninstall`, and `mcp serve`.
+VibeRevert records an AI coding session, flags risky changes with deterministic rules, and can restore your project files to exactly how they were before it started, including work you hadn't committed.
 
-Part of [VibeRevert](https://github.com/madeinplutofabio/vibe-revert) — the safety belt for vibe coding.
+**No AI judges the AI:** risk findings are reproducible, explainable, and based on rules you can inspect.
 
-**Status:** `v0.7.1-beta.1` published; M G3 implemented on `main` but unreleased. Public API may change before v1.0.
+```bash
+npm install -g viberevert@beta
+```
+
+```bash
+viberevert init                # one-time setup in your project
+viberevert run <your-agent>    # records the session and saves your files' starting state
+viberevert check               # see what changed and what looks risky
+viberevert rollback <session>  # preview putting your files back; add --apply to restore
+```
+
+Read [what rollback can and can't restore](https://github.com/madeinplutofabio/vibe-revert/blob/main/docs/rollback-limitations.md) before you rely on it. Full documentation is in the [project README](https://github.com/madeinplutofabio/vibe-revert#readme).
+
+**Status:** Beta. Public API may change before v1.0.
+
+This page documents the CLI surface: `init`, `checkpoint`, `run`, `shell`, `check`, `report`, `prompt-fix`, `rollback`, `hook install`, `hook uninstall`, `install`, `uninstall`, and `mcp serve`.
 
 ## Run
 
