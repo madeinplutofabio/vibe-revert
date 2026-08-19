@@ -3,6 +3,7 @@
   "name": "com.viberevert/viberevert",
   "title": "VibeRevert",
   "description": "Local MCP server for AI coding safety: risk checks, sessions, checkpoints, and fix prompts.",
+  "websiteUrl": "https://viberevert.com",
   "repository": {
     "url": "https://github.com/madeinplutofabio/vibe-revert",
     "source": "github"
