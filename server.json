@@ -1,0 +1,32 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "com.viberevert/viberevert",
+  "title": "VibeRevert",
+  "description": "Local MCP server for AI coding safety: risk checks, sessions, checkpoints, and fix prompts.",
+  "repository": {
+    "url": "https://github.com/madeinplutofabio/vibe-revert",
+    "source": "github"
+  },
+  "version": "0.7.1-beta.4",
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "viberevert",
+      "version": "0.7.1-beta.4",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp"
+        },
+        {
+          "type": "positional",
+          "value": "serve"
+        }
+      ]
+    }
+  ]
+}
