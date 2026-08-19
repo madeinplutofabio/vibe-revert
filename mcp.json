@@ -1,0 +1,10 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "viberevert": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "viberevert@0.7.1-beta.4", "mcp", "serve"]
+    }
+  }
+}
