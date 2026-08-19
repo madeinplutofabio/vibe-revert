@@ -2,7 +2,7 @@
 
 > Smoke-test the packed CLI against a fresh git repo before pushing release-bearing changes.
 
-**Status:** `v0.7.1-beta.1` shipped. Internal contributor doc.
+**Status:** Beta. Internal contributor doc.
 
 This document covers the local smoke-test workflow for VibeRevert: how to build the current M B package set as tarballs, install them into a throwaway scratch directory, and exercise the CLI against a real `git init` repo. The workflow surfaces release-packaging issues that the workspace-internal `pnpm test` cannot — most importantly, cross-package `workspace:*` dependency resolution in a packed install.
 

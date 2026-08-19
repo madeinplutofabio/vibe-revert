@@ -9,7 +9,7 @@
 | --- | --- |
 | Generator schema version | `1` |
 | pnpm-lock.yaml SHA-256 | `9e65eeddf38ba7b189f9a1536eb1152f604dfbe61e02a0547df0f3568dc6d081` |
-| Workspace manifests digest (SHA-256) | `5d878c5f33a0b5f2f6111d5679f35dff3c988a92905b835854eb24e69c6831ae` |
+| Workspace manifests digest (SHA-256) | `def3248043b70a1c826cde81ff56f00872f65ee1d1628836f7f8c44fedea394f` |
 | license-policy.json SHA-256 | `8f210e8009e477a5339838d18731e9f383c03b918be605377391d76baca972e6` |
 | license-metadata.json SHA-256 | `a92f713bef2d1493b8ef0c63d2582fe4c4ef4101b706ee903b90b7acffcb36ae` |
 | Reachable snapshot instances | `315` |
