@@ -155,7 +155,7 @@ export const definition: ToolDefinition<"explain_diff"> = {
   name: "explain_diff",
   description:
     "Render a CommonMark explanation of a check report alongside the report's metadata. " +
-    "Reads an existing ReportFile (read-only, class A per D99.V); does not run new checks.",
+    "Reads an existing ReportFile (read-only); does not run new checks.",
   inputSchema: z.toJSONSchema(explainDiffInputSchema, { target: "draft-7" }) as JsonSchemaObject,
 };
 

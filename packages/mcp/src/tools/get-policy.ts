@@ -102,8 +102,8 @@ export const definition: ToolDefinition<"get_policy"> = {
   description:
     "Return the project's resolved policy slice from .viberevert.yml: " +
     "block/warn risk thresholds, check toggles, frameworks, and rollback " +
-    "exclude patterns. Applies M C defaults (D57) before returning. " +
-    "Read-only (class A per D99.V); does not run checks or mutate state.",
+    "exclude patterns. Applies documented defaults before returning. " +
+    "Read-only; does not run checks or mutate state.",
   inputSchema: z.toJSONSchema(getPolicyInputSchema, { target: "draft-7" }) as JsonSchemaObject,
 };
 

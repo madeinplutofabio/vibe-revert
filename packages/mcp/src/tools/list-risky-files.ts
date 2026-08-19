@@ -210,8 +210,8 @@ export const definition: ToolDefinition<"list_risky_files"> = {
   name: "list_risky_files",
   description:
     "Project a check report into a per-file risky-files list (path, max_severity, finding_count) " +
-    "sorted by [max_severity DESC, finding_count DESC, path ASC]. Read-only (class A per D99.V). " +
-    "Capped at 500 entries per D99.U.",
+    "sorted by [max_severity DESC, finding_count DESC, path ASC]. Read-only. " +
+    "Capped at 500 entries.",
   inputSchema: z.toJSONSchema(listRiskyFilesInputSchema, { target: "draft-7" }) as JsonSchemaObject,
 };
 

@@ -429,10 +429,10 @@ export const definition: ToolDefinition<"generate_fix_prompt"> = {
   description:
     "Render a fix-prompt from a VibeRevert check report. Returns the rendered prompt " +
     "text, the absolute path to the persisted sibling fix-prompt.txt, and the source " +
-    "report id. Side-effecting (class B per D99.V); writes the sibling fix-prompt.txt " +
-    "via atomic temp+rename. The on-disk sibling is always the full untruncated text " +
-    "(D81); the MCP wire response's prompt_text is capped at " +
-    `${MAX_GENERATE_FIX_PROMPT_TEXT_BYTES} bytes (D99.U) -- when truncated, the ` +
+    "report id. Side-effecting; writes the sibling fix-prompt.txt " +
+    "via atomic temp+rename. The on-disk sibling is always the full untruncated text; " +
+    "the MCP wire response's prompt_text is capped at " +
+    `${MAX_GENERATE_FIX_PROMPT_TEXT_BYTES} bytes -- when truncated, the ` +
     "response carries truncated:true + bytes_omitted.",
   inputSchema: z.toJSONSchema(generateFixPromptInputSchema, {
     target: "draft-7",

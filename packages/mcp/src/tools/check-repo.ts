@@ -164,7 +164,7 @@ export const definition: ToolDefinition<"check_repo"> = {
   name: "check_repo",
   description:
     "Run safety checks against the working tree or staged diff and return the resulting ReportFile (or summary when large). " +
-    "Side-effecting (class B per D99.V): always persists the ReportFile under .viberevert/.",
+    "Side-effecting: always persists the ReportFile under .viberevert/.",
   inputSchema: z.toJSONSchema(checkRepoInputSchema, { target: "draft-7" }) as JsonSchemaObject,
 };
 

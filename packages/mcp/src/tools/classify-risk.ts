@@ -87,7 +87,7 @@ export const definition: ToolDefinition<"classify_risk"> = {
   name: "classify_risk",
   description:
     "Project a check report's findings into per-severity counts (critical, high, medium, low). " +
-    "Read-only (class A per D99.V); no threshold input -- returns the full per-level histogram.",
+    "Read-only; no threshold input -- returns the full per-level histogram.",
   inputSchema: z.toJSONSchema(classifyRiskInputSchema, { target: "draft-7" }) as JsonSchemaObject,
 };
 

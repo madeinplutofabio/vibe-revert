@@ -196,8 +196,8 @@ export const definition: ToolDefinition<"start_session"> = {
   description:
     "Start a new VibeRevert session: create the inner checkpoint, capture pre-session " +
     "git status, and acquire the active-session lock. Returns the new session id, " +
-    "checkpoint id, and start timestamp. Side-effecting (class B per D99.V); writes " +
-    "session state and uses the D22 start lock during execution.",
+    "checkpoint id, and start timestamp. Side-effecting; writes " +
+    "session state and uses the start lock during execution.",
   inputSchema: z.toJSONSchema(startSessionInputSchema, { target: "draft-7" }) as JsonSchemaObject,
 };
 

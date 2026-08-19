@@ -252,9 +252,9 @@ export const definition: ToolDefinition<"create_checkpoint"> = {
   name: "create_checkpoint",
   description:
     "Create a standalone VibeRevert checkpoint capturing the current working tree state. " +
-    "Returns the new checkpoint id and creation timestamp. Side-effecting (class B per " +
-    "D99.V); writes a checkpoint directory under .viberevert/checkpoints/. When `name` is " +
-    "supplied, uses the D22 name-uniqueness lock; nameless checkpoints skip the lock " +
+    "Returns the new checkpoint id and creation timestamp. Side-effecting; writes a " +
+    "checkpoint directory under .viberevert/checkpoints/. When `name` is " +
+    "supplied, uses the name-uniqueness lock; nameless checkpoints skip the lock " +
     "entirely.",
   inputSchema: z.toJSONSchema(createCheckpointInputSchema, {
     target: "draft-7",
