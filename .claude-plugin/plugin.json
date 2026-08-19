@@ -1,0 +1,19 @@
+{
+  "name": "viberevert",
+  "displayName": "VibeRevert",
+  "description": "VibeRevert safety tools for Claude Code: risk checks, sessions, checkpoints, and fix prompts.",
+  "author": {
+    "name": "Fabio Marcello Salvadori",
+    "url": "https://github.com/madeinplutofabio"
+  },
+  "homepage": "https://viberevert.com",
+  "repository": "https://github.com/madeinplutofabio/vibe-revert",
+  "license": "Apache-2.0",
+  "keywords": ["ai-agents", "coding-agent", "mcp", "risk", "git", "safety"],
+  "mcpServers": {
+    "viberevert": {
+      "command": "npx",
+      "args": ["-y", "viberevert@0.7.1-beta.4", "mcp", "serve"]
+    }
+  }
+}
