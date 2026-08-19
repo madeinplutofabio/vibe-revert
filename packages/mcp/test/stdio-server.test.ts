@@ -76,6 +76,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
+import pkg from "../package.json" with { type: "json" };
+
 // ============================================================================
 // Paths
 // ============================================================================
@@ -548,6 +550,19 @@ describe("stdio-server: A. initialize handshake", () => {
     expect(result.protocolVersion).toBe("2025-06-18");
     expect(result.serverInfo.name).toBe("@viberevert/mcp");
     expect(result.capabilities.tools).toBeDefined();
+  });
+
+  // The server previously reported a hardcoded "0.0.0" to every client while
+  // the package shipped a real version, so the advertised version was visibly
+  // wrong on an integration surface. Compare the live handshake against the
+  // package manifest -- never against a second literal, which would just
+  // reintroduce a string that can drift.
+  it("serverInfo.version is the package version, not a hardcoded literal", async () => {
+    const response = await initialize(server);
+    const result = response.result as { serverInfo: { version: string } };
+
+    expect(result.serverInfo.version).toBe(pkg.version);
+    expect(result.serverInfo.version).not.toBe("0.0.0");
   });
 });
 

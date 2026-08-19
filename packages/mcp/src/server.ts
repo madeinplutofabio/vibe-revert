@@ -121,6 +121,8 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { resolveRepoRoot } from "@viberevert/core";
 
+import pkg from "../package.json" with { type: "json" };
+
 import { type AuditRecordInput, type AuditWriter, openAuditLog } from "./audit.js";
 import { type ToolEnvelope, toErrorEnvelope } from "./envelope.js";
 import { McpBootError } from "./errors.js";
@@ -816,7 +818,7 @@ export async function startServer(opts: { cwd: string }): Promise<void> {
   // SDK wiring. Single new Server() + single new StdioServerTransport()
   // call sites per D99.M.8.
   const server = new Server(
-    { name: "@viberevert/mcp", version: "0.0.0" },
+    { name: "@viberevert/mcp", version: pkg.version },
     { capabilities: { tools: {} } },
   );
   const transport = new StdioServerTransport();

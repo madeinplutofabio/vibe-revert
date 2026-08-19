@@ -4,9 +4,9 @@
 
 Exposes VibeRevert's read-only and local-write tools to AI coding agents over MCP stdio. Boots via the `viberevert mcp serve` CLI command; the server is config-blind (no `.viberevert.yml` required) and binds to the repository it was launched in.
 
-Part of [VibeRevert](https://github.com/madeinplutofabio/vibe-revert) — the safety belt for vibe coding.
+Part of [VibeRevert](https://github.com/madeinplutofabio/vibe-revert) — the safety layer for vibe coding and AI coding agents.
 
-**Status:** `v0.7.0-beta` work in progress. Public API may change before v1.0.
+**Status:** Beta. Public API may change before v1.0.
 
 ## Run it
 

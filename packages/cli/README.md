@@ -1,6 +1,6 @@
 # viberevert
 
-> Rollback and safety for AI coding agents: flag risky changes and restore project files, including uncommitted work, to their pre-session state.
+> The safety layer for vibe coding and AI coding agents: flag risky changes and restore project files, including uncommitted work, to their pre-session state.
 
 VibeRevert records an AI coding session, flags risky changes with deterministic rules, and can restore your project files to exactly how they were before it started, including work you hadn't committed.
 
