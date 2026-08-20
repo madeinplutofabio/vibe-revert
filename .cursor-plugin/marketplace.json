@@ -1,0 +1,13 @@
+{
+  "name": "viberevert",
+  "owner": {
+    "name": "Fabio Marcello Salvadori"
+  },
+  "plugins": [
+    {
+      "name": "viberevert",
+      "source": "integrations/cursor-plugin",
+      "description": "Deterministic risk checks and session recovery for AI coding agents."
+    }
+  ]
+}

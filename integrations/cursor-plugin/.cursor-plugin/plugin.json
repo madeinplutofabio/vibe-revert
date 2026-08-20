@@ -1,0 +1,13 @@
+{
+  "name": "viberevert",
+  "description": "Deterministic risk checks and session recovery for AI coding agents. Run /viberevert-setup in a project to enable it there.",
+  "version": "0.7.1-beta.4",
+  "author": {
+    "name": "Fabio Marcello Salvadori"
+  },
+  "homepage": "https://viberevert.com",
+  "repository": "https://github.com/madeinplutofabio/vibe-revert",
+  "license": "Apache-2.0",
+  "keywords": ["ai-agents", "coding-agent", "risk", "git", "safety", "vibe-coding"],
+  "commands": "./commands"
+}
