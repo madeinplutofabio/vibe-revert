@@ -1,0 +1,12 @@
+{
+  "name": "viberevert",
+  "version": "0.7.1-beta.4",
+  "description": "Deterministic risk checks and session recovery for AI coding agents.",
+  "mcpServers": {
+    "viberevert": {
+      "command": "npx",
+      "args": ["-y", "viberevert@0.7.1-beta.4", "mcp", "serve"],
+      "cwd": "${workspacePath}"
+    }
+  }
+}
