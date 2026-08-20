@@ -25,10 +25,17 @@ line verbatim. Do not try to work around a refusal by editing files yourself.
 Read `.cursor/mcp.json` in the project root and confirm it contains an
 `mcpServers.viberevert` entry. Show the user its contents.
 
-## Step 3: tell the user what to do next
+## Step 3: tell the user how to activate it
 
-Tell them to reload the window (`Developer: Reload Window`) so Cursor picks up
-the new server, after which VibeRevert's tools become available in this project.
+Configuring the server and activating it are separate steps in Cursor. Tell the
+user to:
+
+1. Reload the window (`Developer: Reload Window`) so Cursor picks up the new
+   server.
+2. Open **Customize → MCP**, find `viberevert`, and enable it if Cursor shows it
+   as disabled.
+
+Once enabled, VibeRevert connects and exposes its 8 tools in this project.
 
 ## Rules
 
