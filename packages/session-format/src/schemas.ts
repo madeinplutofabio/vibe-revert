@@ -5,10 +5,11 @@
 // fields are rejected, not silently stripped. This prevents schema drift.
 //
 // The shared validation atoms and producer-side normalizers live in
-// ./atoms.js (extracted in M 0.8.0 step 0). See that module's header for the
-// trimming rules -- in particular why path helpers deliberately do NOT trim.
-// The public helpers are re-exported from here so the package barrel keeps
-// sourcing them from this module.
+// ./atoms.js, and the risk level with its total ordering lives in
+// ./risk-level.js (both extracted in M 0.8.0 step 0). See those modules for the
+// trimming rules and the severity-comparison contract. The public helpers are
+// re-exported from here so the package barrel keeps sourcing them from this
+// module.
 //
 // Naming convention: <Thing>Schema is the runtime zod value; <Thing> is the
 // inferred TypeScript type. This avoids value/type same-name ambiguity at the
@@ -16,16 +17,24 @@
 
 import { z } from "zod";
 import {
+  CHECKPOINT_ID_REGEX,
   nonBlankString,
+  REPORT_ID_REGEX,
+  ROLLBACK_ID_REGEX,
+  SESSION_ID_REGEX,
   safeStoredRelativePath,
   sortedUniquePathArray,
   sortedUniqueStringArray,
 } from "./atoms.js";
+import { EvaluationSnapshotSchema } from "./evaluation-snapshot.js";
+import { deriveFindingId, FindingIdSchema } from "./finding-identity.js";
+import { RiskLevelSchema } from "./risk-level.js";
 import { SCHEMA_VERSION } from "./version.js";
 
 // Re-exported so `src/index.ts` keeps sourcing the public helpers from this
-// module. The atoms themselves moved to ./atoms.js; the package barrel is the
-// stable surface and is deliberately left unchanged by that move.
+// module. The atoms and the risk-level ordering moved to sibling modules; the
+// package barrel is the stable surface and is deliberately left unchanged by
+// those moves.
 export {
   isSafeStoredRelativePath,
   isSortedUniqueStringArray,
@@ -33,13 +42,12 @@ export {
   normalizeRelativePath,
   normalizeStringArray,
 } from "./atoms.js";
+export type { RiskLevel } from "./risk-level.js";
+export { compareLevel, RiskLevelSchema, riskLevelAtOrAbove } from "./risk-level.js";
 
 // =============================================================================
 // Enum atoms
 // =============================================================================
-
-export const RiskLevelSchema = z.enum(["low", "medium", "high", "critical"]);
-export type RiskLevel = z.infer<typeof RiskLevelSchema>;
 
 export const ConfidenceSchema = z.enum(["low", "medium", "high"]);
 export type Confidence = z.infer<typeof ConfidenceSchema>;
@@ -84,44 +92,6 @@ export type SinceKind = z.infer<typeof SinceKindSchema>;
  */
 export const ReportFileKindSchema = z.enum(["session_bound", "ad_hoc"]);
 export type ReportFileKind = z.infer<typeof ReportFileKindSchema>;
-
-// =============================================================================
-// Severity ordering (single source of truth for level comparison)
-//
-// Per D25 in the M C plan. The checks engine, reporters, and CLI MUST import
-// `compareLevel` / `riskLevelAtOrAbove` from here — no ad-hoc string
-// comparison anywhere. The integer ranks are an implementation detail; only
-// the helpers' return values are public.
-// =============================================================================
-
-const LEVEL_RANK: Readonly<Record<RiskLevel, number>> = {
-  low: 0,
-  medium: 1,
-  high: 2,
-  critical: 3,
-};
-
-/**
- * Total order over `RiskLevel`: `low < medium < high < critical`. Returns
- * `-1` if `a < b`, `0` if `a === b`, `+1` if `a > b`. Intended for use as a
- * comparator (e.g. `[...levels].sort(compareLevel)`).
- */
-export function compareLevel(a: RiskLevel, b: RiskLevel): -1 | 0 | 1 {
-  const ra = LEVEL_RANK[a];
-  const rb = LEVEL_RANK[b];
-  if (ra < rb) return -1;
-  if (ra > rb) return 1;
-  return 0;
-}
-
-/**
- * True iff `actual` meets or exceeds `threshold` in the locked severity
- * ordering. Used by `viberevert check`'s gate (`actual >= risk.block_on`)
- * and by `--threshold <level>` output filtering in renderers.
- */
-export function riskLevelAtOrAbove(actual: RiskLevel, threshold: RiskLevel): boolean {
-  return LEVEL_RANK[actual] >= LEVEL_RANK[threshold];
-}
 
 // =============================================================================
 // Evidence (strict)
@@ -179,17 +149,39 @@ export type ChangedFile = z.infer<typeof ChangedFileSchema>;
 // Noise-budget rules:
 //   - evidence array must be non-empty
 //   - high/critical findings must include a recommendation
+//
+// M 0.8.0 additions: `finding_id` and `affected_paths`.
+//
+// `evidence` is PRESENTATION and is deliberately capped by detectors and by
+// cluster summarization; `affected_paths` is the MACHINE path set and is
+// complete. Selection reads the latter, never the former. The two answer
+// different questions and neither replaces the other.
+//
+// `affected_paths` holds changed-file identities, not arbitrary evidence paths:
+// for a rename matched on its old alias, the entry is the NEW path, because
+// that is the identity a contribution group is addressed by. It never contains
+// advisory non-changed paths such as a suggested location for a missing test.
+// An empty set is legal and means the finding is real but non-selectable.
+// `SessionReportSchema` enforces both that domain rule and the normative
+// derivation of `finding_id`, since only the report knows the changed-file set
+// and the report identity.
+//
+// Both fields are optional so pre-0.8.0 reports stay valid, but they are
+// COUPLED: a half-populated finding cannot exist. An empty `affected_paths`
+// still counts as present.
 // =============================================================================
 
 export const CheckResultSchema = z
   .strictObject({
     id: nonBlankString,
+    finding_id: FindingIdSchema.optional(),
     title: nonBlankString,
     level: RiskLevelSchema,
     confidence: ConfidenceSchema,
     category: nonBlankString,
     message: nonBlankString,
     evidence: z.array(EvidenceSchema).min(1),
+    affected_paths: sortedUniquePathArray.optional(),
     recommendation: nonBlankString.optional(),
   })
   .refine(
@@ -198,7 +190,12 @@ export const CheckResultSchema = z
       message: "recommendation is required when level is 'high' or 'critical'",
       path: ["recommendation"],
     },
-  );
+  )
+  .refine((r) => (r.finding_id === undefined) === (r.affected_paths === undefined), {
+    message:
+      "finding_id and affected_paths must both be present (0.8.0+ finding) or both absent (legacy finding)",
+    path: ["finding_id"],
+  });
 export type CheckResult = z.infer<typeof CheckResultSchema>;
 
 // =============================================================================
@@ -376,6 +373,73 @@ export const SessionReportSchema = z
       message: `results must contain at most ${NOISE_BUDGET_MAX_PER_CATEGORY} findings per category (engine should cluster category-tail)`,
       path: ["results"],
     },
+  )
+  // M 0.8.0: affected_paths is a subset of the CURRENT changed-file identities.
+  //
+  // Only `changed_files[].path` counts, never `previous_path`. That preserves
+  // the locked rename rule: a payments classifier matching an old alias still
+  // produces a finding whose machine identity is the NEW path, because that is
+  // what a contribution group is addressed by. Without this rule the field's
+  // stated meaning would be documentary, and a selector could resolve to a path
+  // the report never claimed had changed.
+  .refine(
+    (r) => {
+      const changedPaths = new Set(r.changed_files.map((f) => f.path));
+      return r.results.every(
+        (finding) =>
+          finding.affected_paths === undefined ||
+          finding.affected_paths.every((path) => changedPaths.has(path)),
+      );
+    },
+    {
+      message:
+        "affected_paths may contain only current changed-file identities from changed_files[].path",
+      path: ["results"],
+    },
+  )
+  // M 0.8.0: finding_id must equal its normative derivation.
+  //
+  // Format validation alone would leave `deriveFindingId` normative only by
+  // convention, letting a producer bug attach a syntactically valid id to a
+  // different rule or path set — and selection acts on that id. `session_id` is
+  // the report identity in both modes, because `ReportFileSchema` enforces
+  // `report.session_id === report_id`.
+  //
+  // Legacy findings pass untouched: both fields are absent together.
+  //
+  // Cost is one SHA-256 per 0.8.0 finding at validation time, bounded by the
+  // noise-budget cap above.
+  .refine(
+    (r) =>
+      r.results.every(
+        (f) =>
+          f.finding_id === undefined ||
+          (f.affected_paths !== undefined &&
+            f.finding_id === deriveFindingId(r.session_id, f.id, f.affected_paths)),
+      ),
+    {
+      message:
+        "finding_id must equal the normative derivation from report identity, CheckResult.id, and affected_paths",
+      path: ["results"],
+    },
+  )
+  // M 0.8.0: finding ids must be unique within a report.
+  //
+  // `--finding` is ambiguous the moment two findings share an id, so a
+  // derivation collision has to fail loudly here rather than silently make a
+  // selector resolve to the wrong change groups. Since identity is
+  // (report_id, rule id, affected paths), a collision means two findings the
+  // engine should have clustered into one survived separately: an engine bug,
+  // treated exactly as the noise-budget caps above treat one.
+  .refine(
+    (r) => {
+      const ids = r.results.map((f) => f.finding_id).filter((id): id is string => id !== undefined);
+      return new Set(ids).size === ids.length;
+    },
+    {
+      message: "finding_id values must be unique within a report",
+      path: ["results"],
+    },
   );
 export type SessionReport = z.infer<typeof SessionReportSchema>;
 
@@ -438,6 +502,20 @@ const SessionStateBaseSchema = z.strictObject({
   // and routes through D61b's --force escape hatch.
   after_status_z_path: safeStoredRelativePath.optional(),
   commands_log_path: safeStoredRelativePath,
+  // M 0.8.0: the durable session contribution, written by the end-of-session
+  // capture transaction. Optional so pre-0.8.0 sessions stay valid; their
+  // after-state is physically gone and cannot be back-filled.
+  contribution_path: safeStoredRelativePath.optional(),
+  // SHA-256 of the EXACT on-disk bytes of contribution.json. Not a
+  // re-serialization: a consumer verifies by hashing the bytes it just read,
+  // with no dependence on serializer settings. This is the root of the evidence
+  // chain that every mutating consumer must walk before acting.
+  contribution_sha256: z.hash("sha256").optional(),
+  // M 0.8.0: the resolved evaluation rules captured at `viberevert start`.
+  // Session-bound checks and selective rollback read THIS, never live config,
+  // because `.viberevert.yml` is a file the agent can rewrite mid-session.
+  // Written at start, so it is legitimately present on an in-flight session.
+  evaluation_snapshot: EvaluationSnapshotSchema.optional(),
 });
 
 export const SessionStateSchema = SessionStateBaseSchema.refine(
@@ -447,21 +525,38 @@ export const SessionStateSchema = SessionStateBaseSchema.refine(
       "ended_at and after_status_path must both be present (session ended) or both absent (session in-flight)",
     path: ["after_status_path"],
   },
-).refine(
-  // M D Option A one-way coupling: presence of after_status_z_path implies
-  // the session has ended (ended_at + after_status_path also present). The
-  // reverse is NOT required — legacy sessions ended without the z-snapshot
-  // still validate. Prevents corrupt session.json from carrying a z-snapshot
-  // path on an in-flight session, which would be incoherent (the snapshot
-  // is written exclusively by endSession).
-  (s) =>
-    s.after_status_z_path === undefined ||
-    (s.ended_at !== undefined && s.after_status_path !== undefined),
-  {
-    message: "after_status_z_path is valid only on ended sessions with after_status_path",
-    path: ["after_status_z_path"],
-  },
-);
+)
+  .refine(
+    // M D Option A one-way coupling: presence of after_status_z_path implies
+    // the session has ended (ended_at + after_status_path also present). The
+    // reverse is NOT required — legacy sessions ended without the z-snapshot
+    // still validate. Prevents corrupt session.json from carrying a z-snapshot
+    // path on an in-flight session, which would be incoherent (the snapshot
+    // is written exclusively by endSession).
+    (s) =>
+      s.after_status_z_path === undefined ||
+      (s.ended_at !== undefined && s.after_status_path !== undefined),
+    {
+      message: "after_status_z_path is valid only on ended sessions with after_status_path",
+      path: ["after_status_z_path"],
+    },
+  )
+  // M 0.8.0: the contribution path and its digest are a matched pair. A path
+  // without a digest is unverifiable evidence; a digest without a path names
+  // nothing. Neither half is useful alone, so neither may appear alone.
+  .refine((s) => (s.contribution_path === undefined) === (s.contribution_sha256 === undefined), {
+    message: "contribution_path and contribution_sha256 must both be present or both absent",
+    path: ["contribution_sha256"],
+  })
+  // M 0.8.0: a contribution exists only for an ENDED session, because the
+  // end-of-session capture transaction is what writes it. Same one-way coupling
+  // as after_status_z_path: an in-flight session carrying a contribution is
+  // incoherent, while an ended session without one is the legitimate legacy
+  // case.
+  .refine((s) => s.contribution_path === undefined || s.ended_at !== undefined, {
+    message: "contribution_path is valid only on ended sessions",
+    path: ["contribution_path"],
+  });
 export type SessionState = z.infer<typeof SessionStateSchema>;
 
 /**
@@ -469,6 +564,11 @@ export type SessionState = z.infer<typeof SessionStateSchema>;
  * Strict subset (`.pick()` on a `strictObject` returns a `strictObject`), so
  * unknown fields are rejected here too. No `ended_at` (an active session has
  * not ended), no path fields (those live in `session.json`).
+ *
+ * The evaluation snapshot is deliberately NOT picked: it lives in session.json,
+ * and duplicating it into the lock would create two copies of a
+ * safety-critical record that could drift. The lock carries the session id,
+ * which is all a reader needs to load the authoritative record.
  */
 export const ActiveSessionLockSchema = SessionStateBaseSchema.pick({
   schema_version: true,
@@ -506,7 +606,9 @@ export type ActiveSessionLock = z.infer<typeof ActiveSessionLockSchema>;
 //   tightened here at the wrapper). Anything reading `report.session_id`
 //   on an ad-hoc report should treat it as the report's own id, not as a
 //   session reference; the `kind` discriminator on the wrapper makes the
-//   distinction explicit.
+//   distinction explicit. That equality is also what lets
+//   `SessionReportSchema` verify `finding_id` derivations without seeing the
+//   wrapper.
 //
 // `since_kind` + `since_ref` + `since_resolved_sha` together fully describe
 // the diff base (per D56):
@@ -540,13 +642,6 @@ export const REPORT_FILE_SCHEMA_VERSION = "1.0" as const;
 
 export type ReportFileSchemaVersion = typeof REPORT_FILE_SCHEMA_VERSION;
 
-// Crockford base32 alphabet excludes I, L, O, U. The 26-char body comes after
-// the prefix. These regexes are used by the ReportFileSchema refines below to
-// catch typos and malformed ids that a naive .startsWith() check would miss
-// (e.g., "sess_garbage" or "sess_" alone).
-const SESS_ULID_REGEX = /^sess_[0-9A-HJKMNP-TV-Z]{26}$/;
-const RPT_ULID_REGEX = /^rpt_[0-9A-HJKMNP-TV-Z]{26}$/;
-
 // The locked `since_kind ↔ kind` consistency rule per D56:
 //   - session_bound  ↔ since_kind ∈ { session_id, active_session }
 //   - ad_hoc         ↔ since_kind ∈ { checkpoint_id, checkpoint_name, git_ref }
@@ -567,17 +662,25 @@ export const ReportFileSchema = z
     since_kind: SinceKindSchema,
     since_ref: nonBlankString,
     since_resolved_sha: nonBlankString,
+    // M 0.8.0: SHA-256 of the exact bytes of the contribution this report was
+    // computed from. Present only when evaluation actually consumed a persisted
+    // contribution, which in practice means an ENDED 0.8.0 session.
+    //
+    // Orthogonal to `since_resolved_sha`, not a replacement: that field records
+    // which GIT base the comparison used, this one records which persisted
+    // EVIDENCE was analyzed.
+    source_contribution_sha256: z.hash("sha256").optional(),
     staged_only: z.literal(true).optional(),
     written_at: z.iso.datetime({ offset: true, precision: 0 }),
     report: SessionReportSchema,
   })
   // (1) session_bound report_id must be a real sess_<26-char Crockford ULID>.
-  .refine((f) => f.kind !== "session_bound" || SESS_ULID_REGEX.test(f.report_id), {
+  .refine((f) => f.kind !== "session_bound" || SESSION_ID_REGEX.test(f.report_id), {
     message: "session_bound report_id must be a sess_<26-char Crockford ULID>",
     path: ["report_id"],
   })
   // (2) ad_hoc report_id must be a real rpt_<26-char Crockford ULID>.
-  .refine((f) => f.kind !== "ad_hoc" || RPT_ULID_REGEX.test(f.report_id), {
+  .refine((f) => f.kind !== "ad_hoc" || REPORT_ID_REGEX.test(f.report_id), {
     message: "ad_hoc report_id must be a rpt_<26-char Crockford ULID>",
     path: ["report_id"],
   })
@@ -606,6 +709,19 @@ export const ReportFileSchema = z
   .refine((f) => f.report.session_id === f.report_id, {
     message: "report.session_id must equal report_id",
     path: ["report", "session_id"],
+  })
+  // (6) M 0.8.0: a contribution binding is meaningful only for a session-bound
+  //     report. An ad-hoc report is computed from a git-ref or checkpoint base
+  //     against the live tree, with no contribution behind it.
+  //
+  //     Only the structural half is enforceable here. The producer invariant
+  //     "present iff evaluation consumed a persisted contribution" depends on
+  //     session state the schema cannot see: note that `since_kind: "session_id"`
+  //     also covers naming an ACTIVE session explicitly, which still takes the
+  //     live-diff path and therefore carries no binding.
+  .refine((f) => f.source_contribution_sha256 === undefined || f.kind === "session_bound", {
+    message: "source_contribution_sha256 requires kind='session_bound'",
+    path: ["source_contribution_sha256"],
   });
 export type ReportFile = z.infer<typeof ReportFileSchema>;
 
@@ -618,6 +734,11 @@ export type ReportFile = z.infer<typeof ReportFileSchema>;
 //   - dry_run  →  .viberevert/sessions/<sess>/rollback-dry-run-receipt.json
 // The split prevents dry-run from overwriting the apply audit record
 // (which would break D70's re-apply refusal).
+//
+// **M 0.8.0 note:** this artifact describes WHOLE-TREE rollback and is
+// deliberately untouched by selective rollback, which has its own artifact in
+// ./selective-rollback-receipt.js with its own version axis. The two share no
+// outcome vocabulary because they share no algorithm.
 //
 // 10 refines enforced:
 //   1-3. ULID format (rb_/sess_/cp_<26-char Crockford>)
@@ -647,6 +768,11 @@ export type ReceiptFileSchemaVersion = typeof RECEIPT_FILE_SCHEMA_VERSION;
  * `docs/rollback-contract.md` (in the "Out-of-scope boundary" section)
  * and in `@viberevert/reporters`'s human renderer. All three locations
  * MUST stay byte-identical.
+ *
+ * Also carried by the M 0.8.0 selective rollback receipt: selective restore
+ * does not suddenly reverse database migrations, deployments, or published
+ * packages, so omitting the warning from the newer artifact would be a
+ * regression in candor.
  */
 export const ROLLBACK_OUT_OF_SCOPE_NOTICE =
   "Vibe-revert restores tracked file content, untracked file content, and the git index. It does NOT restore: database schemas/data, deployed artifacts, package registry publishes (npm/pypi/etc.), external API state, environment variable mutations in the parent shell, OS-level state outside the repo, or any process-side effects. Recover those manually." as const;
@@ -717,11 +843,6 @@ export const RollbackFailureSchema = z.strictObject({
 });
 export type RollbackFailure = z.infer<typeof RollbackFailureSchema>;
 
-// ULID regexes for the receipt's three ID fields. Crockford alphabet
-// (excludes I, L, O, U); 26-char body after the prefix.
-const RB_ULID_REGEX = /^rb_[0-9A-HJKMNP-TV-Z]{26}$/;
-const CP_ULID_REGEX = /^cp_[0-9A-HJKMNP-TV-Z]{26}$/;
-
 export const ReceiptFileSchema = z
   .strictObject({
     schema_version: z.literal(RECEIPT_FILE_SCHEMA_VERSION),
@@ -742,17 +863,17 @@ export const ReceiptFileSchema = z
     un_ended_session_warning: z.literal(true).optional(),
   })
   // (1) rollback_id must be a real rb_<26-char Crockford ULID>.
-  .refine((r) => RB_ULID_REGEX.test(r.rollback_id), {
+  .refine((r) => ROLLBACK_ID_REGEX.test(r.rollback_id), {
     message: "rollback_id must be a rb_<26-char Crockford ULID>",
     path: ["rollback_id"],
   })
   // (2) session_id must be a real sess_<26-char Crockford ULID>.
-  .refine((r) => SESS_ULID_REGEX.test(r.session_id), {
+  .refine((r) => SESSION_ID_REGEX.test(r.session_id), {
     message: "session_id must be a sess_<26-char Crockford ULID>",
     path: ["session_id"],
   })
   // (3) checkpoint_id must be a real cp_<26-char Crockford ULID>.
-  .refine((r) => CP_ULID_REGEX.test(r.checkpoint_id), {
+  .refine((r) => CHECKPOINT_ID_REGEX.test(r.checkpoint_id), {
     message: "checkpoint_id must be a cp_<26-char Crockford ULID>",
     path: ["checkpoint_id"],
   })
@@ -768,7 +889,8 @@ export const ReceiptFileSchema = z
   //     "lol" or similar into a field meant to be a recovery handle.
   .refine(
     (r) =>
-      r.pre_rollback_checkpoint_id === null || CP_ULID_REGEX.test(r.pre_rollback_checkpoint_id),
+      r.pre_rollback_checkpoint_id === null ||
+      CHECKPOINT_ID_REGEX.test(r.pre_rollback_checkpoint_id),
     {
       message: "pre_rollback_checkpoint_id must be null or a cp_<26-char Crockford ULID>",
       path: ["pre_rollback_checkpoint_id"],

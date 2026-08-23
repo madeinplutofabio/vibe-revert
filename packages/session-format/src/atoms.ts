@@ -19,7 +19,8 @@
 //     normalizeStringArray.
 //   - PACKAGE-INTERNAL (used by sibling schema modules, NOT barrel-exported):
 //     nonBlankString, safeStoredRelativePath, sortedUniqueStringArray,
-//     sortedUniquePathArray, gitObjectId, sha256ObjectRef.
+//     sortedUniquePathArray, gitObjectId, sha256ObjectRef, and the four
+//     prefixed-ULID regexes.
 //
 // Scalar string schemas are pure validators (no silent trimming). Trimming
 // happens only in producer-side helpers like normalizeStringArray; path
@@ -235,3 +236,35 @@ export const gitObjectId = z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/, {
  * payload while this is a plain digest of the raw bytes.
  */
 export const sha256ObjectRef = z.hash("sha256");
+
+// =============================================================================
+// Prefixed-ULID identifier regexes
+//
+// VibeRevert's record ids are Crockford base32 ULIDs behind a kind prefix.
+// The alphabet deliberately EXCLUDES I, L, O, and U to avoid transcription
+// ambiguity, which is subtle enough that an independently retyped copy could
+// silently accept an invalid id. So the 26-character body is written once here
+// and every artifact schema imports the derived regex.
+//
+// Exposed as regexes rather than only as zod schemas because several call
+// sites test them inside an object-level `.refine()` -- `ReportFile.report_id`,
+// for instance, is `nonBlankString` at the field level and its required prefix
+// depends on the sibling `kind` discriminator.
+//
+// Package-internal; not barrel-exported.
+// =============================================================================
+
+/** The 26-character Crockford base32 ULID body, excluding I, L, O, U. */
+const ULID_BODY = "[0-9A-HJKMNP-TV-Z]{26}";
+
+/** Matches `sess_<26-char Crockford ULID>`. */
+export const SESSION_ID_REGEX = new RegExp(`^sess_${ULID_BODY}$`);
+
+/** Matches `cp_<26-char Crockford ULID>`. */
+export const CHECKPOINT_ID_REGEX = new RegExp(`^cp_${ULID_BODY}$`);
+
+/** Matches `rb_<26-char Crockford ULID>`. */
+export const ROLLBACK_ID_REGEX = new RegExp(`^rb_${ULID_BODY}$`);
+
+/** Matches `rpt_<26-char Crockford ULID>`. */
+export const REPORT_ID_REGEX = new RegExp(`^rpt_${ULID_BODY}$`);

@@ -35,7 +35,8 @@
 //
 // Canonical-set checks route through `isSortedUniqueStringArray` from
 // ./atoms.js rather than re-implementing the loop per field: the atoms module
-// exists so this semantics has exactly one implementation.
+// exists so this semantics has exactly one implementation. The prefixed-ULID
+// regexes come from the same place for the same reason.
 //
 // The same requirement is why `change_group_id` is DERIVED rather than randomly
 // generated -- and why the derivation is an exported FUNCTION here rather than
@@ -44,10 +45,12 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
+  CHECKPOINT_ID_REGEX,
   gitObjectId,
   isSortedUniqueStringArray,
   nonBlankString,
   normalizePathArray,
+  SESSION_ID_REGEX,
   safeStoredRelativePath,
   sortedUniqueStringArray,
 } from "./atoms.js";
@@ -345,8 +348,15 @@ const FacetSetSchema = z.array(ContributionFacetSchema).refine(isSortedUniqueStr
  * Shape of a `change_group_id`. The VALUE is produced exclusively by
  * `deriveChangeGroupId`; this validator pins only the format, and the
  * file-level refinements below re-derive and verify every group.
+ *
+ * Exported because other modules must validate the SHAPE of a change-group id
+ * without re-deriving it: the rollback attempt marker records a resolved
+ * selection as change-group ids, and CLI selection parsing validates
+ * user-supplied ids. Re-declaring this regex per consumer is exactly the drift
+ * risk that centralizing `gitObjectId` and `sha256ObjectRef` was meant to
+ * avoid.
  */
-const changeGroupId = z.string().regex(/^cg_[0-9a-f]{64}$/, {
+export const ChangeGroupIdSchema = z.string().regex(/^cg_[0-9a-f]{64}$/, {
   message: "must be cg_<64 lowercase hex SHA-256>",
 });
 
@@ -363,7 +373,7 @@ export const SessionContributionEntrySchema = z
     previous_path: safeStoredRelativePath.optional(),
     operation: ContributionOperationSchema,
     facets: FacetSetSchema,
-    change_group_id: changeGroupId,
+    change_group_id: ChangeGroupIdSchema,
     before: PathStateSchema,
     after: PathStateSchema,
     content_delta: ContentDeltaSchema,
@@ -385,9 +395,6 @@ export type SessionContributionEntry = z.infer<typeof SessionContributionEntrySc
 // =============================================================================
 // File
 // =============================================================================
-
-const SESS_ULID_REGEX = /^sess_[0-9A-HJKMNP-TV-Z]{26}$/;
-const CP_ULID_REGEX = /^cp_[0-9A-HJKMNP-TV-Z]{26}$/;
 
 /**
  * Group every entry's complete alias set by `change_group_id`.
@@ -462,11 +469,11 @@ export const SessionContributionFileSchema = z
     detected_frameworks_at_end: sortedUniqueStringArray.optional(),
     entries: z.array(SessionContributionEntrySchema),
   })
-  .refine((c) => SESS_ULID_REGEX.test(c.session_id), {
+  .refine((c) => SESSION_ID_REGEX.test(c.session_id), {
     message: "session_id must be a sess_<26-char Crockford ULID>",
     path: ["session_id"],
   })
-  .refine((c) => CP_ULID_REGEX.test(c.checkpoint_id), {
+  .refine((c) => CHECKPOINT_ID_REGEX.test(c.checkpoint_id), {
     message: "checkpoint_id must be a cp_<26-char Crockford ULID>",
     path: ["checkpoint_id"],
   })

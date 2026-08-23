@@ -14,6 +14,11 @@
 //     generic parameters).
 //   - <Thing>JsonSchema is the derived JSON Schema object (use for tooling /
 //     external publication).
+//
+// Note the risk level and its ordering (`RiskLevel`, `RiskLevelSchema`,
+// `compareLevel`, `riskLevelAtOrAbove`) are exported through `./schemas.js`,
+// which re-exports them from `./risk-level.js`. That keeps exactly one public
+// path for them even though the implementation moved.
 
 // JSON Schema exports.
 export {
@@ -91,16 +96,16 @@ export {
 } from "./schemas.js";
 
 // -----------------------------------------------------------------------------
-// M 0.8.0 -- session contribution and path state.
+// M 0.8.0 -- the durable session-history substrate.
 //
-// PathState is nested inside the contribution and is never written standalone,
-// but its schemas are exported because producers (@viberevert/git) build
-// PathState values directly and consumers (selective restore, verification)
-// compare them.
+// Five artifact families land here: the session contribution and its PathState,
+// finding identity, the session-start evaluation snapshot, the pre-mutation
+// rollback attempt marker, and the selective rollback receipt.
 //
-// `deriveChangeGroupId` is exported deliberately: the change-group derivation
-// is a persisted-format CONTRACT, and exporting the one implementation is what
-// stops a producer from reimplementing it and drifting.
+// The two DERIVATION helpers are exported deliberately. `deriveChangeGroupId`
+// and `deriveFindingId` are persisted-format CONTRACTS, not conveniences:
+// exporting the single implementation is what stops a producer reimplementing
+// the byte algorithm and drifting from what the schemas verify.
 // -----------------------------------------------------------------------------
 
 // Inferred TypeScript types.
@@ -117,6 +122,7 @@ export type {
 } from "./contribution.js";
 // Runtime zod schema values + the normative change-group derivation.
 export {
+  ChangeGroupIdSchema,
   CONTRIBUTION_FILE_SCHEMA_VERSION,
   ContentDeltaSchema,
   ContributionFacetSchema,
@@ -128,6 +134,23 @@ export {
   SessionContributionEntrySchema,
   SessionContributionFileSchema,
 } from "./contribution.js";
+// Inferred TypeScript types.
+export type {
+  EvaluationSnapshot,
+  ResolvedChecks,
+  SnapshotFrameworks,
+  VerifyCommand,
+} from "./evaluation-snapshot.js";
+// Runtime zod schema values.
+export {
+  EvaluationSnapshotSchema,
+  ResolvedChecksSchema,
+  SnapshotFrameworksSchema,
+  VerifyCommandSchema,
+} from "./evaluation-snapshot.js";
+
+// Finding identity: the shape validator and the normative derivation.
+export { deriveFindingId, FindingIdSchema } from "./finding-identity.js";
 // Inferred TypeScript types.
 export type {
   IndexEntryMode,
@@ -146,6 +169,48 @@ export {
   UnsupportedFsKindSchema,
   WorktreeStateSchema,
 } from "./path-state.js";
+
+// Inferred TypeScript types.
+export type {
+  RollbackAttempt,
+  RollbackAttemptSchemaVersion,
+  RollbackAttemptState,
+  RollbackSelection,
+  RollbackSelectors,
+} from "./rollback-attempt.js";
+// Runtime zod schema values.
+export {
+  ROLLBACK_ATTEMPT_SCHEMA_VERSION,
+  RollbackAttemptSchema,
+  RollbackAttemptStateSchema,
+  RollbackSelectionSchema,
+  RollbackSelectorsSchema,
+} from "./rollback-attempt.js";
+
+// Inferred TypeScript types.
+export type {
+  ApplyPathOutcome,
+  ApplyPathResult,
+  DryRunEligibility,
+  DryRunPathOutcome,
+  DryRunPathResult,
+  IntegrityAssessment,
+  ProjectVerificationState,
+  SelectiveRollbackReceipt,
+  SelectiveRollbackReceiptSchemaVersion,
+} from "./selective-rollback-receipt.js";
+// Runtime zod schema values.
+export {
+  ApplyPathOutcomeSchema,
+  ApplyPathResultSchema,
+  DryRunEligibilitySchema,
+  DryRunPathOutcomeSchema,
+  DryRunPathResultSchema,
+  IntegrityAssessmentSchema,
+  ProjectVerificationStateSchema,
+  SELECTIVE_ROLLBACK_RECEIPT_SCHEMA_VERSION,
+  SelectiveRollbackReceiptSchema,
+} from "./selective-rollback-receipt.js";
 
 export { VIBEREVERT_TEST_FIXED_NOW, VIBEREVERT_TEST_FIXED_ULID_SEED } from "./test-env-names.js";
 export { toIsoSecondString } from "./time.js";
