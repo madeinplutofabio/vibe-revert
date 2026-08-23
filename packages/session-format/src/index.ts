@@ -89,6 +89,64 @@ export {
   SessionStateSchema,
   SinceKindSchema,
 } from "./schemas.js";
+
+// -----------------------------------------------------------------------------
+// M 0.8.0 -- session contribution and path state.
+//
+// PathState is nested inside the contribution and is never written standalone,
+// but its schemas are exported because producers (@viberevert/git) build
+// PathState values directly and consumers (selective restore, verification)
+// compare them.
+//
+// `deriveChangeGroupId` is exported deliberately: the change-group derivation
+// is a persisted-format CONTRACT, and exporting the one implementation is what
+// stops a producer from reimplementing it and drifting.
+// -----------------------------------------------------------------------------
+
+// Inferred TypeScript types.
+export type {
+  ContentDelta,
+  ContributionFacet,
+  ContributionFileSchemaVersion,
+  ContributionOperation,
+  DiffHunk,
+  DiffLine,
+  DiffLineKind,
+  SessionContributionEntry,
+  SessionContributionFile,
+} from "./contribution.js";
+// Runtime zod schema values + the normative change-group derivation.
+export {
+  CONTRIBUTION_FILE_SCHEMA_VERSION,
+  ContentDeltaSchema,
+  ContributionFacetSchema,
+  ContributionOperationSchema,
+  DiffHunkSchema,
+  DiffLineKindSchema,
+  DiffLineSchema,
+  deriveChangeGroupId,
+  SessionContributionEntrySchema,
+  SessionContributionFileSchema,
+} from "./contribution.js";
+// Inferred TypeScript types.
+export type {
+  IndexEntryMode,
+  IndexState,
+  PathState,
+  UnmergedStage,
+  UnsupportedFsKind,
+  WorktreeState,
+} from "./path-state.js";
+// Runtime zod schema values.
+export {
+  IndexEntryModeSchema,
+  IndexStateSchema,
+  PathStateSchema,
+  UnmergedStageSchema,
+  UnsupportedFsKindSchema,
+  WorktreeStateSchema,
+} from "./path-state.js";
+
 export { VIBEREVERT_TEST_FIXED_NOW, VIBEREVERT_TEST_FIXED_ULID_SEED } from "./test-env-names.js";
 export { toIsoSecondString } from "./time.js";
 export type { SchemaVersion } from "./version.js";
