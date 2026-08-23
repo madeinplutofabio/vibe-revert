@@ -20,7 +20,9 @@
 // which re-exports them from `./risk-level.js`. That keeps exactly one public
 // path for them even though the implementation moved.
 
-// JSON Schema exports.
+// JSON Schema exports. ALL of them live in this one block, including the M
+// 0.8.0 artifacts declared further down, so the D21 invariant has a single
+// place to check.
 export {
   ActiveSessionLockJsonSchema,
   ChangedFileJsonSchema,
@@ -29,6 +31,9 @@ export {
   ManifestJsonSchema,
   ReceiptFileJsonSchema,
   ReportFileJsonSchema,
+  RollbackAttemptJsonSchema,
+  SelectiveRollbackReceiptJsonSchema,
+  SessionContributionFileJsonSchema,
   SessionReportJsonSchema,
   SessionStateJsonSchema,
 } from "./json-schema.js";
@@ -106,6 +111,11 @@ export {
 // and `deriveFindingId` are persisted-format CONTRACTS, not conveniences:
 // exporting the single implementation is what stops a producer reimplementing
 // the byte algorithm and drifting from what the schemas verify.
+//
+// Their derived JSON Schema exports (`SessionContributionFileJsonSchema`,
+// `RollbackAttemptJsonSchema`, `SelectiveRollbackReceiptJsonSchema`) are NOT
+// repeated in this section; they are grouped with every other `*JsonSchema` at
+// the top of this file.
 // -----------------------------------------------------------------------------
 
 // Inferred TypeScript types.

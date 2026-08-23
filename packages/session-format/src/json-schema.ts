@@ -27,10 +27,33 @@
 // SessionState additive after_status_z_path → ended one-way coupling refine);
 // those stay enforced only at the zod level.
 //
-// D21 invariant: every persisted-artifact zod schema in ./schemas.ts MUST have
-// a corresponding *JsonSchema export here, re-exported from ./index.ts.
+// The M 0.8.0 artifacts extend that list substantially, and the gap is wider
+// here than anywhere else in the package. SessionContributionFile's
+// change-group derivation and cross-field entry rules; RollbackAttempt's ULID
+// refinements, at-least-one-selector-family rule, and sorted/unique selector
+// and resolved-group refinements; and every one of
+// SelectiveRollbackReceipt's file-level refines -- the result/group
+// correspondence in both directions, dry-run eligibility coupling, the
+// post-command-integrity iff, both directions of the verification-stage
+// reachability rule, and the succeeded-conjunction -- are Zod-only. A consumer
+// validating a selective rollback receipt against
+// SelectiveRollbackReceiptJsonSchema alone learns that the FIELDS are well
+// formed; it does not establish the Zod-only cross-field consistency
+// guarantees. Structural validation is not evidence verification.
+//
+// SelectiveRollbackReceiptJsonSchema is also the first export here whose root is
+// a `oneOf` rather than a `type: "object"`, because its zod root is a
+// discriminated union on `mode`. Tooling that assumes every export in this
+// module roots as an object must be updated rather than fed this one.
+//
+// D21 invariant: every top-level persisted-artifact zod schema in this package
+// MUST have a corresponding *JsonSchema export here, re-exported from
+// ./index.ts. Nested component schemas need an independent export only when
+// they are themselves part of the intended external tooling surface.
 
 import { z } from "zod";
+import { SessionContributionFileSchema } from "./contribution.js";
+import { RollbackAttemptSchema } from "./rollback-attempt.js";
 import {
   ActiveSessionLockSchema,
   ChangedFileSchema,
@@ -42,6 +65,7 @@ import {
   SessionReportSchema,
   SessionStateSchema,
 } from "./schemas.js";
+import { SelectiveRollbackReceiptSchema } from "./selective-rollback-receipt.js";
 
 const JSON_SCHEMA_OPTIONS = { target: "draft-2020-12" as const };
 
@@ -57,3 +81,17 @@ export const ActiveSessionLockJsonSchema = z.toJSONSchema(
 );
 export const ReportFileJsonSchema = z.toJSONSchema(ReportFileSchema, JSON_SCHEMA_OPTIONS);
 export const ReceiptFileJsonSchema = z.toJSONSchema(ReceiptFileSchema, JSON_SCHEMA_OPTIONS);
+
+// M 0.8.0 persisted artifacts. The evaluation snapshot takes no export of its
+// own: it is embedded in session.json rather than written standalone, so it
+// already appears inside SessionStateJsonSchema. PathState and ContentDelta are
+// likewise reachable inside SessionContributionFileJsonSchema.
+export const SessionContributionFileJsonSchema = z.toJSONSchema(
+  SessionContributionFileSchema,
+  JSON_SCHEMA_OPTIONS,
+);
+export const RollbackAttemptJsonSchema = z.toJSONSchema(RollbackAttemptSchema, JSON_SCHEMA_OPTIONS);
+export const SelectiveRollbackReceiptJsonSchema = z.toJSONSchema(
+  SelectiveRollbackReceiptSchema,
+  JSON_SCHEMA_OPTIONS,
+);

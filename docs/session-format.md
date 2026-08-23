@@ -75,8 +75,8 @@ not a persisted format.
 
 ## Schema versions
 
-Each versioned file embeds a `schema_version`. There are **four independent
-version constants**, and they do **not** advance together — a change to one does
+Each versioned file embeds a `schema_version`. There are **seven independent
+version constants**, and they do **not** advance together: a change to one does
 not force a bump in the others. They happen to share the value `1.0` today.
 
 | Format axis | Version constant | Current version |
@@ -85,6 +85,14 @@ not force a bump in the others. They happen to share the value `1.0` today.
 | Checkpoint manifest and report body | `SCHEMA_VERSION` | `1.0` |
 | Report-file wrapper | `REPORT_FILE_SCHEMA_VERSION` | `1.0` |
 | Rollback receipt | `RECEIPT_FILE_SCHEMA_VERSION` | `1.0` |
+| Session contribution | `CONTRIBUTION_FILE_SCHEMA_VERSION` | `1.0` |
+| Rollback attempt marker | `ROLLBACK_ATTEMPT_SCHEMA_VERSION` | `1.0` |
+| Selective rollback receipt | `SELECTIVE_ROLLBACK_RECEIPT_SCHEMA_VERSION` | `1.0` |
+
+The last three axes are **declared, not yet produced**. Their schemas ship in
+`@viberevert/session-format` so the formats are defined and reviewable ahead of the
+commands that will write them. No VibeRevert command creates those files today,
+which is why the directory layout and the file inventory above do not list them.
 
 A `report.json` therefore carries **two** `schema_version` fields: the outer
 `ReportFile` (`REPORT_FILE_SCHEMA_VERSION`) and the inner report
