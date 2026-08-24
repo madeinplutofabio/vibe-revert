@@ -1,17 +1,61 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Fabio Marcello Salvadori
 
-// Framework detection — D42 single source of truth for both:
+// Framework detection — D42 single source of truth for:
 //   - `viberevert init` (M A): consumes the structured DetectionResult
 //     for profile selection and the ambiguity-prompt path.
 //   - `viberevert check` (M C): consumes the flat readonly string[] of
 //     detected framework names to populate ctx.detectedFrameworks and
 //     SessionReport.detected_frameworks.
+//   - M 0.8.0 end-capture: derives `detected_frameworks_at_end` from a
+//     captured observation set rather than from the live tree.
 //
 // This module was extracted from `packages/cli/src/detect.ts` to honor
 // D42's "Single source of truth — no duplicate detector" lock. The CLI
 // (M A's init) and the CLI's check command (M C) both import from here
 // via the @viberevert/core barrel.
+//
+// ============================================================================
+// Acquisition vs evaluation (M 0.8.0)
+// ============================================================================
+//
+// The signature rules and the way they combine are ONE thing; how the
+// filesystem facts are obtained is another. They are now separated:
+//
+//   PathProbe            answers isFile / isDirectory for one repo-relative
+//                        POSIX path
+//   DETECTORS            express every signature purely in terms of a probe
+//   liveProbe            acquisition from the working tree, unchanged
+//   observedProbe        acquisition from captured WorktreeStates
+//
+// Both acquisitions feed the SAME evaluator, so end-capture cannot grow a
+// second detector that drifts from init's. That is D42 applied one level
+// down: the rule was already centralized, and this keeps it centralized as
+// a second caller appears.
+//
+// PathProbe carries the two predicates separately rather than a single
+// tri-state classifier, because each signature must issue exactly the
+// filesystem observations it issued before. Laravel asks only isFile,
+// Lovable asks only isDirectory. A classifier that computed both up front
+// would add observations that never happened, changing the live detector's
+// race behavior even though its stable-tree answers would agree.
+//
+// **The two acquisitions are NOT equivalent for symlinks, deliberately.**
+// Live isFile/isDirectory use `statSync`, which FOLLOWS symlinks, so a
+// symlinked `composer.json` counts as a file, and that shipped behavior is
+// unchanged. A captured `WorktreeState` records `symlink` as its own kind
+// and carries only a digest of the target STRING, so an observed
+// acquisition has nothing to resolve and answers false to both predicates.
+// This asymmetry is forced by what each source can actually know, and it
+// inherits the never-follow discipline the observation layer applies.
+//
+// **FRAMEWORK_OBSERVATION_PATHS is derived, not maintained, and enforced.**
+// It is the sorted union of the paths each detector declares. A hand-written
+// list beside the detectors would be exactly the drift D42 exists to
+// prevent, one level down. `detectFrameworksFromObservedStates` validates
+// the whole set is present BEFORE evaluating anything, so an incomplete
+// capture raises rather than quietly reporting "framework not detected" and
+// suppressing a framework the session introduced.
 //
 // Pure logic: file-presence signatures only (no content sniffing, no
 // network, no process state mutation). Synchronous Node fs APIs under
@@ -20,6 +64,8 @@
 
 import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
+
+import type { WorktreeState } from "@viberevert/session-format";
 
 /**
  * The set of built-in profile names known to the detector. Other
@@ -66,10 +112,19 @@ const DISPLAY_PRIORITY: readonly KnownProfile[] = [
 ];
 
 // =============================================================================
-// Per-profile signature checks (file-presence only — no content sniffing).
-// Signatures are documented inline so future contributors know exactly what
-// each detector requires.
+// Acquisition
 // =============================================================================
+
+/**
+ * What a signature is allowed to ask about one repo-relative POSIX path.
+ *
+ * Deliberately two independent predicates. See the header note on why this
+ * is not a single tri-state classifier.
+ */
+type PathProbe = {
+  readonly isFile: (relPath: string) => boolean;
+  readonly isDirectory: (relPath: string) => boolean;
+};
 
 function isFile(p: string): boolean {
   if (!existsSync(p)) return false;
@@ -89,33 +144,82 @@ function isDirectory(p: string): boolean {
   }
 }
 
+/**
+ * Acquisition from the live working tree. Each predicate delegates
+ * straight to the helper the signatures called before this split, over
+ * the same `join(root, relPath)` argument, so the observations issued are
+ * unchanged in kind, count, and order.
+ */
+function liveProbe(root: string): PathProbe {
+  return {
+    isFile: (relPath) => isFile(join(root, relPath)),
+    isDirectory: (relPath) => isDirectory(join(root, relPath)),
+  };
+}
+
+/**
+ * Acquisition from captured worktree states.
+ *
+ * A path with no captured state THROWS rather than answering false. An
+ * actually-absent path is already represented explicitly as
+ * `{ kind: "absent" }`, so a missing map entry can only mean the caller
+ * did not supply a required observation.
+ *
+ * This is defense in depth: `detectFrameworksFromObservedStates` has
+ * already proven the whole observation set present before evaluation
+ * begins, so reaching this throw means a future internal caller built a
+ * probe without that check.
+ *
+ * `symlink` answers false to both predicates rather than following the
+ * target. See the asymmetry note in this file's header.
+ */
+function observedProbe(states: ReadonlyMap<string, WorktreeState>): PathProbe {
+  const kindOf = (relPath: string): WorktreeState["kind"] => {
+    const state = states.get(relPath);
+    if (state === undefined) {
+      throw new Error(
+        `detectFrameworksFromObservedStates: missing required observation for ${JSON.stringify(relPath)}`,
+      );
+    }
+    return state.kind;
+  };
+  return {
+    isFile: (relPath) => kindOf(relPath) === "regular",
+    isDirectory: (relPath) => kindOf(relPath) === "directory",
+  };
+}
+
+// =============================================================================
+// Per-profile signature checks (file-presence only — no content sniffing).
+// Signatures are documented inline so future contributors know exactly what
+// each detector requires.
+// =============================================================================
+
 /** Laravel: requires composer.json AND artisan (both regular files). */
-function detectLaravel(root: string): boolean {
-  return isFile(join(root, "composer.json")) && isFile(join(root, "artisan"));
+function detectLaravel(probe: PathProbe): boolean {
+  return probe.isFile("composer.json") && probe.isFile("artisan");
 }
 
 /** Next.js: any of next.config.{js,ts,mjs,cjs} (regular file). */
-function detectNextjs(root: string): boolean {
+function detectNextjs(probe: PathProbe): boolean {
   return (
-    isFile(join(root, "next.config.js")) ||
-    isFile(join(root, "next.config.ts")) ||
-    isFile(join(root, "next.config.mjs")) ||
-    isFile(join(root, "next.config.cjs"))
+    probe.isFile("next.config.js") ||
+    probe.isFile("next.config.ts") ||
+    probe.isFile("next.config.mjs") ||
+    probe.isFile("next.config.cjs")
   );
 }
 
 /** Python: any of pyproject.toml OR manage.py OR requirements.txt. */
-function detectPython(root: string): boolean {
+function detectPython(probe: PathProbe): boolean {
   return (
-    isFile(join(root, "pyproject.toml")) ||
-    isFile(join(root, "manage.py")) ||
-    isFile(join(root, "requirements.txt"))
+    probe.isFile("pyproject.toml") || probe.isFile("manage.py") || probe.isFile("requirements.txt")
   );
 }
 
 /** Rails: requires Gemfile AND config/routes.rb (both regular files). */
-function detectRails(root: string): boolean {
-  return isFile(join(root, "Gemfile")) && isFile(join(root, "config/routes.rb"));
+function detectRails(probe: PathProbe): boolean {
+  return probe.isFile("Gemfile") && probe.isFile("config/routes.rb");
 }
 
 /**
@@ -123,21 +227,66 @@ function detectRails(root: string): boolean {
  * heuristic; Lovable's repo conventions may evolve, and additional
  * markers may be added later.
  */
-function detectLovable(root: string): boolean {
-  return isDirectory(join(root, ".lovable"));
+function detectLovable(probe: PathProbe): boolean {
+  return probe.isDirectory(".lovable");
 }
 
-/** Detector registry. Order is irrelevant; results are sorted at the end. */
+/**
+ * Detector registry. Order is irrelevant; results are sorted at the end.
+ *
+ * `paths` declares every repo-relative path the entry's `check` may probe.
+ * FRAMEWORK_OBSERVATION_PATHS is derived from these declarations, and a
+ * test asserts no detector probes a path it did not declare.
+ */
 const DETECTORS: ReadonlyArray<{
   profile: KnownProfile;
-  check: (root: string) => boolean;
+  paths: readonly string[];
+  check: (probe: PathProbe) => boolean;
 }> = [
-  { profile: "laravel", check: detectLaravel },
-  { profile: "lovable", check: detectLovable },
-  { profile: "nextjs", check: detectNextjs },
-  { profile: "python", check: detectPython },
-  { profile: "rails", check: detectRails },
+  { profile: "laravel", paths: ["composer.json", "artisan"], check: detectLaravel },
+  { profile: "lovable", paths: [".lovable"], check: detectLovable },
+  {
+    profile: "nextjs",
+    paths: ["next.config.js", "next.config.ts", "next.config.mjs", "next.config.cjs"],
+    check: detectNextjs,
+  },
+  {
+    profile: "python",
+    paths: ["pyproject.toml", "manage.py", "requirements.txt"],
+    check: detectPython,
+  },
+  { profile: "rails", paths: ["Gemfile", "config/routes.rb"], check: detectRails },
 ];
+
+/**
+ * Every repo-relative path any built-in signature inspects, sorted and
+ * deduplicated.
+ *
+ * M 0.8.0 end-capture unions this with its candidate set so the signature
+ * paths are observed exactly once, in the same coherent pass, whether or
+ * not they also changed during the session.
+ *
+ * This is a hard input requirement of
+ * `detectFrameworksFromObservedStates`, not advice: that function refuses
+ * a states map missing any member.
+ */
+export const FRAMEWORK_OBSERVATION_PATHS: readonly string[] = [
+  ...new Set(DETECTORS.flatMap((d) => d.paths)),
+].sort();
+
+// =============================================================================
+// Evaluation
+// =============================================================================
+
+/** Run every signature against one acquisition. Sorted alphabetically. */
+function evaluate(probe: PathProbe): KnownProfile[] {
+  const matches: KnownProfile[] = [];
+  for (const { profile, check } of DETECTORS) {
+    if (check(probe)) matches.push(profile);
+  }
+  matches.sort();
+  return matches;
+}
 
 /**
  * Detects which built-in framework profiles match the given repository
@@ -156,11 +305,7 @@ const DETECTORS: ReadonlyArray<{
  * Pure function. Does not chdir, does not mutate process state.
  */
 export function detectFramework(root: string): DetectionResult {
-  const matches: KnownProfile[] = [];
-  for (const { profile, check } of DETECTORS) {
-    if (check(root)) matches.push(profile);
-  }
-  matches.sort();
+  const matches = evaluate(liveProbe(root));
 
   if (matches.length === 0) {
     return { matches: [], resolution: "generic" };
@@ -204,3 +349,46 @@ export function detectFramework(root: string): DetectionResult {
 export function detectFrameworks(repoRoot: string): Promise<readonly string[]> {
   return Promise.resolve(detectFramework(repoRoot).matches);
 }
+
+/**
+ * M 0.8.0: the same signatures evaluated against CAPTURED worktree states
+ * instead of the live tree.
+ *
+ * End-capture must derive `detected_frameworks_at_end` from the coherent
+ * observation set it fenced, not from a fresh filesystem read that could
+ * disagree with everything else the contribution asserts. Feeding those
+ * states through the shared evaluator keeps the signature rules in one
+ * place while changing only where the facts come from.
+ *
+ * Returns sorted, duplicate-free names, which is what the contribution's
+ * `detected_frameworks_at_end` requires.
+ *
+ * **Refuses an incomplete observation map.** Every
+ * FRAMEWORK_OBSERVATION_PATHS member must be present before any signature
+ * is evaluated. Validating eagerly rather than on demand matters because
+ * short-circuit evaluation would otherwise let a missing mandatory
+ * observation through whenever an earlier predicate already decided the
+ * signature, accepting evidence that does not meet the contract.
+ * `{ kind: "absent" }` is the way to say a path is not there.
+ *
+ * Symlinked signature files do NOT match here even though they would
+ * match `detectFramework`. See this file's header.
+ */
+export function detectFrameworksFromObservedStates(
+  states: ReadonlyMap<string, WorktreeState>,
+): readonly string[] {
+  for (const path of FRAMEWORK_OBSERVATION_PATHS) {
+    if (!states.has(path)) {
+      throw new Error(
+        `detectFrameworksFromObservedStates: missing required observation for ${JSON.stringify(path)}`,
+      );
+    }
+  }
+  return evaluate(observedProbe(states));
+}
+
+// =============================================================================
+// Test-only exports (NOT in barrel; _*ForTests convention)
+// =============================================================================
+
+export const _detectorsForTests = DETECTORS;

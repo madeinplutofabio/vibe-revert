@@ -22,12 +22,25 @@
 //     - Config (type), ConfigSchema (zod value), loadConfig
 //     - ConfigNotFoundError, ConfigParseError, ConfigValidationError
 //
-//   Framework detection (M A + M C -- D42 single source of truth):
+//   Framework detection (M A + M C + M 0.8.0 -- D42 single source of truth):
 //     - detectFramework (M A): returns the structured DetectionResult
 //       used by init's profile selection and ambiguity-prompt path
 //     - detectFrameworks (M C): returns Promise<readonly string[]> of
 //       matches, consumed by `viberevert check` to populate
 //       ctx.detectedFrameworks and SessionReport.detected_frameworks
+//     - detectFrameworksFromObservedStates (M 0.8.0): the same
+//       signatures evaluated against captured WorktreeStates instead
+//       of the live tree, so end-capture derives
+//       detected_frameworks_at_end from the coherent observation set
+//       it fenced rather than from a fresh read that could disagree
+//       with everything else the contribution asserts. Refuses an
+//       observation map missing any FRAMEWORK_OBSERVATION_PATHS
+//       member instead of reporting "not detected".
+//     - FRAMEWORK_OBSERVATION_PATHS (M 0.8.0): the derived set of
+//       signature paths end-capture must add to its observation set.
+//       Exported because the caller assembling that set needs to know
+//       what to observe; deriving the list at the call site instead
+//       would recreate exactly the duplicate detector D42 forbids.
 //     - KnownProfile, DetectionResult, Resolution types
 //
 //   Policy resolution (M G1a Step 3.5a -- promoted from cli-commands):
@@ -88,6 +101,13 @@
 //     consumes writeFileAtomic internally and does NOT re-export it: the
 //     store's public contract is content addressing, not file IO.
 //
+//   - _detectorsForTests from framework-detect.ts (M 0.8.0): the
+//     detector registry is an implementation detail. It is reachable
+//     from the package's own tests through the internal module path so
+//     they can assert the declared-paths invariant, and publishing it
+//     would invite a consumer to evaluate signatures itself, which is
+//     the duplicate detector D42 exists to prevent.
+//
 //   - SessionState, ActiveSessionLock (and their *Schema / *JsonSchema
 //     companions): defined in @viberevert/session-format, not in core.
 //     Consumers needing these types import directly from
@@ -108,8 +128,14 @@ export {
 
 // Inferred TypeScript types: framework detection (M A + M C).
 export type { DetectionResult, KnownProfile, Resolution } from "./framework-detect.js";
-// Runtime values: framework detection (D42 single source of truth).
-export { detectFramework, detectFrameworks } from "./framework-detect.js";
+// Runtime values: framework detection (D42 single source of truth), live
+// acquisition (M A + M C) and observed-state acquisition (M 0.8.0).
+export {
+  detectFramework,
+  detectFrameworks,
+  detectFrameworksFromObservedStates,
+  FRAMEWORK_OBSERVATION_PATHS,
+} from "./framework-detect.js";
 // Runtime values: identity generators (M B + M C + M D -- D5/D16/D27/D71).
 export { generateReportId, generateRollbackId, generateSessionId } from "./ids.js";
 // Content-addressed object store (M 0.8.0).
