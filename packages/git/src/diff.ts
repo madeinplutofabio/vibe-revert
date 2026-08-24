@@ -20,15 +20,20 @@
 //
 //   getDiffSinceCheckpoint(repoRoot, checkpointDir, opts)
 //     Diff base = a captured checkpoint's working state.
-//     Single bounded tempRoot lifecycle:
+//     The scratch lifecycle — tempRoot, the linked worktree at
+//     manifest.git.head_sha, the restoreCheckpoint overlay using the
+//     manifest's CAPTURED untracked.exclude_patterns, and best-effort
+//     cleanup — belongs to withCheckpointOracle in checkpoint-oracle.ts.
+//     Layout inside the oracle's single bounded tempRoot:
 //       tempRoot/worktree/   linked worktree at manifest.git.head_sha
 //       tempRoot/base/       copy of candidate regular files (base side)
 //       tempRoot/live/       copy of candidate regular files (live side)
-//     Bootstraps the base via `git worktree add --detach`, overlays dirt
-//     via reused restoreCheckpoint() (passing the manifest's CAPTURED
-//     untracked.exclude_patterns), enumerates candidate paths from BOTH
-//     sides via `git ls-files -z --cached --others --exclude-standard`,
-//     filters by opts.liveExcludePatterns + the always-on .viberevert/
+//     The two mirror dirs are created through the oracle's prepareTempRoot
+//     hook, which runs BEFORE the worktree is added; that position preserves
+//     the shipped failure ordering and is documented in checkpoint-oracle.ts.
+//     This function then enumerates candidate paths from BOTH sides via
+//     `git ls-files -z --cached --others --exclude-standard`, filters by
+//     opts.liveExcludePatterns + the always-on .viberevert/
 //     defense-in-depth, copies regular files into sanitized mirror dirs,
 //     runs one bounded:
 //       `git diff --no-color -U0 --binary -M --no-ext-diff --no-textconv
@@ -45,6 +50,8 @@
 // whether to log to its OWN stderr. When the main algorithm throws and
 // cleanup ALSO produces warnings, those warnings are attached to the
 // thrown error as a `cleanupWarnings` property so they survive the throw.
+// For the checkpoint base that behavior now lives in withCheckpointOracle;
+// getDiffSinceRef owns no scratch state and always returns an empty list.
 //
 // Non-regular files (symlinks, sockets, FIFOs, devices) are SILENTLY
 // SKIPPED during untracked enumeration and mirror construction —
@@ -83,13 +90,12 @@
 // callers that catch the diff-specific error type.
 
 import type { Stats } from "node:fs";
-import { copyFile, lstat, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { copyFile, lstat, mkdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import picomatch from "picomatch";
 
-import { loadCheckpoint } from "./checkpoint.js";
+import { withCheckpointOracle } from "./checkpoint-oracle.js";
 import {
   CommitRefNotFoundError,
   resolveCommitRef,
@@ -97,7 +103,6 @@ import {
   runGitText,
   splitNulList,
 } from "./git-cli.js";
-import { restoreCheckpoint } from "./restore.js";
 
 // ============================================================================
 // Public types
@@ -251,6 +256,13 @@ const VIBEREVERT_DIR_PREFIX = ".viberevert/";
 const MIRROR_BASE_DIR = "base";
 /** Basename of the live-side mirror dir inside tempRoot. */
 const MIRROR_LIVE_DIR = "live";
+
+/**
+ * mkdtemp prefix for this module's checkpoint-oracle scratch root. Passed
+ * explicitly because the prefix appears verbatim in cleanup warnings, so each
+ * oracle consumer names its own.
+ */
+const DIFF_TEMP_DIR_PREFIX = "viberevert-diff-";
 
 // ============================================================================
 // Path safety (throws — never silent skip)
@@ -750,47 +762,6 @@ async function copyToMirror(
 }
 
 // ============================================================================
-// Cleanup (best-effort; populates warnings; never throws)
-// ============================================================================
-
-async function cleanupBestEffort(
-  repoRoot: string,
-  tempRoot: string | null,
-  worktreePath: string | null,
-  worktreeAdded: boolean,
-  warnings: string[],
-): Promise<void> {
-  if (worktreeAdded && worktreePath !== null) {
-    try {
-      await runGit(repoRoot, ["worktree", "remove", "--force", worktreePath]);
-    } catch (e) {
-      warnings.push(`git worktree remove --force failed for ${worktreePath}: ${stringifyErr(e)}`);
-      try {
-        await runGit(repoRoot, ["worktree", "prune"]);
-      } catch (e2) {
-        warnings.push(`git worktree prune fallback failed: ${stringifyErr(e2)}`);
-      }
-    }
-  }
-  if (tempRoot !== null) {
-    try {
-      await rm(tempRoot, { recursive: true, force: true });
-    } catch (e) {
-      warnings.push(`rm -rf ${tempRoot} failed: ${stringifyErr(e)}`);
-    }
-  }
-}
-
-function stringifyErr(e: unknown): string {
-  if (e instanceof Error) return e.message;
-  try {
-    return JSON.stringify(e);
-  } catch {
-    return String(e);
-  }
-}
-
-// ============================================================================
 // Public — git-ref base
 // ============================================================================
 
@@ -843,114 +814,89 @@ export async function getDiffSinceCheckpoint(
   checkpointDir: string,
   opts: DiffSinceCheckpointOptions = {},
 ): Promise<DiffResult> {
-  const warnings: string[] = [];
-  let tempRoot: string | null = null;
-  let worktreePath: string | null = null;
-  let worktreeAdded = false;
-  let mainError: unknown = null;
-  try {
-    const manifest = await loadCheckpoint(checkpointDir);
-    const headSha = manifest.git.head_sha;
+  const { value, cleanupWarnings } = await withCheckpointOracle(repoRoot, checkpointDir, {
+    tempDirPrefix: DIFF_TEMP_DIR_PREFIX,
+    // Mirror dirs are created while NO worktree exists yet. That position is
+    // the shipped failure ordering, not a convenience; see
+    // checkpoint-oracle.ts.
+    prepareTempRoot: async (tempRoot) => {
+      await mkdir(join(tempRoot, MIRROR_BASE_DIR), { recursive: true });
+      await mkdir(join(tempRoot, MIRROR_LIVE_DIR), { recursive: true });
+    },
+    run: async ({ tempRoot, worktreePath }) => {
+      const mirrorBase = join(tempRoot, MIRROR_BASE_DIR);
+      const mirrorLive = join(tempRoot, MIRROR_LIVE_DIR);
 
-    // Single bounded tempRoot; all scratch state lives under it.
-    tempRoot = await mkdtemp(join(tmpdir(), "viberevert-diff-"));
-    worktreePath = join(tempRoot, "worktree");
-    const mirrorBase = join(tempRoot, MIRROR_BASE_DIR);
-    const mirrorLive = join(tempRoot, MIRROR_LIVE_DIR);
-    await mkdir(mirrorBase, { recursive: true });
-    await mkdir(mirrorLive, { recursive: true });
+      // 1. Enumerate candidate paths from BOTH sides (auto-respects .gitignore).
+      const [scratchBuf, liveBuf] = await Promise.all([
+        runGit(worktreePath, ["ls-files", "-z", "--cached", "--others", "--exclude-standard"]),
+        runGit(repoRoot, ["ls-files", "-z", "--cached", "--others", "--exclude-standard"]),
+      ]);
+      const scratchPaths = splitNulList(scratchBuf).filter((p) => p.length > 0);
+      const livePaths = splitNulList(liveBuf).filter((p) => p.length > 0);
 
-    // 1. Bootstrap linked worktree at captured HEAD.
-    await runGit(repoRoot, ["worktree", "add", "--detach", worktreePath, headSha]);
-    worktreeAdded = true;
+      const candidateSet = new Set<string>();
+      for (const p of scratchPaths) candidateSet.add(p);
+      for (const p of livePaths) candidateSet.add(p);
 
-    // 2. Overlay captured dirt using the CAPTURED exclude patterns (faithful
-    //    reproduction of capture state, NOT current config).
-    await restoreCheckpoint(checkpointDir, {
-      repoRoot: worktreePath,
-      rollbackExcludePatterns: manifest.untracked.exclude_patterns ?? [],
-    });
-
-    // 3. Enumerate candidate paths from BOTH sides (auto-respects .gitignore).
-    const [scratchBuf, liveBuf] = await Promise.all([
-      runGit(worktreePath, ["ls-files", "-z", "--cached", "--others", "--exclude-standard"]),
-      runGit(repoRoot, ["ls-files", "-z", "--cached", "--others", "--exclude-standard"]),
-    ]);
-    const scratchPaths = splitNulList(scratchBuf).filter((p) => p.length > 0);
-    const livePaths = splitNulList(liveBuf).filter((p) => p.length > 0);
-
-    const candidateSet = new Set<string>();
-    for (const p of scratchPaths) candidateSet.add(p);
-    for (const p of livePaths) candidateSet.add(p);
-
-    // 4. Filter by liveExcludePatterns + always-on `.viberevert/` defense.
-    //    Unsafe paths from ls-files THROW (misconfiguration signal).
-    const livePatterns = opts.liveExcludePatterns ?? [];
-    const matchers = livePatterns.map((pat) => picomatch(pat, PICOMATCH_OPTIONS));
-    const filtered: string[] = [];
-    for (const p of candidateSet) {
-      assertSafeRepoRelativePath(p, "getDiffSinceCheckpoint.candidate");
-      // assertSafeRepoRelativePath already throws on .viberevert/ paths.
-      let excluded = false;
-      for (const m of matchers) {
-        if (m(p)) {
-          excluded = true;
-          break;
+      // 2. Filter by liveExcludePatterns + always-on `.viberevert/` defense.
+      //    Unsafe paths from ls-files THROW (misconfiguration signal).
+      const livePatterns = opts.liveExcludePatterns ?? [];
+      const matchers = livePatterns.map((pat) => picomatch(pat, PICOMATCH_OPTIONS));
+      const filtered: string[] = [];
+      for (const p of candidateSet) {
+        assertSafeRepoRelativePath(p, "getDiffSinceCheckpoint.candidate");
+        // assertSafeRepoRelativePath already throws on .viberevert/ paths.
+        let excluded = false;
+        for (const m of matchers) {
+          if (m(p)) {
+            excluded = true;
+            break;
+          }
         }
+        if (!excluded) filtered.push(p);
       }
-      if (!excluded) filtered.push(p);
-    }
-    // Deterministic copy + downstream diff order.
-    filtered.sort();
+      // Deterministic copy + downstream diff order.
+      filtered.sort();
 
-    // 5. Copy regular files into sanitized mirror dirs (lstat — skips symlinks).
-    await copyToMirror(worktreePath, mirrorBase, filtered);
-    await copyToMirror(repoRoot, mirrorLive, filtered);
+      // 3. Copy regular files into sanitized mirror dirs (lstat — skips symlinks).
+      await copyToMirror(worktreePath, mirrorBase, filtered);
+      await copyToMirror(repoRoot, mirrorLive, filtered);
 
-    // 6. Single bounded mirror-vs-mirror diff with cwd=tempRoot + basename
-    //    operands. Exit 1 = differences exist = success per --no-index contract.
-    const unifiedText = await runGitText(
-      tempRoot,
-      [
-        "diff",
-        "--no-color",
-        "-U0",
-        "--binary",
-        "-M",
-        "--no-ext-diff",
-        "--no-textconv",
-        "--src-prefix=a/",
-        "--dst-prefix=b/",
-        "--no-index",
-        "--",
-        MIRROR_BASE_DIR,
-        MIRROR_LIVE_DIR,
-      ],
-      { allowedExitCodes: [1] },
-    );
+      // 4. Single bounded mirror-vs-mirror diff with cwd=tempRoot + basename
+      //    operands. Exit 1 = differences exist = success per --no-index contract.
+      const unifiedText = await runGitText(
+        tempRoot,
+        [
+          "diff",
+          "--no-color",
+          "-U0",
+          "--binary",
+          "-M",
+          "--no-ext-diff",
+          "--no-textconv",
+          "--src-prefix=a/",
+          "--dst-prefix=b/",
+          "--no-index",
+          "--",
+          MIRROR_BASE_DIR,
+          MIRROR_LIVE_DIR,
+        ],
+        { allowedExitCodes: [1] },
+      );
 
-    // 7. Parse; strip `base/` and `live/` mirror prefixes; derive status from
-    //    unified-diff headers.
-    const unified = parseUnifiedDiff(unifiedText, {
-      stripPrefixes: true,
-      additionalStripPrefixes: [`${MIRROR_BASE_DIR}/`, `${MIRROR_LIVE_DIR}/`],
-    });
-    const entries = unifiedToRawEntries(unified);
-    const sorted = [...entries].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
-    return { diff: { entries: sorted }, cleanupWarnings: warnings };
-  } catch (e) {
-    mainError = e;
-    throw e;
-  } finally {
-    await cleanupBestEffort(repoRoot, tempRoot, worktreePath, worktreeAdded, warnings);
-    // If the main algorithm threw AND cleanup also produced warnings,
-    // attach them to the thrown error so the CLI can surface them.
-    if (mainError !== null && warnings.length > 0 && mainError instanceof Error) {
-      (mainError as Error & { cleanupWarnings?: readonly string[] }).cleanupWarnings = [
-        ...warnings,
-      ];
-    }
-  }
+      // 5. Parse; strip `base/` and `live/` mirror prefixes; derive status from
+      //    unified-diff headers.
+      const unified = parseUnifiedDiff(unifiedText, {
+        stripPrefixes: true,
+        additionalStripPrefixes: [`${MIRROR_BASE_DIR}/`, `${MIRROR_LIVE_DIR}/`],
+      });
+      const entries = unifiedToRawEntries(unified);
+      return [...entries].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+    },
+  });
+
+  return { diff: { entries: value }, cleanupWarnings };
 }
 
 // ============================================================================
