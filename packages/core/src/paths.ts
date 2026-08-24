@@ -95,8 +95,25 @@ export function viberevertDir(repoRoot: string): string {
 }
 
 /**
+ * Returns the absolute path to the content-addressed object store within
+ * `repoRoot`. Pure path-join; does not check existence.
+ *
+ * M 0.8.0. Deliberately NOT created by `ensureViberevertDirs`: the store holds
+ * session-contribution content, so it comes into existence when the first
+ * content object is written rather than at `init`. `putObject` creates the
+ * two-character shard directory recursively on first write, which creates this
+ * directory as a side effect, so pre-creating it would only leave an empty
+ * directory in repositories that never store contribution content.
+ */
+export function viberevertObjectsDir(repoRoot: string): string {
+  return join(viberevertDir(repoRoot), "objects");
+}
+
+/**
  * Creates the standard .viberevert/ subdirectories under `repoRoot`:
  * sessions/, checkpoints/, reports/. Idempotent (uses `recursive: true`).
+ *
+ * `objects/` is intentionally absent; see `viberevertObjectsDir`.
  */
 export async function ensureViberevertDirs(repoRoot: string): Promise<void> {
   const root = viberevertDir(repoRoot);

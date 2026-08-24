@@ -50,8 +50,20 @@
 //       but the id is recorded inside the receipt's `rollback_id`
 //       field and is shape-enforced by `ReceiptFileSchema` per D69.)
 //
-//   Path helpers + repo-root resolution (M A):
-//     - resolveRepoRoot, viberevertDir, ensureViberevertDirs
+//   Object store (M 0.8.0):
+//     - putObject, getObject, hasObject: content-addressed storage for
+//       session-contribution content. Every operation verifies bytes
+//       against the digest they were addressed by, which is what makes
+//       this an evidence store rather than a cache.
+//     - objectPath, objectRelPath: pure path helpers
+//     - ObjectNotFoundError, ObjectCorruptionError: exported because a
+//       caller MUST distinguish them. Missing evidence and damaged
+//       evidence call for different refusals, and collapsing the two
+//       would let a corrupt store read as an absent one.
+//
+//   Path helpers + repo-root resolution (M A; objects dir M 0.8.0):
+//     - resolveRepoRoot, viberevertDir, viberevertObjectsDir,
+//       ensureViberevertDirs
 //     - RepoRootNotFoundError
 //
 //   Redaction (M A; stub for v0.7.0-beta, reserved for future cloud-sync seam):
@@ -72,7 +84,9 @@
 //     package-private. Each package owns its own private atomic helpers
 //     (intentional duplication across @viberevert/git, @viberevert/core,
 //     and the CLI) to keep the public surface of each package describing
-//     its DOMAIN, not its file-IO primitives.
+//     its DOMAIN, not its file-IO primitives. M 0.8.0's object store
+//     consumes writeFileAtomic internally and does NOT re-export it: the
+//     store's public contract is content addressing, not file IO.
 //
 //   - SessionState, ActiveSessionLock (and their *Schema / *JsonSchema
 //     companions): defined in @viberevert/session-format, not in core.
@@ -98,12 +112,23 @@ export type { DetectionResult, KnownProfile, Resolution } from "./framework-dete
 export { detectFramework, detectFrameworks } from "./framework-detect.js";
 // Runtime values: identity generators (M B + M C + M D -- D5/D16/D27/D71).
 export { generateReportId, generateRollbackId, generateSessionId } from "./ids.js";
+// Content-addressed object store (M 0.8.0).
+export {
+  getObject,
+  hasObject,
+  ObjectCorruptionError,
+  ObjectNotFoundError,
+  objectPath,
+  objectRelPath,
+  putObject,
+} from "./object-store.js";
 // Path helpers + repo-root resolution.
 export {
   ensureViberevertDirs,
   RepoRootNotFoundError,
   resolveRepoRoot,
   viberevertDir,
+  viberevertObjectsDir,
 } from "./paths.js";
 // Policy resolution (M G1a Step 3.5a -- promoted from cli-commands).
 export type { ChecksToggleKey, ResolvedChecksConfig } from "./policy-resolve.js";
