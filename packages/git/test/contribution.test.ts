@@ -108,13 +108,27 @@ async function setupRepo(): Promise<TestRepo> {
   };
 }
 
-async function checkpoint(repo: TestRepo, sessionId = SESSION_ID): Promise<void> {
+/**
+ * Capture a checkpoint for this repo.
+ *
+ * `rollbackExcludePatterns` is an options field rather than a capture-time
+ * argument because the exclusion policy now lives in the manifest: capture
+ * reads the patterns the checkpoint recorded, so a fixture exercising them has
+ * to set them HERE.
+ */
+async function checkpoint(
+  repo: TestRepo,
+  opts: {
+    readonly sessionId?: string;
+    readonly rollbackExcludePatterns?: readonly string[];
+  } = {},
+): Promise<void> {
   await mkdir(repo.checkpointDir, { recursive: true });
   await createCheckpoint({
     repoRoot: repo.repoRoot,
     checkpointDir: repo.checkpointDir,
-    rollbackExcludePatterns: [],
-    sessionId,
+    rollbackExcludePatterns: opts.rollbackExcludePatterns ?? [],
+    sessionId: opts.sessionId ?? SESSION_ID,
   });
 }
 
@@ -140,7 +154,6 @@ async function runCapture(
   repo: TestRepo,
   opts: {
     readonly additionalObservationPaths?: readonly string[];
-    readonly untrackedExcludePatterns?: readonly string[];
     readonly sessionId?: string;
     readonly onStore?: () => Promise<void>;
   } = {},
@@ -153,7 +166,6 @@ async function runCapture(
       sessionId: opts.sessionId ?? SESSION_ID,
       checkpointId: CHECKPOINT_ID,
       additionalObservationPaths: opts.additionalObservationPaths ?? [],
-      untrackedExcludePatterns: opts.untrackedExcludePatterns ?? [],
       storeObject: async (object: ContributionObject) => {
         storedDigests.add(object.digest);
         if (opts.onStore !== undefined) await opts.onStore();
@@ -599,18 +611,20 @@ describe("captureContribution: exclusions", () => {
     }
   });
 
-  it("applies untracked exclude patterns to the untracked surface only", async () => {
+  it("applies the checkpoint's exclude patterns to the untracked surface only", async () => {
+    // The patterns come from the manifest the oracle loaded, so the fixture
+    // sets them at checkpoint time rather than at capture time.
     const repo = await setupRepo();
     try {
       await write(repo, "tracked.log", "kept\n");
       await git(repo.repoRoot, ["add", "tracked.log"]);
       await git(repo.repoRoot, ["commit", "-m", "add tracked log"]);
-      await checkpoint(repo);
+      await checkpoint(repo, { rollbackExcludePatterns: ["*.log"] });
 
       await write(repo, "tracked.log", "changed\n");
       await write(repo, "untracked.log", "dropped\n");
 
-      const { capture } = await runCapture(repo, { untrackedExcludePatterns: ["*.log"] });
+      const { capture } = await runCapture(repo);
 
       // The tracked path matches the pattern and is captured anyway; that
       // asymmetry is the shipped restore contract.
@@ -714,7 +728,7 @@ describe("captureContribution: binding and lifecycle", () => {
   it("refuses a checkpoint belonging to a different session", async () => {
     const repo = await setupRepo();
     try {
-      await checkpoint(repo, "sess_01BX5ZZKBKACTAV9WEVGEMMVRZ");
+      await checkpoint(repo, { sessionId: "sess_01BX5ZZKBKACTAV9WEVGEMMVRZ" });
       await expect(runCapture(repo, { sessionId: SESSION_ID })).rejects.toBeInstanceOf(
         SessionCheckpointBindingError,
       );
@@ -732,7 +746,6 @@ describe("captureContribution: binding and lifecycle", () => {
         sessionId: SESSION_ID,
         checkpointId: CHECKPOINT_ID,
         additionalObservationPaths: [],
-        untrackedExcludePatterns: [],
         storeObject: async () => {},
         publish: async () => marker,
       });
@@ -754,7 +767,6 @@ describe("captureContribution: binding and lifecycle", () => {
           sessionId: SESSION_ID,
           checkpointId: CHECKPOINT_ID,
           additionalObservationPaths: [],
-          untrackedExcludePatterns: [],
           storeObject: async () => {
             throw new Error("store is full");
           },

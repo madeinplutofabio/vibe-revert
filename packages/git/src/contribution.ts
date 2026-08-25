@@ -38,6 +38,26 @@
 // all while the oracle is still alive and the fenced state still holds.
 //
 // ============================================================================
+// Where the untracked exclusion patterns come from
+// ============================================================================
+//
+// `manifest.untracked.exclude_patterns`, read from the checkpoint the oracle
+// has already loaded. Deliberately NOT a caller option: the manifest is loaded
+// exclusively inside `withCheckpointOracle`, so requiring the caller to supply
+// the same patterns would force a second manifest read of a value this
+// function is already holding.
+//
+// They apply to the END UNTRACKED SURFACE ONLY. A tracked path is never
+// dropped for matching an exclude pattern; that asymmetry is the shipped
+// restore contract, and breaking it here would break the `--only '**'`
+// equivalence property.
+//
+// M 0.8.0 step 5 adds the session-start evaluation snapshot and requires its
+// persisted exclusion policy to agree with the checkpoint manifest. That
+// later step owns the additional consistency contract; 4c has only the
+// checkpoint manifest available, so it is the sole authority here.
+//
+// ============================================================================
 // Attempt sequencing (locked)
 // ============================================================================
 //
@@ -273,13 +293,6 @@ export interface CaptureContributionOptions<T> {
    * core.
    */
   readonly additionalObservationPaths: readonly string[];
-  /**
-   * `rollback.exclude` patterns, applied to the END UNTRACKED SURFACE ONLY.
-   * Tracked paths are never dropped for matching an exclude pattern; that
-   * asymmetry is the shipped restore contract, and breaking it here would
-   * break the `--only '**'` equivalence property.
-   */
-  readonly untrackedExcludePatterns: readonly string[];
   readonly storeObject: ContributionObjectSink;
   /**
    * Invoked once, inside the oracle, immediately after a matching fence.
@@ -781,7 +794,6 @@ interface AcquireInputs {
   readonly manifest: Manifest;
   readonly beforeHeadSha: string;
   readonly observationExtras: readonly string[];
-  readonly untrackedExcludePatterns: readonly string[];
   /** Candidate paths derivable without touching the live tree. */
   readonly staticCandidates: readonly string[];
 }
@@ -805,8 +817,11 @@ async function acquireLive(
   const afterStatusText = await getStatusPorcelainText(repoRoot);
 
   // 4. End untracked surface, the only source that enumerates nested files.
+  //    Exclusions come from the checkpoint's OWN captured patterns, which the
+  //    oracle already loaded; see this file's header for why they are not a
+  //    caller option.
   const untrackedBuf = await runGit(repoRoot, ["ls-files", "-z", "--others", "--exclude-standard"]);
-  const excludeMatchers = inputs.untrackedExcludePatterns.map((pattern) =>
+  const excludeMatchers = manifest.untracked.exclude_patterns.map((pattern) =>
     picomatch(pattern, PICOMATCH_OPTIONS),
   );
   const endUntracked: string[] = [];
@@ -1121,7 +1136,6 @@ export async function captureContribution<T>(
         manifest,
         beforeHeadSha,
         observationExtras,
-        untrackedExcludePatterns: opts.untrackedExcludePatterns,
         staticCandidates: [...staticCandidates].sort(),
       };
 
