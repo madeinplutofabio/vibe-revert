@@ -47,7 +47,7 @@
 //     shared with M 0.8.0's contribution capture; checkpoint mode passes
 //     detectRenames: true, so its argv is unchanged.
 //
-// Package-internal export (NOT in the barrel):
+// Package-internal exports (NOT in the barrel):
 //
 //   diffPreparedMirrors(tempRoot, baseDirName, liveDirName, opts)
 //     Diffs two ALREADY-PREPARED sibling directories under tempRoot and
@@ -64,6 +64,35 @@
 //     Those are precisely the two facts M 0.8.0's derivation contract says a
 //     mirror may not authorize, so the richer ParsedUnifiedEntry stays
 //     private here and only getDiffSinceCheckpoint consumes it.
+//
+//   parseNameStatus(buf, opts) + NameStatusEntry + ParseNameStatusOptions
+//     Parser for `git diff --name-status -z` output. Shared with M 0.8.0's
+//     contribution capture, which reads the committed delta
+//     `<before_head>..<after_head>` for rename PROPOSALS. Exported rather
+//     than reimplemented there: a second copy of a git-output parser is the
+//     same drift this package just finished removing from its path guards.
+//     Its fail-closed handling of copy tokens is load-bearing for that
+//     caller, since a `C` entry must never reach a rename-proposal set.
+//
+//     `opts.validatePath` injects the caller's path policy and defaults to
+//     this module's DiffParseError-raising guard, so ref mode is unchanged.
+//     Contribution capture needs a different policy for exactly one rule:
+//     `.viberevert/**` is HARD-EXCLUDED there rather than fatal, because a
+//     tracked or force-added store path must not make `end` fail outright.
+//
+//     That exclusion cannot live inside this parser. A rename
+//     `src/a.ts -> .viberevert/a.ts` must still surface BOTH aliases, so
+//     the caller can drop the store-side destination while keeping
+//     `src/a.ts` as an ordinary session deletion candidate. Filtering the
+//     whole entry here would silently lose the non-store side, which is why
+//     the seam is a validator rather than a filter.
+//
+//   PICOMATCH_OPTIONS
+//     This package's one glob-semantics definition, shared with contribution
+//     capture's untracked-exclude filtering. Exported rather than copied
+//     because glob drift would silently change which untracked files enter a
+//     recovery artifact, and neither the type system nor the test suite would
+//     necessarily notice two configurations disagreeing.
 //
 // Both public helpers return DiffResult { diff, cleanupWarnings }. Cleanup
 // failures are NEVER thrown (D29 + D17c terminal-write rule): they
@@ -255,8 +284,13 @@ const BINARY_SCAN_BYTES = 8_000;
  * `posixSlashes` and `nonegate` aren't reliably exported in
  * @types/picomatch across versions; picomatch's runtime accepts the
  * object regardless.
+ *
+ * Package-internal export (NOT in the barrel) so contribution.ts shares this
+ * exact object instead of declaring a second one. Two glob configurations
+ * inside one package, one of which decides which untracked files enter a
+ * recovery artifact, is a drift nothing would fail on.
  */
-const PICOMATCH_OPTIONS = {
+export const PICOMATCH_OPTIONS = {
   dot: true,
   nocase: false,
   posixSlashes: true,
@@ -311,13 +345,52 @@ function assertSafeRepoRelativePath(path: string, context: string): void {
 // Name-status parser
 // ============================================================================
 
-interface NameStatusEntry {
+/**
+ * One entry from `git diff --name-status -z`.
+ *
+ * `previous_path` is populated only for renames, which the -z format follows
+ * with an extra NUL-separated old-path token.
+ */
+export interface NameStatusEntry {
   readonly status: ChangedFileStatus;
   readonly path: string;
   readonly previous_path?: string;
 }
 
-function parseNameStatus(buf: Buffer): readonly NameStatusEntry[] {
+export interface ParseNameStatusOptions {
+  /**
+   * Path policy applied to every emitted path and rename alias. Defaults to
+   * this module's guard, which raises DiffParseError.
+   *
+   * A VALIDATOR, never a filter. See the parser's doc comment for why the
+   * distinction is load-bearing.
+   */
+  readonly validatePath?: (path: string, context: string) => void;
+}
+
+/**
+ * Parse `git diff --name-status -z` output.
+ *
+ * Package-internal (not barrel-exported). Consumed by ref mode here and by
+ * M 0.8.0's contribution capture for its committed-delta read.
+ *
+ * **`opts.validatePath` is a validator, not a filter, on purpose.**
+ * Contribution capture hard-excludes `.viberevert/**` instead of failing on
+ * it, so that a tracked or force-added store path leaves `end` working. But
+ * that exclusion belongs at candidate assembly, not here: a rename
+ * `src/a.ts -> .viberevert/a.ts` must still surface both aliases so the
+ * caller can drop the store-side destination while keeping `src/a.ts` as an
+ * ordinary session deletion. Discarding the entry at this layer would lose
+ * the non-store side with no way to recover it.
+ *
+ * Copy tokens stay fail-closed regardless of policy, which is what keeps a
+ * `C` entry from ever reaching a rename-proposal set.
+ */
+export function parseNameStatus(
+  buf: Buffer,
+  opts: ParseNameStatusOptions = {},
+): readonly NameStatusEntry[] {
+  const validatePath = opts.validatePath ?? assertSafeRepoRelativePath;
   if (buf.length === 0) return [];
   const tokens = splitNulList(buf);
   const out: NameStatusEntry[] = [];
@@ -345,8 +418,8 @@ function parseNameStatus(buf: Buffer): readonly NameStatusEntry[] {
           `parseNameStatus: truncated rename pair after ${JSON.stringify(rawStatus)}`,
         );
       }
-      assertSafeRepoRelativePath(previous, "parseNameStatus.previous_path");
-      assertSafeRepoRelativePath(current, "parseNameStatus.path");
+      validatePath(previous, "parseNameStatus.previous_path");
+      validatePath(current, "parseNameStatus.path");
       out.push({ status: "renamed", path: current, previous_path: previous });
       i += 3;
       continue;
@@ -369,7 +442,7 @@ function parseNameStatus(buf: Buffer): readonly NameStatusEntry[] {
         `parseNameStatus: truncated entry after status ${JSON.stringify(rawStatus)}`,
       );
     }
-    assertSafeRepoRelativePath(path, "parseNameStatus.path");
+    validatePath(path, "parseNameStatus.path");
     out.push({ status: mapped, path });
     i += 2;
   }
@@ -1051,5 +1124,9 @@ export async function getDiffSinceCheckpoint(
 // ============================================================================
 
 export const _parseUnifiedDiffForTests = parseUnifiedDiff;
+// Retained as an alias even though parseNameStatus is now a package-internal
+// export: diff.test.ts imports this name, and renaming it there would churn a
+// suite whose untouched state is the behavior-neutrality witness for the 4b
+// refactors.
 export const _parseNameStatusForTests = parseNameStatus;
 export const _assertSafeRepoRelativePathForTests = assertSafeRepoRelativePath;

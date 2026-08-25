@@ -32,6 +32,27 @@
 // its own type. The rules live once; the error contracts stay where they are.
 //
 // =============================================================================
+// One store boundary, two decisions
+// =============================================================================
+//
+// The `.viberevert/` ban is defense in depth and deliberately independent of
+// `.gitignore`: removing that line from a project's ignore file must not let
+// VibeRevert observe, mirror, or diff its own store.
+//
+// Two policies act on that boundary, and they act DIFFERENTLY:
+//
+//   diff.ts, path-state.ts   REFUSE. A store path arriving from git output
+//                            or a caller is a misconfiguration signal.
+//   contribution capture     EXCLUDE. A tracked or force-added store path
+//                            must not make `end` fail outright; it simply
+//                            falls outside the recovery domain.
+//
+// `isViberevertStorePath` is exported so the excluding policy asks exactly the
+// question the refusing policy asks, and `repoRelativePathSafetyError` is
+// implemented in terms of it. One definition of the boundary; two decisions
+// about what to do when a path crosses it.
+//
+// =============================================================================
 // Scope
 // =============================================================================
 //
@@ -40,20 +61,37 @@
 // which is what `path-state.ts`'s `ancestorsTraversable` exists for. A path
 // passing this check may still be a symlink, a directory, or absent.
 //
-// The `.viberevert/` ban is defense in depth and deliberately independent of
-// `.gitignore`: removing that line from a project's ignore file must not let
-// VibeRevert observe, mirror, or diff its own store.
-//
 // CHECK ORDER IS SIGNIFICANT. The message names the FIRST violated rule, and
 // existing tests in diff.test.ts and path-state.test.ts pin those exact
 // strings. Reordering the checks would change messages for paths that violate
 // more than one rule, which is why the order below is preserved verbatim from
 // the two originals rather than tidied.
 //
-// Package-internal. Never exported from the git barrel: this is a shared
-// invariant, not public API.
+// Package-internal. Never exported from the git barrel: these are shared
+// invariants, not public API.
 
-const VIBEREVERT_DIR_PREFIX = ".viberevert/";
+const VIBEREVERT_DIR = ".viberevert";
+const VIBEREVERT_DIR_PREFIX = `${VIBEREVERT_DIR}/`;
+
+/**
+ * Whether a repo-relative POSIX path names VibeRevert's own store.
+ *
+ * ROOT-ONLY, deliberately. The store lives at the repository root, so anything
+ * that merely shares the name elsewhere is someone's data:
+ *
+ *   ".viberevert"                  true
+ *   ".viberevert/objects/ab/cd"    true
+ *   "src/.viberevert/x"            FALSE, a nested user directory
+ *   ".viberevertx"                 FALSE, a different name
+ *   ".viberevert-backup/x"         FALSE, a different directory
+ *
+ * Exported so the two policies described in this file's header share one
+ * definition of the boundary. `repoRelativePathSafetyError` calls it rather
+ * than repeating the comparison, which is the whole point of centralizing it.
+ */
+export function isViberevertStorePath(path: string): boolean {
+  return path === VIBEREVERT_DIR || path.startsWith(VIBEREVERT_DIR_PREFIX);
+}
 
 /**
  * Validate a repo-relative POSIX path lexically.
@@ -77,7 +115,7 @@ export function repoRelativePathSafetyError(path: string, context: string): stri
   if (/^[A-Za-z]:/.test(path)) {
     return `${context}: Windows-drive path ${JSON.stringify(path)}`;
   }
-  if (path === ".viberevert" || path.startsWith(VIBEREVERT_DIR_PREFIX)) {
+  if (isViberevertStorePath(path)) {
     return `${context}: path under .viberevert/ ${JSON.stringify(path)}`;
   }
   for (const seg of path.split("/")) {

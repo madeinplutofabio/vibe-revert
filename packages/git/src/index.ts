@@ -62,6 +62,26 @@
 //       D17c — cleanup failures populate warnings, never thrown)
 //     - DiffSinceCheckpointOptions
 //
+//   Session contribution capture (M 0.8.0):
+//     - captureContribution: builds the durable record of what a session
+//       CONTRIBUTED, as opposed to the checkpoint's record of what existed
+//       before it. Materializes the oracle once, assembles the candidate
+//       set from seven sources, observes both sides, and fences the end
+//       state before handing proven-stable facts to a caller `publish`
+//       callback that runs INSIDE the oracle, before any cleanup.
+//     - StableContributionCapture: those facts. Deliberately carries no
+//       `ended_at` and no detected frameworks — capture never reads a clock
+//       and never evaluates a framework signature, so the same facts always
+//       build the same artifact.
+//     - buildContributionFile + BuildContributionOptions: the deterministic
+//       builder. The caller supplies `endedAt`, sampled exactly once, plus
+//       optional `detectedFrameworksAtEnd` evaluated with @viberevert/core.
+//     - ContributionObject, ContributionObjectSink: the storage seam.
+//       `putObject` lives in @viberevert/core and git must not depend on
+//       core, so bytes leave through an injected sink that proves it stored
+//       them under the digest git supplied.
+//     - CaptureContributionOptions, ContributionCaptureResult
+//
 //   Restore APIs (M B → M D promotion per D73; controlled package APIs
 //   per D77 — consumed only by CLI rollback orchestration, enforced by
 //   the architectural-invariants test):
@@ -98,6 +118,11 @@
 //       see `CommitRefNotFoundError` directly.)
 //     - DiffRefNotFoundError, DiffParseError (M C — diff helper failures;
 //       DiffRefNotFoundError wraps CommitRefNotFoundError per above)
+//     - EndStateChangedDuringCaptureError, ConflictingRenameProposalError,
+//       SessionCheckpointBindingError (M 0.8.0 — contribution capture
+//       refusals. The first carries EVERY differing fence member rather
+//       than the first, because one edit routinely moves HEAD, status, the
+//       index, the inventory, and the candidate set together.)
 //   Plus structured-payload type aliases consumed by the error classes:
 //     - RestoreExtractionConflict, RestoreHashMismatch,
 //       RestoreTrackedDirtyParityIssue
@@ -148,6 +173,35 @@
 //     import via
 //     `import { ... } from "../src/restore-internal-path-policy.js"`.
 //
+//   - `withCheckpointOracle` and its types (`CheckpointOracleContext`,
+//     `CheckpointOracleOptions`, `CheckpointOracleResult`) from
+//     `checkpoint-oracle.ts` (M 0.8.0): internal. The oracle is the shared
+//     scratch lifecycle behind `getDiffSinceCheckpoint` and
+//     `captureContribution` — a worktree at the captured HEAD with the
+//     checkpoint restored over it — not a capability callers assemble for
+//     themselves.
+//
+//   - `diffPreparedMirrors` + `PreparedMirrorDiffEntry`, `parseNameStatus` +
+//     `NameStatusEntry` + `ParseNameStatusOptions`, and `PICOMATCH_OPTIONS`
+//     from `diff.ts` (M 0.8.0): package-internal seams shared with
+//     `contribution.ts`. They are module exports so this package has ONE
+//     prepared-mirror differ, ONE name-status parser, and ONE glob
+//     configuration; exporting them from the barrel would invite a consumer
+//     to assemble a rival capture pipeline out of the parts, which is the
+//     drift the seams exist to prevent.
+//
+//   - `repoRelativePathSafetyError` and `isViberevertStorePath` from
+//     `path-safety.ts` (M 0.8.0): the package's shared lexical path
+//     authority, consumed by `diff.ts`, `path-state.ts`, and
+//     `contribution.ts`. A shared security invariant, not public API.
+//
+//   - `observePathState`, `readIndexSnapshot`, `PathObservationError` and
+//     their types from `path-state.ts` (M 0.8.0): internal two-axis
+//     observation. Consumers receive observed state through the
+//     contribution artifact, which is schema-validated and digest-bound;
+//     handing out the raw observer would let a caller mint PathStates that
+//     no evidence chain covers.
+//
 //   - `writeFileAtomic` from `atomic.ts` (D17c): package-private. Each
 //     package owns its own private atomic-write helpers (intentional
 //     duplication across @viberevert/git, @viberevert/core, and the CLI)
@@ -189,6 +243,24 @@ export {
   listCheckpoints,
   loadCheckpoint,
 } from "./checkpoint.js";
+
+// Inferred TypeScript types: session contribution capture (M 0.8.0).
+export type {
+  BuildContributionOptions,
+  CaptureContributionOptions,
+  ContributionCaptureResult,
+  ContributionObject,
+  ContributionObjectSink,
+  StableContributionCapture,
+} from "./contribution.js";
+// Runtime values: session contribution capture (M 0.8.0).
+export {
+  buildContributionFile,
+  ConflictingRenameProposalError,
+  captureContribution,
+  EndStateChangedDuringCaptureError,
+  SessionCheckpointBindingError,
+} from "./contribution.js";
 
 // Inferred TypeScript types: diff helpers (M C).
 export type {
