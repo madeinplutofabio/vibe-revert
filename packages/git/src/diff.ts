@@ -43,8 +43,29 @@
 //     `base/` and `live/` mirror prefixes via additionalStripPrefixes,
 //     and derives status from unified-diff headers (new file mode /
 //     deleted file mode / rename from-to / old-mode vs new-mode).
+//     That invocation and its parse live in parsePreparedMirrors below,
+//     shared with M 0.8.0's contribution capture; checkpoint mode passes
+//     detectRenames: true, so its argv is unchanged.
 //
-// Both helpers return DiffResult { diff, cleanupWarnings }. Cleanup
+// Package-internal export (NOT in the barrel):
+//
+//   diffPreparedMirrors(tempRoot, baseDirName, liveDirName, opts)
+//     Diffs two ALREADY-PREPARED sibling directories under tempRoot and
+//     returns CONTENT ONLY: path, isBinary, hunks. It performs no
+//     enumeration, no filtering, no copying, and owns no scratch
+//     lifecycle; the caller prepares both sides.
+//
+//     Rename detection is a REQUIRED parameter with no default, and "off"
+//     is spelled `--no-renames` rather than by omitting `-M`: `diff.renames`
+//     config would otherwise re-enable it, and the flag would then promise
+//     a determinism the argv did not deliver.
+//
+//     The seam deliberately does NOT expose derivedStatus or previous_path.
+//     Those are precisely the two facts M 0.8.0's derivation contract says a
+//     mirror may not authorize, so the richer ParsedUnifiedEntry stays
+//     private here and only getDiffSinceCheckpoint consumes it.
+//
+// Both public helpers return DiffResult { diff, cleanupWarnings }. Cleanup
 // failures are NEVER thrown (D29 + D17c terminal-write rule): they
 // populate cleanupWarnings; the CLI inspects that field and decides
 // whether to log to its OWN stderr. When the main algorithm throws and
@@ -755,6 +776,158 @@ async function copyToMirror(
 }
 
 // ============================================================================
+// Prepared-mirror diffing (shared seam; NOT barrel-exported)
+// ============================================================================
+
+/**
+ * What a mirror comparison is allowed to tell a caller: content, and nothing
+ * else.
+ *
+ * `derivedStatus` and `previous_path` are deliberately absent. Mirrors diff
+ * copied files with no index and no git mode bits, so a rename or status they
+ * appear to show is a heuristic over detached copies rather than a fact any
+ * consumer could reproduce from the evidence. M 0.8.0's derivation contract
+ * makes that explicit: operation comes from PathStates, and rename identity
+ * comes from real git run against real trees and a real index. Exporting the
+ * richer shape would hand `contribution.ts` exactly the two fields it is
+ * forbidden to use.
+ */
+export interface PreparedMirrorDiffEntry {
+  readonly path: string;
+  readonly isBinary: boolean;
+  readonly hunks: readonly RawDiffHunk[];
+}
+
+/**
+ * Reject a mirror directory name this module could not handle safely.
+ *
+ * The charset is deliberately narrower than "a single path segment", because
+ * a valid directory name is not automatically a name this module can round
+ * trip. `base dir` is a perfectly good directory and reaches git as one argv
+ * operand, but it then appears inside the unified-diff header, where
+ * `extractPathFromHeader` requires exactly two space-separated tokens and
+ * fails closed. A name containing `"` hits the same parser's quoted-path
+ * guard. Accepting inputs the parser will later refuse would make this
+ * validator promise more than the module delivers.
+ *
+ * These are internal scratch identifiers, not user filenames, so there is no
+ * product value in allowing spaces, quotes, or non-ASCII. Restricting to ASCII
+ * also makes the case-insensitive distinctness check below plain ASCII folding
+ * rather than Unicode lowercasing, which is what the contract specifies.
+ *
+ * The pattern requires at least one character, so the empty name is rejected
+ * by the charset rule itself. `.` and `..` match the charset and therefore
+ * need their own check.
+ *
+ * Raises a plain Error rather than DiffParseError: these names are
+ * caller-supplied constants, so a violation is a programming error inside this
+ * package, not a failure to parse git output that callers catch and handle.
+ */
+function assertMirrorDirName(name: string, label: string): void {
+  if (!/^[A-Za-z0-9._-]+$/.test(name)) {
+    throw new Error(
+      `diffPreparedMirrors: ${label} must contain only ASCII letters, digits, ".", "_", or "-", got ${JSON.stringify(name)}`,
+    );
+  }
+  if (name === "." || name === "..") {
+    throw new Error(`diffPreparedMirrors: ${label} must not be ${JSON.stringify(name)}`);
+  }
+}
+
+/**
+ * Run one bounded mirror-vs-mirror diff and parse it. Private because the
+ * result still carries `derivedStatus` and `previous_path`, which only
+ * checkpoint mode may consume.
+ *
+ * `cwd` is `tempRoot` and the operands are bare basenames, so no absolute path
+ * reaches the git argv. Exit 1 means "differences exist" under the
+ * `--no-index` contract and is therefore success.
+ *
+ * Rename detection is always spelled EXPLICITLY: `--no-renames` rather than
+ * omitting `-M`, because `diff.renames` is enabled by default and a merely
+ * absent flag would leave detection on while the parameter claimed otherwise.
+ *
+ * Sorting by path happens here so the seam's output is deterministic for both
+ * callers. `unifiedToRawEntries` is an order-preserving 1:1 map, so moving the
+ * sort ahead of it leaves checkpoint mode's result unchanged.
+ */
+async function parsePreparedMirrors(
+  tempRoot: string,
+  baseDirName: string,
+  liveDirName: string,
+  opts: { readonly detectRenames: boolean },
+): Promise<readonly ParsedUnifiedEntry[]> {
+  assertMirrorDirName(baseDirName, "baseDirName");
+  assertMirrorDirName(liveDirName, "liveDirName");
+  // Case-insensitive because the two names alias on common Windows and macOS
+  // filesystems. Equal names would silently self-diff and report no content
+  // delta at all, which is the worst possible failure for a comparison whose
+  // output decides what gets restored.
+  if (baseDirName.toLowerCase() === liveDirName.toLowerCase()) {
+    throw new Error(
+      `diffPreparedMirrors: mirror directory names must differ, got ${JSON.stringify(baseDirName)} and ${JSON.stringify(liveDirName)}`,
+    );
+  }
+
+  const renameFlag = opts.detectRenames ? "-M" : "--no-renames";
+  const unifiedText = await runGitText(
+    tempRoot,
+    [
+      "diff",
+      "--no-color",
+      "-U0",
+      "--binary",
+      renameFlag,
+      "--no-ext-diff",
+      "--no-textconv",
+      "--src-prefix=a/",
+      "--dst-prefix=b/",
+      "--no-index",
+      "--",
+      baseDirName,
+      liveDirName,
+    ],
+    { allowedExitCodes: [1] },
+  );
+
+  const unified = parseUnifiedDiff(unifiedText, {
+    stripPrefixes: true,
+    additionalStripPrefixes: [`${baseDirName}/`, `${liveDirName}/`],
+  });
+  return [...unified].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+}
+
+/**
+ * Diff two ALREADY-PREPARED sibling directories under `tempRoot`.
+ *
+ * Package-internal seam shared with M 0.8.0's contribution capture. It
+ * performs no enumeration, no filtering, and no copying, and it owns no
+ * scratch lifecycle: the caller decides what goes into each side and who
+ * cleans up.
+ *
+ * Both names must match `[A-Za-z0-9._-]+`, must not be `.` or `..`, and must
+ * differ case-insensitively. See assertMirrorDirName.
+ *
+ * `detectRenames` has NO default on purpose. Checkpoint mode wants `-M`;
+ * contribution capture must not have it, because it normalizes alias
+ * placement so both sides sit at the same path, and rename detection would
+ * collapse that pair into rename headers and destroy the same-path hunks the
+ * derivation contract needs. A default is how a caller silently inherits the
+ * wrong one, and here the wrong one is a correctness bug.
+ *
+ * Returns content only, sorted by path. See PreparedMirrorDiffEntry.
+ */
+export async function diffPreparedMirrors(
+  tempRoot: string,
+  baseDirName: string,
+  liveDirName: string,
+  opts: { readonly detectRenames: boolean },
+): Promise<readonly PreparedMirrorDiffEntry[]> {
+  const unified = await parsePreparedMirrors(tempRoot, baseDirName, liveDirName, opts);
+  return unified.map((u) => ({ path: u.path, isBinary: u.isBinary, hunks: u.hunks }));
+}
+
+// ============================================================================
 // Public — git-ref base
 // ============================================================================
 
@@ -856,36 +1029,17 @@ export async function getDiffSinceCheckpoint(
       await copyToMirror(worktreePath, mirrorBase, filtered);
       await copyToMirror(repoRoot, mirrorLive, filtered);
 
-      // 4. Single bounded mirror-vs-mirror diff with cwd=tempRoot + basename
-      //    operands. Exit 1 = differences exist = success per --no-index contract.
-      const unifiedText = await runGitText(
-        tempRoot,
-        [
-          "diff",
-          "--no-color",
-          "-U0",
-          "--binary",
-          "-M",
-          "--no-ext-diff",
-          "--no-textconv",
-          "--src-prefix=a/",
-          "--dst-prefix=b/",
-          "--no-index",
-          "--",
-          MIRROR_BASE_DIR,
-          MIRROR_LIVE_DIR,
-        ],
-        { allowedExitCodes: [1] },
-      );
-
-      // 5. Parse; strip `base/` and `live/` mirror prefixes; derive status from
-      //    unified-diff headers.
-      const unified = parseUnifiedDiff(unifiedText, {
-        stripPrefixes: true,
-        additionalStripPrefixes: [`${MIRROR_BASE_DIR}/`, `${MIRROR_LIVE_DIR}/`],
+      // 4. Single bounded mirror-vs-mirror diff, parsed and path-sorted. Shared
+      //    with contribution capture via parsePreparedMirrors; `-M` keeps this
+      //    path's argv exactly as shipped.
+      const unified = await parsePreparedMirrors(tempRoot, MIRROR_BASE_DIR, MIRROR_LIVE_DIR, {
+        detectRenames: true,
       });
-      const entries = unifiedToRawEntries(unified);
-      return [...entries].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+
+      // 5. Derive status from unified-diff headers. Checkpoint mode is the only
+      //    consumer of those derived fields, which is why they stay private to
+      //    this module rather than crossing the seam.
+      return unifiedToRawEntries(unified);
     },
   });
 
