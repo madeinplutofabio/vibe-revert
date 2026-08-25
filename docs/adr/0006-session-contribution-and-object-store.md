@@ -1,8 +1,8 @@
 # ADR 0006: Session contribution and content-addressed object store
 
-- Status: Accepted, 2026-08-23 (records a decision made in M 0.8.0 step 0; the schemas ship, the producers do not yet exist)
+- Status: Accepted, 2026-08-23 (records a decision made in M 0.8.0 step 0; the schemas, the object store, and the git-side capture pipeline now ship, but `end` does not yet publish a contribution)
 - Milestone: 0.8.0 (surgical recovery), step 0
-- Related: [session format](../session-format.md), [ADR 0002: State-based rollback](0002-state-based-rollback.md); `packages/session-format/src/contribution.ts`, `packages/session-format/src/path-state.ts`
+- Related: [session format](../session-format.md), [ADR 0002: State-based rollback](0002-state-based-rollback.md); `packages/session-format/src/contribution.ts`, `packages/session-format/src/path-state.ts`, `packages/core/src/object-store.ts`, `packages/git/src/path-state.ts`, `packages/git/src/contribution.ts`
 
 ## Context
 
