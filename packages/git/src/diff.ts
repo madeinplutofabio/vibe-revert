@@ -71,7 +71,10 @@
 // assertSafeRepoRelativePath BEFORE any filesystem join/copy. Unsafe
 // paths THROW DiffParseError — never silently skipped. Bans absolute
 // paths (POSIX `/` lead, Windows drive `X:`), backslashes, empty / `.` /
-// `..` segments, and the `.viberevert/` prefix.
+// `..` segments, and the `.viberevert/` prefix. The rules themselves live
+// once in path-safety.ts, shared with path-state.ts and contribution.ts;
+// the local wrapper below exists only to choose the error type, since M C
+// callers catch DiffParseError specifically.
 //
 // Parse contract: parseUnifiedDiff fails closed via DiffParseError on
 // non-empty input with zero `diff --git` chunks. parseEntry fails closed
@@ -103,6 +106,7 @@ import {
   runGitText,
   splitNulList,
 } from "./git-cli.js";
+import { repoRelativePathSafetyError } from "./path-safety.js";
 
 // ============================================================================
 // Public types
@@ -250,8 +254,6 @@ const NAME_STATUS_MAP: Readonly<Record<string, ChangedFileStatus>> = {
   T: "type_changed",
 };
 
-const VIBEREVERT_DIR_PREFIX = ".viberevert/";
-
 /** Basename of the base-side mirror dir inside tempRoot. */
 const MIRROR_BASE_DIR = "base";
 /** Basename of the live-side mirror dir inside tempRoot. */
@@ -268,28 +270,19 @@ const DIFF_TEMP_DIR_PREFIX = "viberevert-diff-";
 // Path safety (throws — never silent skip)
 // ============================================================================
 
+/**
+ * Error-contract adapter over the package's shared lexical authority.
+ *
+ * The rules, their order, and their exact message text live once in
+ * path-safety.ts. This wrapper only chooses the error type, because M C
+ * callers catch DiffParseError specifically and a deduplication must not
+ * change which error reaches a call site. See path-safety.ts for why the
+ * shared helper returns a message rather than throwing.
+ */
 function assertSafeRepoRelativePath(path: string, context: string): void {
-  if (path.length === 0) {
-    throw new DiffParseError(`${context}: empty path`);
-  }
-  if (path.includes("\\")) {
-    throw new DiffParseError(`${context}: backslash in path ${JSON.stringify(path)}`);
-  }
-  if (path.startsWith("/")) {
-    throw new DiffParseError(`${context}: absolute path ${JSON.stringify(path)}`);
-  }
-  if (/^[A-Za-z]:/.test(path)) {
-    throw new DiffParseError(`${context}: Windows-drive path ${JSON.stringify(path)}`);
-  }
-  if (path === ".viberevert" || path.startsWith(VIBEREVERT_DIR_PREFIX)) {
-    throw new DiffParseError(`${context}: path under .viberevert/ ${JSON.stringify(path)}`);
-  }
-  for (const seg of path.split("/")) {
-    if (seg === "" || seg === "." || seg === "..") {
-      throw new DiffParseError(
-        `${context}: unsafe segment ${JSON.stringify(seg)} in ${JSON.stringify(path)}`,
-      );
-    }
+  const message = repoRelativePathSafetyError(path, context);
+  if (message !== null) {
+    throw new DiffParseError(message);
   }
 }
 

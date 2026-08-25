@@ -125,6 +125,7 @@ import type {
 import { IndexStateSchema, PathStateSchema } from "@viberevert/session-format";
 
 import { runGit, splitNulList } from "./git-cli.js";
+import { repoRelativePathSafetyError } from "./path-safety.js";
 
 /**
  * `O_NOFOLLOW` is absent on win32, where the runtime constant is simply not
@@ -132,8 +133,6 @@ import { runGit, splitNulList } from "./git-cli.js";
  * typing, which declares it unconditionally.
  */
 const O_NOFOLLOW_OR_ZERO = (constants as { readonly O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
-
-const VIBEREVERT_DIR_PREFIX = ".viberevert/";
 
 // ============================================================================
 // Errors
@@ -163,42 +162,25 @@ export class PathObservationError extends Error {
 // ============================================================================
 
 /**
- * Mirrors the private guard in diff.ts. Duplicated deliberately: this module
- * joins a caller-supplied path onto repoRoot and OPENS it, so a missing guard
- * fails open, while a duplicated guard fails closed on both copies. Step 4 adds
- * a third consumer, which is the point to extract this into a shared internal
- * module rather than now.
+ * Error-contract adapter over the package's shared lexical authority.
+ *
+ * The rules, their order, and their exact message text live once in
+ * path-safety.ts. This wrapper only chooses the error type, because
+ * PathObservationError additionally carries the offending `path` and callers
+ * refuse on it by type.
+ *
+ * The duplication this replaces was deliberate while there were two copies, on
+ * the reasoning that two guards fail closed twice. The comment here reserved
+ * the moment for extraction: step 4b's contribution.ts is that third consumer.
  *
  * Lexical only. It stops `..` and absolute paths; it says nothing about what
  * the components actually are on disk, which is what `ancestorsTraversable`
  * exists for.
  */
 function assertSafeRepoRelativePath(path: string, context: string): void {
-  if (path.length === 0) {
-    throw new PathObservationError(`${context}: empty path`, path);
-  }
-  if (path.includes("\\")) {
-    throw new PathObservationError(`${context}: backslash in path ${JSON.stringify(path)}`, path);
-  }
-  if (path.startsWith("/")) {
-    throw new PathObservationError(`${context}: absolute path ${JSON.stringify(path)}`, path);
-  }
-  if (/^[A-Za-z]:/.test(path)) {
-    throw new PathObservationError(`${context}: Windows-drive path ${JSON.stringify(path)}`, path);
-  }
-  if (path === ".viberevert" || path.startsWith(VIBEREVERT_DIR_PREFIX)) {
-    throw new PathObservationError(
-      `${context}: path under .viberevert/ ${JSON.stringify(path)}`,
-      path,
-    );
-  }
-  for (const seg of path.split("/")) {
-    if (seg === "" || seg === "." || seg === "..") {
-      throw new PathObservationError(
-        `${context}: unsafe segment ${JSON.stringify(seg)} in ${JSON.stringify(path)}`,
-        path,
-      );
-    }
+  const message = repoRelativePathSafetyError(path, context);
+  if (message !== null) {
+    throw new PathObservationError(message, path);
   }
 }
 
