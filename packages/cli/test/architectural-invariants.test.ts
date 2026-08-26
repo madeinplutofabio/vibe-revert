@@ -420,20 +420,117 @@ describe("Architectural invariants -- D19 config-blind commands", () => {
   // (a corrupt `.viberevert.yml` would block the listing commands the
   // user needs to clean up state).
   //
+  // The list holds repo-relative PATHS rather than bare command names
+  // because M 0.8.0 step 4c extends the contract past the commands/
+  // directory: `end`'s domain logic now lives in
+  // `operations/end-session.ts`, which owns the whole end transaction.
+  // Pinning only `commands/end.ts` would let a config read slip into the
+  // operation while the Command it fronts still looked clean -- and the
+  // operation is also what `viberevert run` and `viberevert shell` route
+  // through, so a regression there is wider than one command.
+  //
   // The `\bloadConfig\b` pattern catches imports, call sites, and any
   // other mention of the symbol. The findOffenders helper's `//`
   // comment filter skips the lines where these files document the
   // invariant by mentioning `loadConfig` in plain English (e.g., the
   // "MUST NOT import or call `loadConfig`" architectural-lock blocks
-  // in each command's file header).
+  // in each file's header).
 
-  it.each(["end", "checkpoints", "sessions"])("%s.ts does NOT reference loadConfig", (cmd) => {
-    const source = readSource(`packages/cli-commands/src/commands/${cmd}.ts`);
+  it.each([
+    "packages/cli-commands/src/commands/end.ts",
+    "packages/cli-commands/src/commands/checkpoints.ts",
+    "packages/cli-commands/src/commands/sessions.ts",
+    "packages/cli-commands/src/operations/end-session.ts",
+  ])("%s does NOT reference loadConfig", (rel) => {
+    const source = readSource(rel);
     const offenders = findOffenders(source, /\bloadConfig\b/);
     expect(
       offenders,
-      `${cmd}.ts must not reference loadConfig per D19 config-blind contract. Matches: ${JSON.stringify(offenders)}`,
+      `${rel} must not reference loadConfig per D19 config-blind contract. Matches: ${JSON.stringify(offenders)}`,
     ).toEqual([]);
+  });
+});
+
+describe("Architectural invariants -- M 0.8.0 step 4c session checkpoint path", () => {
+  // `startSessionOperation` WRITES the inner-session checkpoint to
+  // `<tmpSessionDir>/checkpoint`; the session dir is then renamed into
+  // place, so the checkpoint lands at
+  // `.viberevert/sessions/<id>/checkpoint`. `endSessionOperation` READS it
+  // back from that path to build the capture oracle.
+  //
+  // The two sides deliberately do NOT share a constant. start-session.ts
+  // owns the write and has no other reason to export one, and threading an
+  // import purely to satisfy this agreement would grow a module's public
+  // surface for a test's benefit. The cost of that choice is one string
+  // literal duplicated across two files -- exactly the kind of drift that
+  // fails silently: end would reconstruct nothing, capture would refuse,
+  // and it would surface as a confusing runtime error rather than a broken
+  // build. This test converts that risk into a build failure by extracting
+  // BOTH literals from source and comparing them.
+  //
+  // It also pins the shared value to "checkpoint". Agreement alone is not
+  // enough: renaming both sides together would compile, satisfy an
+  // agreement-only check, and quietly orphan every session already on
+  // disk, whose checkpoint really is in a directory named `checkpoint`.
+  // The literal is a persisted-layout contract, not an implementation
+  // detail.
+
+  const START_OPERATION_REL = "packages/cli-commands/src/operations/start-session.ts";
+  const END_OPERATION_REL = "packages/cli-commands/src/operations/end-session.ts";
+
+  it("start-session.ts's checkpoint dirname literal matches end-session.ts's, and both are 'checkpoint'", () => {
+    const writerSource = stripTsComments(readSource(START_OPERATION_REL));
+    const writerMatch = writerSource.match(
+      /checkpointDir:\s*join\(\s*tmpSessionDir\s*,\s*"([^"]+)"\s*\)/,
+    );
+    expect(
+      writerMatch,
+      `${START_OPERATION_REL} must pass \`checkpointDir: join(tmpSessionDir, "<name>")\` to createCheckpoint; the checkpoint-path agreement cannot be verified without it.`,
+    ).not.toBeNull();
+
+    const readerSource = stripTsComments(readSource(END_OPERATION_REL));
+    const readerMatch = readerSource.match(
+      /(?:^|\n)\s*const\s+SESSION_CHECKPOINT_DIRNAME\s*=\s*"([^"]+)"/,
+    );
+    expect(
+      readerMatch,
+      `${END_OPERATION_REL} must declare \`const SESSION_CHECKPOINT_DIRNAME = "<name>"\` at top level; the checkpoint-path agreement cannot be verified without it.`,
+    ).not.toBeNull();
+
+    const writerName = writerMatch?.[1];
+    const readerName = readerMatch?.[1];
+    expect(
+      readerName,
+      `${END_OPERATION_REL}'s SESSION_CHECKPOINT_DIRNAME (${String(readerName)}) must equal the dirname ${START_OPERATION_REL} writes (${String(writerName)}). These are duplicated on purpose; drift silently breaks end-of-session capture.`,
+    ).toBe(writerName);
+
+    expect(
+      writerName,
+      "The session checkpoint dirname is a persisted-layout contract: sessions already on disk store their checkpoint in a directory literally named `checkpoint`. Renaming both sides together would compile and orphan them.",
+    ).toBe("checkpoint");
+  });
+});
+
+describe("Architectural invariants -- M 0.8.0 step 4c fenced end-state authority", () => {
+  // endSessionOperation must persist the two end-status surfaces from the
+  // StableContributionCapture that survived the end-state fence. A fresh git
+  // status read after the fence would let after-status.* describe a different
+  // tree from contribution.json.
+  //
+  // Pin both sides of the contract: the operation must not call the old
+  // direct status helpers, and the values handed to core.endSession must come
+  // from the capture's `stable` value.
+
+  const END_OPERATION_REL = "packages/cli-commands/src/operations/end-session.ts";
+
+  it("end-session.ts uses the fenced capture as the sole after-status authority", () => {
+    const source = stripTsComments(readSource(END_OPERATION_REL));
+
+    expect(source).not.toMatch(/\bgetStatusPorcelainText\b/);
+    expect(source).not.toMatch(/\bgetStatusPorcelainZRaw\b/);
+
+    expect(source).toMatch(/afterStatusText:\s*stable\.afterStatusText/);
+    expect(source).toMatch(/afterStatusZRaw:\s*stable\.afterStatusZRaw/);
   });
 });
 

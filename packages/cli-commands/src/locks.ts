@@ -4,12 +4,24 @@
 // Package-private exclusive-lock helper for the CLI orchestration layer (D22).
 //
 // NOT exported from any public CLI surface. NOT registered as a command.
-// Used by `viberevert start` (always) and `viberevert checkpoint` (only when
-// --name is supplied — nameless checkpoints have no uniqueness invariant
-// to protect, so they skip the lock entirely) to serialize the
-// trust-critical invariants:
-//   - "exactly one active session per repo" (D11) — start.lock
-//   - "checkpoint name unique within a repo" (D5b) — checkpoint-name.lock
+// Callers use it to serialize trust-critical invariants. Two of those:
+//
+//   - `start.lock` — "exactly one active session per repo" (D11). The
+//     SHARED SESSION-LIFECYCLE lock: taken by `viberevert start` (always)
+//     and, as of M 0.8.0, by the end-session transaction (always), which
+//     backs `viberevert end` and the session close inside `viberevert run`
+//     and `viberevert shell`.
+//
+//     End shares this lock rather than taking one of its own because both
+//     ends of a session's life mutate `active-session.json`; a separate
+//     `end.lock` would let a start and an end interleave on the very file
+//     the invariant is about. The name is historical — read it as the
+//     lifecycle lock, not a start-only lock.
+//
+//   - `checkpoint-name.lock` — "checkpoint name unique within a repo"
+//     (D5b). Taken by `viberevert checkpoint` ONLY when `--name` is
+//     supplied; nameless checkpoints have no uniqueness invariant to
+//     protect, so they skip the lock entirely. Unchanged by M 0.8.0.
 //
 // Why mkdir-based locks (not flock, not an npm package):
 //   - `mkdir(lockDir, { recursive: false })` is atomic on every supported
@@ -92,6 +104,12 @@ export interface LockInfo {
  * In ALL of those failure modes the lock is still considered held
  * (the dir's existence IS the lock), and the CLI prints the
  * "lock metadata unavailable" refusal variant per D22.
+ *
+ * The class stays PRESENTATION-NEUTRAL: it carries structured facts
+ * (`lockDir`, `info`) and nothing about how to render them. Rendering
+ * lives in `formatConcurrentOperationRefusal` below, so a command can
+ * catch this, decide it is not a user-facing condition, and do something
+ * else entirely.
  */
 export class ConcurrentOperationError extends Error {
   readonly lockDir: string;
@@ -108,6 +126,48 @@ export class ConcurrentOperationError extends Error {
     this.lockDir = lockDir;
     this.info = info;
   }
+}
+
+/**
+ * Render D22's locked concurrent-operation refusal for stderr.
+ *
+ * Canonical home for this copy. It was previously inlined identically at
+ * every command that catches `ConcurrentOperationError`, including a
+ * private `concurrentOperationCopy` helper inside `shell-pty.ts` — the same
+ * extraction, at the wrong altitude. The refusal describes
+ * `ConcurrentOperationError` and `LockInfo`, so it belongs beside them
+ * rather than beside whichever command happened to need it first.
+ *
+ * TWO variants, selected by whether the holder's `lock.json` was readable.
+ * Both are byte-for-byte the shipped copy and MUST stay that way: several
+ * command tests assert the exact stderr, and the wording is D22-locked.
+ * Extracting it is not licence to improve it.
+ *
+ * `lockPathForMessage` is the path shown to the user, supplied by the
+ * caller rather than read off the error, because callers legitimately
+ * differ:
+ *   - Commands with exactly one lock in play pass their repo-relative
+ *     constant (e.g. `START_LOCK_REL`), which is shorter and
+ *     platform-neutral — D22 requires forward slashes in this copy.
+ *   - `rollback` can contend on either of two locks, so it passes
+ *     `err.lockDir` to name the one that actually blocked.
+ *
+ * As of M 0.8.0 this covers `start.lock` contention arising from an
+ * end-session transaction as well as from `start`. No end-specific variant
+ * is needed: the holder's own `command` field names the operation, so
+ * "command: end-session" already tells the user what is running.
+ *
+ * @param info Parsed holder metadata, or `null` when unavailable.
+ * @param lockPathForMessage Lock path to show in the recovery instruction.
+ * @returns The complete stderr block, newline-terminated.
+ */
+export function formatConcurrentOperationRefusal(
+  info: LockInfo | null,
+  lockPathForMessage: string,
+): string {
+  return info !== null
+    ? `Another viberevert operation is already running:\n  command:  ${info.command}\n  pid:      ${info.pid}\n  since:    ${info.started_at}\n\nIf you're sure that command isn't running anymore (e.g., crashed),\nremove this stale lock directory manually:\n  ${lockPathForMessage}\n`
+    : `Another viberevert operation is already running (lock metadata unavailable).\n\nIf you're sure no other viberevert command is running,\nremove this stale lock directory manually:\n  ${lockPathForMessage}\n`;
 }
 
 /**

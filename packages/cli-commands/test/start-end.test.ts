@@ -7,8 +7,8 @@
 //
 // Both commands operate on session state, so test setup (mkdtemp +
 // git init + .gitignore) is shared. Each command gets its own
-// `describe` block. The 5f addition will share `beforeEach`/`afterEach`
-// + the `setupActiveSession` helper unchanged.
+// `describe` block. Both share `beforeEach` / `afterEach` and the
+// `setupActiveSession` fixture where an existing active session is needed.
 
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import { promisify } from "node:util";
+import { createCheckpoint } from "@viberevert/git";
 import {
   type ActiveSessionLock,
   ManifestSchema,
@@ -32,10 +33,14 @@ import { VIBEREVERT_TEST_FIXED_NOW } from "../src/runtime-env.js";
 
 const execFileAsync = promisify(execFile);
 
-// Crockford-base32 ULIDs (no I, L, O, U) — same fixture pattern as
+// Crockford-base32 ULID (no I, L, O, U) — same fixture pattern as
 // packages/core/test/session.test.ts.
+//
+// There is deliberately NO fixture checkpoint-id constant. Checkpoint
+// identity is produced by `createCheckpoint` and returned to its caller;
+// inventing one here would describe a session that `viberevert start`
+// cannot produce. See `setupActiveSession`.
 const SESSION_ID = "sess_01JV8Z0N6E7ABCDEFGHJKMNPQR";
-const CHECKPOINT_ID = "cp_01JV8Y7W2M7ABCDEFGHJKMNPQR";
 const STARTED_AT = "2026-05-04T10:30:11Z";
 
 /**
@@ -49,17 +54,22 @@ const STARTED_AT = "2026-05-04T10:30:11Z";
  */
 const FIXED_NOW = "2026-01-01T00:00:00Z";
 
+/**
+ * D5/D11 display truncation: prefix plus 14 characters. `cp_` is three,
+ * so a truncated checkpoint id is 17 characters.
+ */
+const CHECKPOINT_ID_DISPLAY_LENGTH = 17;
+
 let tmpRoot: string;
 let originalCwd: string;
 
 beforeEach(async () => {
   tmpRoot = await mkdtemp(join(tmpdir(), "viberevert-cli-end-"));
   originalCwd = process.cwd();
-  // Real git repo: end.ts shells out via @viberevert/git's
-  // getStatusPorcelainText, which needs a real .git/ dir. Start tests
-  // additionally call createCheckpoint which calls getHeadSha — that
-  // requires HEAD to point somewhere, so we make an initial empty
-  // commit. End tests don't need the commit but it doesn't affect them.
+  // Real git repo: both start and end now exercise git-backed operations.
+  // Start creates the owning checkpoint; end reconstructs that checkpoint
+  // through the contribution-capture oracle. Both therefore require a real
+  // repository, and checkpoint creation requires a valid HEAD.
   await execFileAsync("git", ["init", "-q", "-b", "main"], { cwd: tmpRoot });
   await execFileAsync(
     "git",
@@ -93,28 +103,57 @@ afterEach(async () => {
 });
 
 /**
- * Set up an in-flight session by writing session-state files directly
- * to disk, bypassing core.startSession + git.createCheckpoint. The
- * goal is test isolation: end.ts only depends on
- *   - .viberevert/active-session.json existing and parsing
- *   - .viberevert/sessions/<id>/session.json existing and parsing
- *   - the session.json's session_id matching the dir name
- * It does NOT depend on the inner checkpoint dir's contents (git's
- * domain), so we just create an empty checkpoint/ subdir.
+ * Set up an in-flight session on disk, bypassing core.startSession.
+ *
+ * The session-state files are written directly, but the inner checkpoint
+ * is REAL, created through `git.createCheckpoint` exactly as
+ * `startSessionOperation` does.
+ *
+ * **Why real, as of M 0.8.0 step 4c.** This helper previously created an
+ * empty `checkpoint/` subdir and documented its contents as irrelevant,
+ * because `end` only needed the active lock and `session.json` to parse.
+ * That is no longer the contract: `endSessionOperation` reconstructs the
+ * owning checkpoint into a disposable worktree to capture the session's
+ * contribution. An empty dir makes it refuse with `CheckpointNotFoundError`
+ * ("manifest.json not found"), so a fixture without a real checkpoint no
+ * longer describes a session that can end.
+ *
+ * **Checkpoint identity comes from `createCheckpoint`, never from a
+ * constant.** `createCheckpoint` generates the id and returns it; that
+ * returned value is what `startSessionOperation` writes into
+ * `session.json` and the active lock, so this helper does the same. The
+ * manifest itself records only `session_id`; the generated checkpoint id is
+ * persisted in `session.json` and `active-session.json`, which is why the id
+ * is returned here for tests that assert on how it is displayed.
+ *
+ * A fixture-supplied checkpoint id would describe a session `viberevert
+ * start` cannot produce, so the parameter does not exist.
+ *
+ * `capturedAt` is pinned to `opts.startedAt` so the fixture reads no
+ * clock: the checkpoint is taken, in fiction, at session start.
  */
 async function setupActiveSession(opts: {
   sessionId: string;
-  checkpointId: string;
   startedAt: string;
   task?: string;
-}): Promise<void> {
+}): Promise<{ checkpointId: string }> {
   const sessionDir = join(tmpRoot, ".viberevert", "sessions", opts.sessionId);
-  await mkdir(join(sessionDir, "checkpoint"), { recursive: true });
+  await mkdir(sessionDir, { recursive: true });
+
+  // Mirrors startSessionOperation: the session dir exists, and
+  // createCheckpoint owns the `checkpoint/` subdir beneath it.
+  const { checkpointId } = await createCheckpoint({
+    repoRoot: tmpRoot,
+    checkpointDir: join(sessionDir, "checkpoint"),
+    rollbackExcludePatterns: [],
+    sessionId: opts.sessionId,
+    capturedAt: opts.startedAt,
+  });
 
   const sessionState: SessionState = {
     schema_version: SESSION_STATE_SCHEMA_VERSION,
     session_id: opts.sessionId,
-    checkpoint_id: opts.checkpointId,
+    checkpoint_id: checkpointId,
     started_at: opts.startedAt,
     ...(opts.task !== undefined ? { task: opts.task } : {}),
     before_status_path: `.viberevert/sessions/${opts.sessionId}/before-status.txt`,
@@ -127,7 +166,7 @@ async function setupActiveSession(opts: {
   const lock: ActiveSessionLock = {
     schema_version: SESSION_STATE_SCHEMA_VERSION,
     session_id: opts.sessionId,
-    checkpoint_id: opts.checkpointId,
+    checkpoint_id: checkpointId,
     started_at: opts.startedAt,
     ...(opts.task !== undefined ? { task: opts.task } : {}),
   };
@@ -135,6 +174,8 @@ async function setupActiveSession(opts: {
     join(tmpRoot, ".viberevert", "active-session.json"),
     JSON.stringify(lock, null, 2),
   );
+
+  return { checkpointId };
 }
 
 /**
@@ -142,6 +183,11 @@ async function setupActiveSession(opts: {
  * stdout/stderr. Same harness pattern as init.test.ts — see the
  * comments there for why we use real PassThrough/Writable streams
  * (avoids structural casts on context).
+ *
+ * Note on streams: clipanion 3.2.1 writes UNCAUGHT command errors to
+ * `stdout`, not `stderr`. A command that throws therefore surfaces here
+ * as exit 1 with an empty `stderr` and a stack trace in `stdout`. Assert
+ * on `stderr` only for refusals the command writes deliberately.
  */
 async function runEnd(
   args: string[],
@@ -240,9 +286,8 @@ async function runStart(
 
 describe("end command", () => {
   it("happy path: ends active session, writes after-status.txt, mutates session.json, deletes lock", async () => {
-    await setupActiveSession({
+    const { checkpointId } = await setupActiveSession({
       sessionId: SESSION_ID,
-      checkpointId: CHECKPOINT_ID,
       startedAt: STARTED_AT,
       task: "Add yearly billing",
     });
@@ -255,8 +300,9 @@ describe("end command", () => {
     expect(result.stdout).toContain(`ID: ${SESSION_ID}`);
     expect(result.stdout).toContain("Task: Add yearly billing");
     expect(result.stdout).toContain(`Started: ${STARTED_AT}`);
-    // Locks the second-precision ISO format from end.ts step 4
-    // (and session.ts architectural lock #2). Exact value isn't
+    // Locks the second-precision ISO format produced by
+    // endSessionOperation (operation architectural lock #3 and
+    // session.ts architectural lock #2). Exact value isn't
     // load-bearing — the format contract is.
     expect(result.stdout).toMatch(/Ended: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z/);
 
@@ -276,6 +322,7 @@ describe("end command", () => {
     expect(session.after_status_path).toBe(`.viberevert/sessions/${SESSION_ID}/after-status.txt`);
     // Pre-existing fields preserved
     expect(session.session_id).toBe(SESSION_ID);
+    expect(session.checkpoint_id).toBe(checkpointId);
     expect(session.started_at).toBe(STARTED_AT);
     expect(session.task).toBe("Add yearly billing");
 
@@ -290,7 +337,6 @@ describe("end command", () => {
   it("captures `git status --porcelain=v1` text into after-status.txt", async () => {
     await setupActiveSession({
       sessionId: SESSION_ID,
-      checkpointId: CHECKPOINT_ID,
       startedAt: STARTED_AT,
     });
 
@@ -329,7 +375,6 @@ describe("end command", () => {
   it("VIBEREVERT_TEST_FIXED_NOW overrides session.json.ended_at deterministically (D49 precondition)", async () => {
     await setupActiveSession({
       sessionId: SESSION_ID,
-      checkpointId: CHECKPOINT_ID,
       startedAt: STARTED_AT,
       task: "deterministic test",
     });
@@ -465,9 +510,8 @@ describe("start command", () => {
   it("refuses BEFORE creating any new checkpoint/temp dir when a session is already active (D11 + architectural-lock-#4)", async () => {
     await writeMinimalConfig();
     // Pre-existing active session
-    await setupActiveSession({
+    const { checkpointId } = await setupActiveSession({
       sessionId: SESSION_ID,
-      checkpointId: CHECKPOINT_ID,
       startedAt: STARTED_AT,
       task: "first attempt",
     });
@@ -481,12 +525,15 @@ describe("start command", () => {
     expect(result.stderr).toContain("Checkpoint:");
     expect(result.stderr).toContain("Task:");
     expect(result.stderr).toContain("first attempt");
-    // Truncated IDs (D11 example uses prefix + 14 chars per D5)
+    // Truncated IDs (D11 example uses prefix + 14 chars per D5).
+    // The checkpoint side is derived from the id createCheckpoint
+    // actually generated, so this pins truncation of the real
+    // checkpoint identity rather than of a fixture constant.
     expect(result.stderr).toContain("sess_01JV8Z0N6E7ABC");
-    expect(result.stderr).toContain("cp_01JV8Y7W2M7ABC");
+    expect(result.stderr).toContain(checkpointId.slice(0, CHECKPOINT_ID_DISPLAY_LENGTH));
     // Full IDs MUST NOT leak (truncation contract)
     expect(result.stderr).not.toContain(SESSION_ID);
-    expect(result.stderr).not.toContain(CHECKPOINT_ID);
+    expect(result.stderr).not.toContain(checkpointId);
     // "Use:" footer per D74 unlock (M D Step 7): names the M B
     // state-machine exit (viberevert end) AND the M D discard
     // sequence (viberevert end && viberevert rollback <session>).
@@ -515,7 +562,8 @@ describe("start command", () => {
     // Same property for checkpoints/: never written to. start.ts
     // writes inner-session checkpoints inside the session tmp dir,
     // not directly into .viberevert/checkpoints/, so this dir should
-    // not exist at all.
+    // not exist at all. The fixture's own checkpoint likewise lives
+    // under its session dir, so it cannot satisfy this by accident.
     const checkpointsDir = join(tmpRoot, ".viberevert", "checkpoints");
     await expect(stat(checkpointsDir)).rejects.toThrow();
   });

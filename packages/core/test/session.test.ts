@@ -18,34 +18,76 @@
 //       CLI's refusal message can render details without re-reading.
 //
 //   endSession (M D Step 4a — TWO snapshots persisted per session.ts
-//   header lock #1):
-//     - Happy-path mutation order: after-status.txt written (D8 audit
-//       form; raw v1 text), after-status.z written (D8 machine surface;
-//       raw `git status --porcelain=v1 -z` BYTES persisted verbatim),
-//       session.json updated with ended_at + after_status_path +
-//       after_status_z_path, active-session.json deleted. Both files
-//       exist after a successful endSession; both path fields populate
-//       session.json. Per session.ts header lock #1 the two snapshots
-//       are captured by the CLI via SEPARATE git invocations
-//       (--porcelain=v1 vs --porcelain=v1 -z, because -z changes
-//       output format) and supplied independently to endSession —
-//       core does not assume they came from the same git call, and
-//       persists the exact text and bytes the caller hands it.
-//       Byte-exact round-trip of after-status.z is load-bearing:
-//       M D's rollback dirty-tree comparison reads these bytes back
-//       through @viberevert/git's shared parseStatusPorcelainZ
+//   header lock #1; M 0.8.0 — a THIRD artifact, the contribution):
+//     - Happy-path FINAL STATE: contribution.json holds the caller's exact
+//       bytes (M 0.8.0), after-status.txt holds the D8 audit form (raw v1
+//       text), after-status.z holds the D8 machine surface (raw
+//       `git status --porcelain=v1 -z` BYTES persisted verbatim),
+//       session.json carries ended_at + after_status_path +
+//       after_status_z_path + contribution_path + contribution_sha256, and
+//       active-session.json is gone. The WRITE ORDER is not observable
+//       from outside endSession and is deliberately not asserted here;
+//       what IS asserted is the invariant that order protects — that
+//       contribution_sha256 digests the bytes actually present at
+//       contribution_path.
+//       Per session.ts header lock #1 the two status snapshots are
+//       captured by the CLI via SEPARATE git invocations (--porcelain=v1
+//       vs --porcelain=v1 -z, because -z changes output format) and
+//       supplied independently to endSession — core does not assume they
+//       came from the same git call, and persists the exact text and bytes
+//       the caller hands it. Byte-exact round-trip of after-status.z is
+//       load-bearing: M D's rollback dirty-tree comparison reads these
+//       bytes back through @viberevert/git's shared parseStatusPorcelainZ
 //       parser, and any text-encoding round-trip would defeat the
 //       z-format's "binary-safe path delimiter" guarantee.
 //     - NoActiveSessionError when no lock.
-//     - Validate-before-mutate: a malformed `endedAt` throws BEFORE any
+//     - Validate-before-mutate: a malformed `endedAt` refuses BEFORE any
 //       writeFileAtomic. Asserts on-disk state byte-untouched (no
-//       after-status.txt, no after-status.z, session.json unchanged,
-//       lock unchanged). This locks architectural lock #4 in session.ts:
-//       read+validate first, mutate second. Coverage of after-status.z
-//       absence is what makes the lock M D-tight: if a future refactor
-//       split the two writes around the validation, the txt-only
-//       assertion would silently pass while leaking a half-written
-//       machine snapshot.
+//       contribution.json, no after-status.txt, no after-status.z,
+//       session.json unchanged, lock unchanged). This pins endSession's
+//       read-and-validate-first, mutate-second ordering. Coverage of
+//       after-status.z absence is what makes it M D-tight; coverage of
+//       contribution.json absence is what makes it 0.8.0-tight. If a
+//       future refactor hoisted any write above the validation block, one
+//       of those three absence assertions is the canary.
+//       On what that case actually rejects: `endedAt` must equal the
+//       contribution's `ended_at`, so the fixture carries the same
+//       malformed value on both sides to avoid tripping the cross-binding
+//       check instead. SessionContributionFileSchema therefore rejects the
+//       timestamp first, before the terminal SessionState is ever built.
+//       The terminal parse stays as defense in depth for the coupling
+//       rules; this test does not separately exercise its timestamp
+//       validator.
+//
+//   endSession, the M 0.8.0 contribution specifically:
+//     - Architectural lock #8 (EXACT bytes, never a re-serialization) is
+//       pinned by handing core deliberately NON-CANONICAL bytes — the
+//       same object serialized compactly rather than with the producer's
+//       2-space indent — and asserting both that the on-disk file equals
+//       those bytes and that contribution_sha256 is their digest. A
+//       reserializing implementation would still validate and still
+//       "work"; it would just write different bytes, or record a digest
+//       over bytes that are not on disk. The test also asserts the two
+//       serializations actually differ, so it cannot pass vacuously.
+//     - The SAME test first seeds an UNREFERENCED contribution.json, the
+//       state session.ts documents as reachable when a prior end was
+//       interrupted between publishing the contribution and writing the
+//       session.json that names it. The session is still active, so a
+//       retry must replace that orphan — not fail on it, not merge with
+//       it. Folding this into the exact-byte case is deliberate: the
+//       orphan carries the OTHER serialization, so a failed replacement is
+//       caught by the byte-equality assertion already there. It also
+//       exercises rename-over-an-existing-regular-file on Windows.
+//     - The three cross-bindings (session_id, checkpoint_id, ended_at)
+//       each get their own refusal test, because a single combined test
+//       would still pass if two of the three checks were deleted.
+//     - Malformed payloads (not JSON; schema-invalid) refuse with their
+//       NATIVE error detail rather than ContributionBindingError. The
+//       schema case asserts on the ZodError's issue path, so swapping the
+//       structural failure for a generic Error would fail the test —
+//       asserting merely "not a ContributionBindingError" would not.
+//     - Every refusal above asserts zero mutation, through the same helper
+//       the malformed-endedAt case uses.
 //
 //   loadSession:
 //     - Happy-path returns parsed SessionState.
@@ -80,13 +122,16 @@
 // session from the listing and causing tests to pass for the wrong
 // reason or fail with misleading assertions.
 
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   type ActiveSessionLock,
   ActiveSessionLockSchema,
+  CONTRIBUTION_FILE_SCHEMA_VERSION,
   SESSION_STATE_SCHEMA_VERSION,
+  type SessionContributionFile,
   type SessionState,
   SessionStateSchema,
 } from "@viberevert/session-format";
@@ -94,6 +139,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   appendCommandsLogEntry,
+  ContributionBindingError,
   endSession,
   listSessions,
   loadActiveSessionLock,
@@ -114,6 +160,10 @@ import {
 const OLDER_ID = "sess_01JV8Y7W2M7ABCDEFGHJKMNPQR";
 const NEWER_ID = "sess_01JV8Z0N6E7ABCDEFGHJKMNPQR";
 const CHECKPOINT_ID = "cp_01JV8Y7W2M7ABCDEFGHJKMNPQR";
+// A second valid checkpoint id, used ONLY by the checkpoint cross-binding
+// refusal. It must be schema-valid so the test reaches the binding check
+// rather than failing earlier on shape.
+const OTHER_CHECKPOINT_ID = "cp_01JV8Z0N6E7ABCDEFGHJKMNPQR";
 const OLDER_TS = "2026-05-04T09:00:00Z";
 const NEWER_TS = "2026-05-04T10:30:11Z";
 const ENDED_TS = "2026-05-04T11:00:00Z";
@@ -135,6 +185,58 @@ const ENDED_TS = "2026-05-04T11:00:00Z";
 //       regardless — the assertion is calibrated to catch a future
 //       refactor that accidentally writes the string form.
 const AFTER_STATUS_Z_BYTES = Buffer.from(" M src/foo.ts\0?? src/bar.ts\0", "utf8");
+
+// M 0.8.0 contribution fixtures. `gitObjectId` requires 40 or 64 lowercase
+// hex; these are 40-char SHA-1-shaped ids. They differ from each other so the
+// fixture describes a session that committed, which is the realistic case.
+const BEFORE_HEAD_SHA = "0123456789abcdef0123456789abcdef01234567";
+const AFTER_HEAD_SHA = "89abcdef0123456789abcdef0123456789abcdef";
+
+/**
+ * A minimal but fully valid `SessionContributionFile`.
+ *
+ * `entries: []` is a real contribution, not a degenerate stub: a session that
+ * ended without changing anything produces exactly this. Core validates and
+ * digests the artifact without interpreting `entries`, so an empty list
+ * exercises every code path in endSession while keeping the fixture free of
+ * PathState and change-group construction that belongs to @viberevert/git's
+ * tests, not core's.
+ *
+ * The schema's string fields infer as plain `string`, so an override may carry
+ * a deliberately INVALID value (a truncated sha, a malformed timestamp)
+ * without a cast — which is what the refusal fixtures below rely on.
+ */
+function buildContribution(
+  overrides: Partial<SessionContributionFile> = {},
+): SessionContributionFile {
+  return {
+    schema_version: CONTRIBUTION_FILE_SCHEMA_VERSION,
+    session_id: NEWER_ID,
+    checkpoint_id: CHECKPOINT_ID,
+    before_head_sha: BEFORE_HEAD_SHA,
+    after_head_sha: AFTER_HEAD_SHA,
+    captured_at: NEWER_TS,
+    ended_at: ENDED_TS,
+    entries: [],
+    ...overrides,
+  };
+}
+
+/**
+ * Serialize a contribution the way the shipped producer does: 2-space indent,
+ * no trailing newline. Core never performs this step itself — that is exactly
+ * the point of architectural lock #8 — so the tests own it.
+ */
+function serializeContribution(contribution: SessionContributionFile): Buffer {
+  return Buffer.from(JSON.stringify(contribution, null, 2), "utf8");
+}
+
+function sha256Hex(bytes: Buffer): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+/** The canonical payload used by every test that is not varying it. */
+const CONTRIBUTION_BYTES = serializeContribution(buildContribution());
 
 let repoRoot: string;
 
@@ -332,27 +434,59 @@ describe("startSession", () => {
 // endSession
 // =============================================================================
 
+/**
+ * Start a real in-flight session for NEWER_ID and return its final dir.
+ *
+ * Uses startSession rather than a hand-written fixture so the state
+ * endSession reads is the state startSession actually produces — a fixture
+ * could drift from the writer and hide a coupling bug.
+ */
+async function startInFlightSession(): Promise<string> {
+  const tmpDir = await makeTmpSessionDir(NEWER_ID);
+  await startSession({
+    repoRoot,
+    tmpSessionDir: tmpDir,
+    sessionId: NEWER_ID,
+    checkpointId: CHECKPOINT_ID,
+    startedAt: NEWER_TS,
+    beforeStatusText: "before",
+  });
+  return join(repoRoot, ".viberevert", "sessions", NEWER_ID);
+}
+
+const ACTIVE_LOCK_REL = join(".viberevert", "active-session.json");
+
+/**
+ * Assert that a REFUSED endSession left the session dir byte-untouched.
+ *
+ * Covers all three artifacts endSession would write plus both pieces of
+ * pre-existing state. Shared by the malformed-endedAt case and every M 0.8.0
+ * contribution refusal, so a write hoisted above the validation block fails
+ * here no matter which input triggered the refusal.
+ */
+async function expectNoEndMutation(
+  finalDir: string,
+  sessionJsonBefore: string,
+  lockBefore: string,
+): Promise<void> {
+  await expect(stat(join(finalDir, "contribution.json"))).rejects.toThrow();
+  await expect(stat(join(finalDir, "after-status.txt"))).rejects.toThrow();
+  await expect(stat(join(finalDir, "after-status.z"))).rejects.toThrow();
+  expect(await readFile(join(finalDir, "session.json"), "utf8")).toBe(sessionJsonBefore);
+  expect(await readFile(join(repoRoot, ACTIVE_LOCK_REL), "utf8")).toBe(lockBefore);
+}
+
 describe("endSession", () => {
-  it("happy path: writes after-status.txt + after-status.z, mutates session.json with both paths, deletes active lock", async () => {
-    // Set up an in-flight session
-    const tmpDir = await makeTmpSessionDir(NEWER_ID);
-    await startSession({
-      repoRoot,
-      tmpSessionDir: tmpDir,
-      sessionId: NEWER_ID,
-      checkpointId: CHECKPOINT_ID,
-      startedAt: NEWER_TS,
-      beforeStatusText: "before",
-    });
+  it("happy path: writes contribution + both status snapshots, mutates session.json, deletes active lock", async () => {
+    const finalDir = await startInFlightSession();
 
     await endSession({
       repoRoot,
       endedAt: ENDED_TS,
       afterStatusText: "after",
       afterStatusZRaw: AFTER_STATUS_Z_BYTES,
+      contributionBytes: CONTRIBUTION_BYTES,
     });
-
-    const finalDir = join(repoRoot, ".viberevert", "sessions", NEWER_ID);
 
     // after-status.txt (D8 audit form — raw v1 text) written verbatim
     expect(await readFile(join(finalDir, "after-status.txt"), "utf8")).toBe("after");
@@ -366,20 +500,30 @@ describe("endSession", () => {
     expect(Buffer.isBuffer(zRoundTrip)).toBe(true);
     expect(zRoundTrip.equals(AFTER_STATUS_Z_BYTES)).toBe(true);
 
-    // session.json mutated correctly — BOTH path fields populated per
-    // M D Step 4a
+    // contribution.json (M 0.8.0) likewise written BYTE-IDENTICALLY.
+    const contributionRoundTrip = await readFile(join(finalDir, "contribution.json"));
+    expect(contributionRoundTrip.equals(CONTRIBUTION_BYTES)).toBe(true);
+
+    // session.json mutated correctly — all path fields populated
     const session = SessionStateSchema.parse(
       JSON.parse(await readFile(join(finalDir, "session.json"), "utf8")),
     );
     expect(session.ended_at).toBe(ENDED_TS);
     expect(session.after_status_path).toBe(`.viberevert/sessions/${NEWER_ID}/after-status.txt`);
     expect(session.after_status_z_path).toBe(`.viberevert/sessions/${NEWER_ID}/after-status.z`);
+    expect(session.contribution_path).toBe(`.viberevert/sessions/${NEWER_ID}/contribution.json`);
+
+    // The recorded digest describes the bytes actually on disk. That pairing
+    // is what a reader resolving contribution_path depends on; the write
+    // order session.ts uses to keep it robust is not observable from here.
+    expect(session.contribution_sha256).toBe(sha256Hex(contributionRoundTrip));
+
     // Pre-existing fields preserved
     expect(session.session_id).toBe(NEWER_ID);
     expect(session.started_at).toBe(NEWER_TS);
 
     // Active lock deleted
-    await expect(stat(join(repoRoot, ".viberevert", "active-session.json"))).rejects.toThrow();
+    await expect(stat(join(repoRoot, ACTIVE_LOCK_REL))).rejects.toThrow();
   });
 
   it("throws NoActiveSessionError when no active-session.json exists", async () => {
@@ -389,25 +533,15 @@ describe("endSession", () => {
         endedAt: ENDED_TS,
         afterStatusText: "after",
         afterStatusZRaw: AFTER_STATUS_Z_BYTES,
+        contributionBytes: CONTRIBUTION_BYTES,
       }),
     ).rejects.toBeInstanceOf(NoActiveSessionError);
   });
 
-  it("validate-before-mutate: malformed endedAt throws BEFORE any writeFileAtomic", async () => {
-    // Set up an in-flight session
-    const tmpDir = await makeTmpSessionDir(NEWER_ID);
-    await startSession({
-      repoRoot,
-      tmpSessionDir: tmpDir,
-      sessionId: NEWER_ID,
-      checkpointId: CHECKPOINT_ID,
-      startedAt: NEWER_TS,
-      beforeStatusText: "before",
-    });
-
-    const finalDir = join(repoRoot, ".viberevert", "sessions", NEWER_ID);
+  it("validate-before-mutate: a malformed endedAt refuses BEFORE any writeFileAtomic", async () => {
+    const finalDir = await startInFlightSession();
     const sessionJsonBefore = await readFile(join(finalDir, "session.json"), "utf8");
-    const lockBefore = await readFile(join(repoRoot, ".viberevert", "active-session.json"), "utf8");
+    const lockBefore = await readFile(join(repoRoot, ACTIVE_LOCK_REL), "utf8");
 
     await expect(
       endSession({
@@ -415,23 +549,174 @@ describe("endSession", () => {
         endedAt: "not-a-real-date",
         afterStatusText: "after",
         afterStatusZRaw: AFTER_STATUS_Z_BYTES,
+        // Carries the same malformed value, so the refusal comes from
+        // timestamp validation rather than the ended_at cross-binding.
+        // SessionContributionFileSchema rejects it first, before the
+        // terminal SessionState is built — the point of this test is the
+        // zero-mutation guarantee, not which validator fires.
+        contributionBytes: serializeContribution(
+          buildContribution({ ended_at: "not-a-real-date" }),
+        ),
       }),
     ).rejects.toThrow();
 
-    // No after-status.txt written
-    await expect(stat(join(finalDir, "after-status.txt"))).rejects.toThrow();
-    // No after-status.z written either — M D Step 4a tightens the
-    // validate-before-mutate invariant to cover BOTH snapshots. A
-    // future refactor that split the two writes around the validation
-    // would leak the z-file even when endedAt is malformed; this
-    // assertion is the canary.
-    await expect(stat(join(finalDir, "after-status.z"))).rejects.toThrow();
-    // session.json byte-untouched
-    expect(await readFile(join(finalDir, "session.json"), "utf8")).toBe(sessionJsonBefore);
-    // Active lock byte-untouched
-    expect(await readFile(join(repoRoot, ".viberevert", "active-session.json"), "utf8")).toBe(
-      lockBefore,
+    // Nothing written: not the contribution (M 0.8.0), not either status
+    // snapshot (M D Step 4a), and neither piece of pre-existing state moved.
+    await expectNoEndMutation(finalDir, sessionJsonBefore, lockBefore);
+  });
+});
+
+// =============================================================================
+// endSession: the M 0.8.0 session contribution
+// =============================================================================
+
+describe("endSession contribution persistence (M 0.8.0)", () => {
+  it("writes the caller's EXACT bytes and replaces an orphan left by an interrupted end (lock #8)", async () => {
+    // Compact JSON parses to the same object as the producer's 2-space form,
+    // so a reserializing implementation would still validate and still
+    // "work" — it would just write different bytes, or record a digest over
+    // bytes that are not on disk. Both are caught below.
+    const contribution = buildContribution();
+    const compactBytes = Buffer.from(JSON.stringify(contribution), "utf8");
+    const prettyBytes = serializeContribution(contribution);
+
+    // Guard: if these ever became equal the test would pass vacuously.
+    expect(compactBytes.equals(prettyBytes)).toBe(false);
+
+    const finalDir = await startInFlightSession();
+
+    // Seed the orphan that a crash between "publish contribution" and "write
+    // session.json" leaves behind. The session is still ACTIVE, so this retry
+    // must replace the file in place. The orphan deliberately holds the OTHER
+    // serialization, so a failed replacement cannot hide behind bytes that
+    // happen to match.
+    await writeFile(join(finalDir, "contribution.json"), prettyBytes);
+    expect((await readFile(join(finalDir, "contribution.json"))).equals(prettyBytes)).toBe(true);
+
+    await endSession({
+      repoRoot,
+      endedAt: ENDED_TS,
+      afterStatusText: "after",
+      afterStatusZRaw: AFTER_STATUS_Z_BYTES,
+      contributionBytes: compactBytes,
+    });
+
+    const onDisk = await readFile(join(finalDir, "contribution.json"));
+    expect(onDisk.equals(compactBytes)).toBe(true);
+    expect(onDisk.equals(prettyBytes)).toBe(false);
+
+    const session = SessionStateSchema.parse(
+      JSON.parse(await readFile(join(finalDir, "session.json"), "utf8")),
     );
+    expect(session.contribution_sha256).toBe(sha256Hex(compactBytes));
+    expect(session.contribution_sha256).not.toBe(sha256Hex(prettyBytes));
+  });
+
+  it("refuses a contribution whose session_id names a different session", async () => {
+    const finalDir = await startInFlightSession();
+    const sessionJsonBefore = await readFile(join(finalDir, "session.json"), "utf8");
+    const lockBefore = await readFile(join(repoRoot, ACTIVE_LOCK_REL), "utf8");
+
+    await expect(
+      endSession({
+        repoRoot,
+        endedAt: ENDED_TS,
+        afterStatusText: "after",
+        afterStatusZRaw: AFTER_STATUS_Z_BYTES,
+        contributionBytes: serializeContribution(buildContribution({ session_id: OLDER_ID })),
+      }),
+    ).rejects.toBeInstanceOf(ContributionBindingError);
+
+    await expectNoEndMutation(finalDir, sessionJsonBefore, lockBefore);
+  });
+
+  it("refuses a contribution whose checkpoint_id is not the session's checkpoint", async () => {
+    const finalDir = await startInFlightSession();
+    const sessionJsonBefore = await readFile(join(finalDir, "session.json"), "utf8");
+    const lockBefore = await readFile(join(repoRoot, ACTIVE_LOCK_REL), "utf8");
+
+    await expect(
+      endSession({
+        repoRoot,
+        endedAt: ENDED_TS,
+        afterStatusText: "after",
+        afterStatusZRaw: AFTER_STATUS_Z_BYTES,
+        contributionBytes: serializeContribution(
+          buildContribution({ checkpoint_id: OTHER_CHECKPOINT_ID }),
+        ),
+      }),
+    ).rejects.toBeInstanceOf(ContributionBindingError);
+
+    await expectNoEndMutation(finalDir, sessionJsonBefore, lockBefore);
+  });
+
+  it("refuses a contribution whose ended_at disagrees with this end's timestamp", async () => {
+    // Without this binding, session.json and contribution.json could record
+    // two different end times for one event. Both values here are WELL-FORMED
+    // timestamps, so the refusal can only come from the cross-binding check.
+    const finalDir = await startInFlightSession();
+    const sessionJsonBefore = await readFile(join(finalDir, "session.json"), "utf8");
+    const lockBefore = await readFile(join(repoRoot, ACTIVE_LOCK_REL), "utf8");
+
+    await expect(
+      endSession({
+        repoRoot,
+        endedAt: ENDED_TS,
+        afterStatusText: "after",
+        afterStatusZRaw: AFTER_STATUS_Z_BYTES,
+        contributionBytes: serializeContribution(buildContribution({ ended_at: OLDER_TS })),
+      }),
+    ).rejects.toBeInstanceOf(ContributionBindingError);
+
+    await expectNoEndMutation(finalDir, sessionJsonBefore, lockBefore);
+  });
+
+  it("refuses contribution bytes that are not valid JSON, with native error detail", async () => {
+    const finalDir = await startInFlightSession();
+    const sessionJsonBefore = await readFile(join(finalDir, "session.json"), "utf8");
+    const lockBefore = await readFile(join(repoRoot, ACTIVE_LOCK_REL), "utf8");
+
+    await expect(
+      endSession({
+        repoRoot,
+        endedAt: ENDED_TS,
+        afterStatusText: "after",
+        afterStatusZRaw: AFTER_STATUS_Z_BYTES,
+        contributionBytes: Buffer.from("this is not json", "utf8"),
+      }),
+    ).rejects.toThrow(/not valid JSON/);
+
+    await expectNoEndMutation(finalDir, sessionJsonBefore, lockBefore);
+  });
+
+  it("refuses a schema-invalid contribution with its native Zod issue detail", async () => {
+    // A truncated head sha: structurally JSON, semantically not a git object
+    // id. This must NOT be flattened into ContributionBindingError — the
+    // three bindings are about identity, and folding shape failures into them
+    // would discard the field-level detail an operator needs to act on.
+    // Asserting the issue PATH, rather than merely "not a
+    // ContributionBindingError", is what stops a future generic
+    // `new Error("bad contribution")` from satisfying this test.
+    const finalDir = await startInFlightSession();
+    const sessionJsonBefore = await readFile(join(finalDir, "session.json"), "utf8");
+    const lockBefore = await readFile(join(repoRoot, ACTIVE_LOCK_REL), "utf8");
+
+    await expect(
+      endSession({
+        repoRoot,
+        endedAt: ENDED_TS,
+        afterStatusText: "after",
+        afterStatusZRaw: AFTER_STATUS_Z_BYTES,
+        contributionBytes: serializeContribution(
+          buildContribution({ before_head_sha: "deadbeef" }),
+        ),
+      }),
+    ).rejects.toMatchObject({
+      name: "ZodError",
+      issues: expect.arrayContaining([expect.objectContaining({ path: ["before_head_sha"] })]),
+    });
+
+    await expectNoEndMutation(finalDir, sessionJsonBefore, lockBefore);
   });
 });
 

@@ -27,6 +27,15 @@
 //    `parseStatusPorcelainZ` parser. Core does NOT parse either form;
 //    it only writes the bytes.
 //
+//    **M 0.8.0 extension:** `endSession` also accepts
+//    `contributionBytes: Buffer` — the serialized `contribution.json`
+//    assembled by @viberevert/git's session-contribution capture. Core
+//    validates those bytes and persists them; it does not derive the
+//    contribution, does not observe the repository, and still does not
+//    import @viberevert/git. Unlike the two status forms, core DOES parse
+//    this payload — but for verification only, never to re-encode it
+//    (see lock #8).
+//
 // 2. **Deterministic timestamps: core never calls `new Date()` internally.**
 //    Both `startSession` and `endSession` accept the timestamp as a typed
 //    input (`startedAt`, `endedAt`). The CLI generates the ISO string;
@@ -49,13 +58,15 @@
 //    dir, then atomically renames the tmp dir to its final id-based name.
 //    Core does not own the inner checkpoint write.
 //
-// 5. **D22 lock dependency: caller serializes concurrent start invocations.**
+// 5. **D22 lock dependency: caller serializes concurrent invocations.**
 //    `startSession` checks for `active-session.json` pre-existence and
 //    refuses if present (`SessionAlreadyActiveError`), but the check and
 //    the subsequent write are not atomic with each other. The CLI
 //    orchestration layer wraps the entire `start` flow in the
-//    `.viberevert/.locks/start.lock/` mkdir-based exclusive lock per D22.
-//    Core does not lock internally — it trusts caller serialization.
+//    `.viberevert/.locks/start.lock/` mkdir-based exclusive lock per D22,
+//    and as of M 0.8.0 wraps the entire `end` transaction in that same
+//    lock. Core does not lock internally — it trusts caller
+//    serialization, on both sides.
 //
 // 6. **D23: missing-state read contract.** `listSessions` returns
 //    `{ sessions: [], warnings: [] }` when `.viberevert/sessions/` is
@@ -74,13 +85,28 @@
 //    apart. Without this check, `endSession` (which loads by lock's
 //    `session_id` and writes the result back) could silently endorse the
 //    inconsistency.
+//
+// 8. **M 0.8.0: persisted digests bind EXACT bytes, never a
+//    re-serialization.** `endSession` receives the contribution as a
+//    `Buffer` the caller already serialized. Core parses those bytes to
+//    validate them — schema shape, plus the session / checkpoint /
+//    ended_at cross-binding — computes `contribution_sha256` over the
+//    incoming buffer, and then writes that same buffer verbatim. It never
+//    re-encodes the parsed object. Re-encoding would be a silent
+//    corruption vector rather than a cosmetic difference: any formatting
+//    disagreement between the caller's serializer and core's would make
+//    the recorded digest describe bytes that are not the bytes on disk,
+//    and every downstream evidence-chain verification would then fail on
+//    a perfectly healthy repository.
 
+import { createHash } from "node:crypto";
 import { appendFile, chmod, lstat, mkdir, readdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import {
   type ActiveSessionLock,
   ActiveSessionLockSchema,
   SESSION_STATE_SCHEMA_VERSION,
+  SessionContributionFileSchema,
   type SessionState,
   SessionStateSchema,
 } from "@viberevert/session-format";
@@ -103,6 +129,11 @@ const AFTER_STATUS_FILENAME = "after-status.txt";
 // (per D8: audit text is NEVER parsed for machine logic; z-format is the
 // machine surface).
 const AFTER_STATUS_Z_FILENAME = "after-status.z";
+// M 0.8.0: the durable session contribution. Core owns this filename, and
+// therefore owns `session.contribution_path` — the caller supplies bytes, never
+// a destination. A caller-chosen path would let the recorded path and the
+// recorded digest describe two different files.
+const CONTRIBUTION_FILENAME = "contribution.json";
 const COMMANDS_LOG_FILENAME = "commands.log";
 
 /** Matches `sess_<26-char Crockford base32 ULID>`. */
@@ -172,6 +203,26 @@ export interface EndSessionOpts {
    * text and bytes supplied by the caller.
    */
   readonly afterStatusZRaw: Buffer;
+  /**
+   * M 0.8.0: the serialized `contribution.json` for this session — the
+   * EXACT bytes to persist, assembled by @viberevert/git's capture and
+   * already serialized by the caller.
+   *
+   * Required, not optional. Per the 0.8.0 contract there is no
+   * `--no-contribution` escape hatch: a session that ends without a
+   * durable record of what it contributed is precisely the gap 0.8.0
+   * exists to close, so "end succeeded but produced no contribution" is
+   * not a reachable state. Pre-0.8.0 sessions that ended before this
+   * field existed remain readable — `SessionState.contribution_path` is
+   * optional on the READ side for exactly that reason — but nothing
+   * written by this function can omit it.
+   *
+   * Core parses these bytes to validate them (schema shape, and the
+   * session / checkpoint / ended_at cross-binding), then writes THIS
+   * buffer verbatim and records its SHA-256. Per architectural lock #8 the
+   * parsed object never round-trips back to disk.
+   */
+  readonly contributionBytes: Buffer;
 }
 
 /**
@@ -289,6 +340,30 @@ export class NoActiveSessionError extends Error {
   }
 }
 
+/**
+ * M 0.8.0: thrown by `endSession` when the supplied contribution is
+ * structurally valid but describes a DIFFERENT session, checkpoint, or end
+ * timestamp than the one being ended.
+ *
+ * This is not a user-facing refusal condition. Capture and persistence run
+ * back to back inside a single locked transaction, so a mismatch means the
+ * two halves disagreed about what they were operating on — a defect or an
+ * out-of-band mutation of the session dir, not something the user chose.
+ * The CLI therefore does not map it to friendly copy; it surfaces as an
+ * unexpected error, which is the honest presentation.
+ *
+ * Schema-shape failures are NOT routed here: an invalid `contribution.json`
+ * raises the underlying Zod error (or a wrapped JSON parse error) directly,
+ * matching how `loadSession` reports a corrupt `session.json`. Both classes
+ * of failure occur strictly before any mutation.
+ */
+export class ContributionBindingError extends Error {
+  constructor(message: string, cause?: unknown) {
+    super(message, { cause });
+    this.name = "ContributionBindingError";
+  }
+}
+
 // =============================================================================
 // Public functions
 // =============================================================================
@@ -382,12 +457,15 @@ export async function startSession(opts: StartSessionOpts): Promise<void> {
  * End the currently-active session.
  *
  * Pre-conditions:
- *   - None beyond the persisted active-session state. M B's CLI does
- *     not wrap `viberevert end` in the D22 start lock. Most concurrent
- *     end attempts are handled by `active-session.json` re-checking and
- *     `NoActiveSessionError`; a narrower double-end race after both
- *     calls pass the re-check may surface as a filesystem ENOENT during
- *     active-lock removal.
+ *   - The D22 start-lock is held around the WHOLE end transaction (per
+ *     architectural lock #5). As of M 0.8.0 the orchestration layer's
+ *     `endSessionOperation` owns that lock, so a competing `end` is
+ *     refused at acquisition before it performs any capture work. Core
+ *     still does not lock internally. Its `active-session.json` read below
+ *     identifies and validates the session being ended; it is NOT a
+ *     concurrency primitive or a fallback for a missing lifecycle lock.
+ *     Concurrent calls to `endSession` without the required D22 lock are
+ *     outside the supported contract and may interleave publication.
  *
  * What this function does, in order:
  *   1. Read `active-session.json` via `loadActiveSessionLock`. If null,
@@ -395,44 +473,90 @@ export async function startSession(opts: StartSessionOpts): Promise<void> {
  *   2. Read existing `session.json` via `loadSession` (which validates
  *      schema AND verifies `session_id` matches the lock's session id —
  *      see architectural lock #7).
- *   3. Build the post-mutation `SessionState` (existing + `ended_at` +
- *      `after_status_path` + M D Step 4a `after_status_z_path`) and
- *      validate it against `SessionStateSchema`. Catches malformed
- *      `opts.endedAt` (wrong ISO format, missing offset, fractional
- *      seconds, etc.) here. The schema's one-way coupling refine
+ *   3. M 0.8.0: parse `opts.contributionBytes` as JSON and validate the
+ *      result against `SessionContributionFileSchema`. That schema is
+ *      self-verifying: beyond shape, it re-derives every
+ *      `change_group_id` from the contribution's own `session_id` and
+ *      each group's complete alias set, so a contribution whose groups
+ *      disagree with their members is rejected here rather than
+ *      persisted. It also validates the contribution's own `ended_at` as
+ *      an ISO datetime.
+ *   4. M 0.8.0: cross-bind the contribution to THIS end —
+ *      `session_id` must equal the active lock's, `checkpoint_id` must
+ *      equal the loaded session's, and `ended_at` must equal
+ *      `opts.endedAt`. Mismatches throw `ContributionBindingError`. This
+ *      is what stops a contribution captured for one session from being
+ *      filed under another, and what keeps `session.json` and
+ *      `contribution.json` from recording two different end timestamps
+ *      for the same event. Steps 3 and 4 together also mean a malformed
+ *      `opts.endedAt` cannot survive: it either fails the contribution's
+ *      timestamp validation or fails this equality check.
+ *   5. M 0.8.0: compute `contribution_sha256` over
+ *      `opts.contributionBytes` — the exact buffer written in step 8,
+ *      never a re-serialization of the parsed object (lock #8).
+ *   6. Build the post-mutation `SessionState` (existing + `ended_at` +
+ *      `after_status_path` + M D Step 4a `after_status_z_path` + M 0.8.0
+ *      `contribution_path` and `contribution_sha256`) and validate it
+ *      against `SessionStateSchema`. This is where the schema's coupling
+ *      refines are enforced: the M D one-way coupling
  *      (`after_status_z_path` present implies `ended_at` AND
- *      `after_status_path` present) is also checked here — drift
+ *      `after_status_path` present), the M 0.8.0 both-or-neither pairing
+ *      of `contribution_path` with `contribution_sha256`, and the M 0.8.0
+ *      rule that a contribution is valid only on an ended session. Drift
  *      between this builder and the schema surfaces as a loud failure.
- *   4. Steps 1-3 are all read/validate; the on-disk state is
- *      byte-untouched up to this point. If any of them throws, no
- *      mutation occurred.
- *   5. Write `after-status.txt` (audit, v1 text) and `after-status.z`
- *      (machine, raw z-format BYTES — M D Step 4a) into the session dir
- *      via `writeFileAtomic`. Both are supplied by the CLI from end-of-
- *      session status captures, persisted separately for different
- *      consumers per D8.
- *   6. Write the updated `session.json` via `writeFileAtomic`.
- *   7. Delete `active-session.json` via `rm`.
  *
- * **Known crash window (M B-tolerated):** a crash between step 6 and
- * step 7 leaves `session.json` showing the session as ended (with
- * `ended_at`, `after_status_path`, AND `after_status_z_path` set) AND
- * `active-session.json` still pointing at it. The session is logically
- * ended on disk but the active-lock is stale — subsequent `viberevert
- * start` would refuse with the stale lock as the "currently active"
- * session. M B does not auto-recover this; a future `viberevert gc`
- * (deferred) sweeps stale locks by checking whether the referenced
- * session has `ended_at`. Manual recovery in M B: delete
- * `.viberevert/active-session.json` and retry `start`.
+ *      This parse also re-checks `ended_at`, but no longer OWNS that
+ *      check. Before M 0.8.0 it was the only validator a malformed
+ *      `opts.endedAt` had to pass; now steps 3 and 4 reject one first.
+ *      The parse stays as defense in depth, so the guarantee survives a
+ *      future refactor that relaxes either of them.
+ *   7. Steps 1-6 are all read/validate/derive; the on-disk state is
+ *      byte-untouched up to this point. If any of them throws — including
+ *      every contribution failure — no mutation occurred.
+ *   8. Write, in order: `contribution.json` (M 0.8.0, the caller's exact
+ *      bytes), `after-status.txt` (audit, v1 text), `after-status.z`
+ *      (machine, raw z-format BYTES — M D Step 4a), then the updated
+ *      `session.json`, all via `writeFileAtomic`.
+ *   9. Delete `active-session.json` via `rm`.
  *
- * A narrower crash between step 5's two atomic writes (after `.txt`
- * lands but before `.z` lands, or vice versa) leaves one snapshot file
- * present without its sibling. Per D13, each `writeFileAtomic` is
- * individually atomic but the pair is not. This is M B-tolerated: M D's
- * `loadEndOfSessionChangedPaths` (Step 4b) returns
- * `{ kind: "missing" }` when `after_status_z_path` is unset OR the file
- * is absent, routing through the same legacy-session escape hatch as
- * pre-M D ended sessions (the D61b refusal + `--force` path).
+ * **Why the contribution is published FIRST.** `session.json` is the index
+ * into everything else a session owns, so it must never name an artifact
+ * that is not already on disk. Writing `contribution.json` before the
+ * `session.json` that references it means the only reachable inconsistency
+ * is a contribution with no reference — inert and self-correcting (see
+ * below) — rather than a reference with no contribution, which every
+ * evidence-chain check would have to treat as corruption.
+ *
+ * **Known crash window (M B-tolerated):** a crash between step 8's final
+ * `session.json` write and step 9 leaves `session.json` showing the session
+ * as ended (with `ended_at`, `after_status_path`, `after_status_z_path`,
+ * AND the M 0.8.0 contribution fields set) while `active-session.json`
+ * still points at it. The session is logically ended on disk but the
+ * active-lock is stale — subsequent `viberevert start` would refuse with
+ * the stale lock as the "currently active" session. M B does not
+ * auto-recover this; a future `viberevert gc` (deferred) sweeps stale locks
+ * by checking whether the referenced session has `ended_at`. Manual
+ * recovery: delete `.viberevert/active-session.json` and retry `start`.
+ *
+ * **Narrower windows inside step 8.** Each `writeFileAtomic` is
+ * individually atomic but the sequence is not, so a crash can leave any
+ * prefix of the four files written:
+ *   - `contribution.json` present without the `session.json` that names
+ *     it. Nothing reads an unreferenced contribution: every consumer
+ *     starts from `session.contribution_path`. The session remains ACTIVE,
+ *     so re-running `end` recaptures and overwrites the file. Benign.
+ *   - One after-status form present without its sibling. Per D13 this is
+ *     M B-tolerated: M D's `loadEndOfSessionChangedPaths` returns
+ *     `{ kind: "missing" }` when `after_status_z_path` is unset OR the
+ *     file is absent, routing through the same legacy-session escape
+ *     hatch as pre-M D ended sessions (the D61b refusal + `--force`
+ *     path).
+ *
+ * **This is not a durability claim.** `writeFileAtomic` publishes by
+ * rename without fsync, so "atomically persisted" here means no reader
+ * ever observes a partially-written file — not that the bytes survive a
+ * power loss. 0.8.0 deliberately does not change the project's durability
+ * model, and no contribution guarantee should be read as extending it.
  */
 export async function endSession(opts: EndSessionOpts): Promise<void> {
   const lock = await loadActiveSessionLock(opts.repoRoot);
@@ -445,29 +569,70 @@ export async function endSession(opts: EndSessionOpts): Promise<void> {
   // architectural lock #7), the on-disk state is byte-untouched.
   const existingState = await loadSession(lock.session_id, opts.repoRoot);
 
+  // M 0.8.0: validate the contribution the caller assembled. Parsing here is
+  // for VERIFICATION ONLY — `contribution` is read for the three cross-binding
+  // checks below and then never written. The bytes that land on disk are
+  // `opts.contributionBytes` verbatim (architectural lock #8).
+  let parsedContribution: unknown;
+  try {
+    parsedContribution = JSON.parse(opts.contributionBytes.toString("utf8"));
+  } catch (err) {
+    throw new Error(`contribution bytes are not valid JSON: ${(err as Error).message}`, {
+      cause: err,
+    });
+  }
+  const contribution = SessionContributionFileSchema.parse(parsedContribution);
+
+  if (contribution.session_id !== lock.session_id) {
+    throw new ContributionBindingError(
+      `contribution session_id (${contribution.session_id}) does not match the active session (${lock.session_id})`,
+    );
+  }
+  if (contribution.checkpoint_id !== existingState.checkpoint_id) {
+    throw new ContributionBindingError(
+      `contribution checkpoint_id (${contribution.checkpoint_id}) does not match the session's checkpoint (${existingState.checkpoint_id})`,
+    );
+  }
+  if (contribution.ended_at !== opts.endedAt) {
+    throw new ContributionBindingError(
+      `contribution ended_at (${contribution.ended_at}) does not match this end's timestamp (${opts.endedAt})`,
+    );
+  }
+
+  // Digest the EXACT buffer that is about to be written, not a
+  // re-serialization of `contribution` (architectural lock #8).
+  const contributionSha256 = createHash("sha256").update(opts.contributionBytes).digest("hex");
+
   const sessionDirAbs = join(opts.repoRoot, VIBEREVERT_DIR, SESSIONS_SUBDIR, lock.session_id);
   const sessionJsonAbs = join(sessionDirAbs, SESSION_JSON_FILENAME);
   const afterStatusAbs = join(sessionDirAbs, AFTER_STATUS_FILENAME);
   const afterStatusZAbs = join(sessionDirAbs, AFTER_STATUS_Z_FILENAME);
+  const contributionAbs = join(sessionDirAbs, CONTRIBUTION_FILENAME);
   const activeLockPathAbs = join(opts.repoRoot, VIBEREVERT_DIR, ACTIVE_SESSION_LOCK_FILENAME);
   const afterStatusPathRel = `${SESSIONS_DIR_REL}/${lock.session_id}/${AFTER_STATUS_FILENAME}`;
   const afterStatusZPathRel = `${SESSIONS_DIR_REL}/${lock.session_id}/${AFTER_STATUS_Z_FILENAME}`;
+  const contributionPathRel = `${SESSIONS_DIR_REL}/${lock.session_id}/${CONTRIBUTION_FILENAME}`;
 
-  // Build + validate the post-mutation state BEFORE any disk write —
-  // catches malformed opts.endedAt (e.g., wrong ISO format, missing
-  // offset, fractional seconds) here, leaving the on-disk state
-  // byte-untouched. Without this ordering, a bad endedAt would surface
-  // only AFTER after-status files had already been written, leaving a
-  // half-state (snapshots updated, session.json untouched, active lock
-  // untouched).
+  // Build + validate the post-mutation state BEFORE any disk write, so the
+  // coupling refines and any drift between this builder and the schema
+  // surface while the on-disk state is still byte-untouched. Timestamp
+  // validity is no longer this parse's job — the contribution parse and the
+  // ended_at cross-binding above already settled it — but the check costs
+  // nothing and holds if either of those is ever relaxed.
   const updatedState: SessionState = {
     ...existingState,
     ended_at: opts.endedAt,
     after_status_path: afterStatusPathRel,
     after_status_z_path: afterStatusZPathRel,
+    contribution_path: contributionPathRel,
+    contribution_sha256: contributionSha256,
   };
   SessionStateSchema.parse(updatedState);
 
+  // Publication order is load-bearing: the contribution lands before the
+  // session.json that names it, so the only reachable inconsistency is an
+  // unreferenced artifact rather than a dangling reference.
+  await writeFileAtomic(contributionAbs, opts.contributionBytes);
   await writeFileAtomic(afterStatusAbs, opts.afterStatusText);
   await writeFileAtomic(afterStatusZAbs, opts.afterStatusZRaw);
   await writeFileAtomic(sessionJsonAbs, JSON.stringify(updatedState, null, 2));
