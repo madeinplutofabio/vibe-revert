@@ -89,6 +89,25 @@
 //     - Plus types: StartSessionOpts, EndSessionOpts, SessionSummary,
 //       ListSessionsWarning, ListSessionsResult
 //
+//   Session contribution reader (M 0.8.0 step 8 B2):
+//     - loadVerifiedSessionContribution: reads the persisted contribution
+//       named by a session's binding, verifies the raw bytes against the
+//       recorded SHA-256 BEFORE parsing, then proves the artifact belongs to
+//       that session, checkpoint, and end timestamp.
+//     - ContributionBindingError, ContributionNotFoundError,
+//       ContributionDigestMismatchError: three typed evidence-binding
+//       failures, kept distinct so a consumer can tell "evidence missing"
+//       from "evidence altered" from "wrong terminal artifact".
+//       Malformed JSON and schema-invalid contribution files are NOT
+//       collapsed into these classes: they raise a wrapped parse Error or the
+//       underlying Zod error, matching how loadSession reports a corrupt
+//       session.json. ContributionBindingError was previously internal to
+//       endSession; the read side needs it too.
+//     - Plus type: SessionContributionBinding
+//
+//       Does NOT walk content_ref objects. Object verification follows object
+//       CONSUMPTION, and getObject already rehashes on every read.
+//
 // =============================================================================
 // Deliberately NOT exported (locked)
 // =============================================================================
@@ -172,15 +191,20 @@ export type {
   EndSessionOpts,
   ListSessionsResult,
   ListSessionsWarning,
+  SessionContributionBinding,
   SessionSummary,
   StartSessionOpts,
 } from "./session.js";
 export {
   appendCommandsLogEntry,
+  ContributionBindingError,
+  ContributionDigestMismatchError,
+  ContributionNotFoundError,
   endSession,
   listSessions,
   loadActiveSessionLock,
   loadSession,
+  loadVerifiedSessionContribution,
   NoActiveSessionError,
   SessionAlreadyActiveError,
   SessionNotFoundError,

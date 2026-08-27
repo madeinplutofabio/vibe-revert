@@ -106,7 +106,9 @@ import {
   type ActiveSessionLock,
   ActiveSessionLockSchema,
   type EvaluationSnapshot,
+  isSafeStoredRelativePath,
   SESSION_STATE_SCHEMA_VERSION,
+  type SessionContributionFile,
   SessionContributionFileSchema,
   type SessionState,
   SessionStateSchema,
@@ -360,26 +362,73 @@ export class NoActiveSessionError extends Error {
 }
 
 /**
- * M 0.8.0: thrown by `endSession` when the supplied contribution is
- * structurally valid but describes a DIFFERENT session, checkpoint, or end
- * timestamp than the one being ended.
+ * M 0.8.0: thrown when a structurally valid contribution describes a
+ * DIFFERENT session, checkpoint, or end timestamp than the one it is being
+ * bound to.
  *
- * This is not a user-facing refusal condition. Capture and persistence run
- * back to back inside a single locked transaction, so a mismatch means the
- * two halves disagreed about what they were operating on — a defect or an
- * out-of-band mutation of the session dir, not something the user chose.
- * The CLI therefore does not map it to friendly copy; it surfaces as an
- * unexpected error, which is the honest presentation.
+ * Raised from BOTH sides of the contribution's life:
+ *
+ *   - `endSession` (write): capture and persistence run back to back inside a
+ *     single locked transaction, so a mismatch means the two halves disagreed
+ *     about what they were operating on. That is a defect or an out-of-band
+ *     mutation of the session dir, not something the user chose, so the CLI
+ *     surfaces it as an unexpected error rather than friendly copy.
+ *   - `loadVerifiedSessionContribution` (read): the digest has already proven
+ *     these are the exact bytes the session recorded, so a binding mismatch
+ *     means the session's own record points at an artifact belonging to a
+ *     different terminal event. A consumer evaluating that session must
+ *     refuse rather than proceed on mismatched evidence.
  *
  * Schema-shape failures are NOT routed here: an invalid `contribution.json`
  * raises the underlying Zod error (or a wrapped JSON parse error) directly,
- * matching how `loadSession` reports a corrupt `session.json`. Both classes
- * of failure occur strictly before any mutation.
+ * matching how `loadSession` reports a corrupt `session.json`.
  */
 export class ContributionBindingError extends Error {
   constructor(message: string, cause?: unknown) {
     super(message, { cause });
     this.name = "ContributionBindingError";
+  }
+}
+
+/**
+ * M 0.8.0: thrown when `session.contribution_path` names a file that is not
+ * there. Distinct from a legacy session with no contribution at all, which is
+ * a normal state the CALLER decides by inspecting the binding's absence, and
+ * which never reaches this loader.
+ */
+export class ContributionNotFoundError extends Error {
+  readonly path: string;
+
+  constructor(path: string, cause?: unknown) {
+    super(`Contribution not found at ${path}`, { cause });
+    this.name = "ContributionNotFoundError";
+    this.path = path;
+  }
+}
+
+/**
+ * M 0.8.0: thrown when the contribution's raw bytes do not hash to the digest
+ * the session recorded.
+ *
+ * Deliberately NOT `ObjectCorruptionError`: that one is object-store scoped,
+ * where the digest IS the address, so a mismatch means the store's own
+ * addressing is broken. Here the file is name-addressed and the digest is an
+ * external record, so a mismatch means the session and the artifact disagree.
+ */
+export class ContributionDigestMismatchError extends Error {
+  readonly path: string;
+  readonly expected: string;
+  readonly actual: string;
+
+  constructor(path: string, expected: string, actual: string, cause?: unknown) {
+    super(
+      `Contribution digest mismatch at ${path}: session records ${expected}, file hashes to ${actual}`,
+      { cause },
+    );
+    this.name = "ContributionDigestMismatchError";
+    this.path = path;
+    this.expected = expected;
+    this.actual = actual;
   }
 }
 
@@ -728,6 +777,120 @@ export async function loadSession(sessionId: string, repoRoot: string): Promise<
   }
 
   return session;
+}
+
+/**
+ * Everything needed to locate a persisted contribution and prove it is the
+ * right one. Deliberately not a `SessionState`: consumers such as
+ * `check --since` hold a narrow projection of the session rather than the
+ * whole persistence record, and widening that projection to satisfy this
+ * loader would push persistence detail back into the command layer.
+ *
+ * The nested `expected` separates the two questions: `path` + `sha256` say
+ * WHERE to read and WHAT bytes to demand; `expected` says WHICH session event
+ * the artifact must belong to.
+ */
+export interface SessionContributionBinding {
+  /** Repo-relative POSIX path, from `session.contribution_path`. */
+  readonly path: string;
+  /** SHA-256 of the EXACT persisted bytes, from `session.contribution_sha256`. */
+  readonly sha256: string;
+  readonly expected: {
+    readonly sessionId: string;
+    readonly checkpointId: string;
+    readonly endedAt: string;
+  };
+}
+
+/**
+ * Load a session's contribution and verify the complete
+ * session-to-contribution binding chain before returning it.
+ *
+ *   read exact bytes -> hash them -> compare to the recorded digest ->
+ *   parse -> verify session / checkpoint / ended_at bindings
+ *
+ * STRICT by design: there is no `undefined` return. A legacy ended session
+ * with no contribution is a normal state, but it is decided by the CALLER
+ * from the binding's absence. Folding it in here would let corruption
+ * masquerade as legacy absence, which is the one confusion this chain exists
+ * to prevent.
+ *
+ * The digest is taken over the raw bytes BEFORE parsing (architectural lock
+ * #8), never over a re-serialization. Hashing after parse-and-canonicalize
+ * would make the binding depend on serializer settings and would mean
+ * interpreting the file before establishing it is the file at all.
+ *
+ * Does NOT walk `content_ref` objects. Object verification follows object
+ * CONSUMPTION, and this operation's consumers read `content_delta`, which is
+ * inline. `getObject` rehashes on every read, so a later consumer that does
+ * dereference objects is protected at the point of use; a pre-mutation
+ * completeness walk over the object graph is a separate operation.
+ */
+export async function loadVerifiedSessionContribution(
+  repoRoot: string,
+  binding: SessionContributionBinding,
+): Promise<SessionContributionFile> {
+  // `binding` is a plain object, so `path` has NOT necessarily passed through
+  // SessionStateSchema's safeStoredRelativePath refine. A public core
+  // operation must stay safe when a caller assembles the binding by hand:
+  // join(repoRoot, "../../etc/passwd") escapes the repo entirely. Asserted
+  // with the same predicate the schema uses, so the two cannot drift.
+  if (!isSafeStoredRelativePath(binding.path)) {
+    throw new Error(
+      `loadVerifiedSessionContribution: unsafe contribution path ${JSON.stringify(binding.path)}`,
+    );
+  }
+
+  const contributionAbs = join(repoRoot, binding.path);
+
+  let bytes: Buffer;
+  try {
+    bytes = await readFile(contributionAbs);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new ContributionNotFoundError(binding.path, err);
+    }
+    throw err;
+  }
+
+  const actualSha256 = createHash("sha256").update(bytes).digest("hex");
+  if (actualSha256 !== binding.sha256) {
+    throw new ContributionDigestMismatchError(binding.path, binding.sha256, actualSha256);
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(bytes.toString("utf8"));
+  } catch (err) {
+    throw new Error(
+      `contribution at ${binding.path} is not valid JSON: ${(err as Error).message}`,
+      {
+        cause: err,
+      },
+    );
+  }
+  const contribution = SessionContributionFileSchema.parse(parsed);
+
+  // Identity bindings. The digest already proved these are the recorded
+  // bytes, so a mismatch here means the session's record points at an
+  // artifact from a different terminal event.
+  if (contribution.session_id !== binding.expected.sessionId) {
+    throw new ContributionBindingError(
+      `contribution at ${binding.path} belongs to session ${contribution.session_id}, not ${binding.expected.sessionId}`,
+    );
+  }
+  if (contribution.checkpoint_id !== binding.expected.checkpointId) {
+    throw new ContributionBindingError(
+      `contribution at ${binding.path} names checkpoint ${contribution.checkpoint_id}, not ${binding.expected.checkpointId}`,
+    );
+  }
+  if (contribution.ended_at !== binding.expected.endedAt) {
+    throw new ContributionBindingError(
+      `contribution at ${binding.path} records ended_at ${contribution.ended_at}, not ${binding.expected.endedAt}`,
+    );
+  }
+
+  return contribution;
 }
 
 /**

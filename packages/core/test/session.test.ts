@@ -137,15 +137,20 @@ import {
   SessionStateSchema,
 } from "@viberevert/session-format";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { ZodError } from "zod";
 
 import {
   appendCommandsLogEntry,
   ContributionBindingError,
+  ContributionDigestMismatchError,
+  ContributionNotFoundError,
   endSession,
   listSessions,
   loadActiveSessionLock,
   loadSession,
+  loadVerifiedSessionContribution,
   NoActiveSessionError,
+  type SessionContributionBinding,
   SessionNotFoundError,
   startSession,
 } from "../src/session.js";
@@ -1240,5 +1245,110 @@ describe("startSession evaluation_snapshot persistence", () => {
     // check reads this record instead of live config.
     expect(session.ended_at).toBe(ENDED_TS);
     expect(session.evaluation_snapshot).toEqual(EVALUATION_SNAPSHOT);
+  });
+});
+
+describe("loadVerifiedSessionContribution (M 0.8.0 step 8 B2)", () => {
+  const CONTRIBUTION_REL = `.viberevert/sessions/${NEWER_ID}/contribution.json`;
+
+  async function seedContribution(bytes: Buffer): Promise<void> {
+    const dir = join(repoRoot, ".viberevert", "sessions", NEWER_ID);
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "contribution.json"), bytes);
+  }
+
+  /** A binding whose digest matches `bytes`, with overridable expectations. */
+  function bindingFor(
+    bytes: Buffer,
+    expectedOverrides: Partial<SessionContributionBinding["expected"]> = {},
+  ): SessionContributionBinding {
+    return {
+      path: CONTRIBUTION_REL,
+      sha256: sha256Hex(bytes),
+      expected: {
+        sessionId: NEWER_ID,
+        checkpointId: CHECKPOINT_ID,
+        endedAt: ENDED_TS,
+        ...expectedOverrides,
+      },
+    };
+  }
+
+  it("returns the parsed contribution when every binding holds", async () => {
+    await seedContribution(CONTRIBUTION_BYTES);
+    const contribution = await loadVerifiedSessionContribution(
+      repoRoot,
+      bindingFor(CONTRIBUTION_BYTES),
+    );
+    expect(contribution.session_id).toBe(NEWER_ID);
+    expect(contribution.checkpoint_id).toBe(CHECKPOINT_ID);
+    expect(contribution.ended_at).toBe(ENDED_TS);
+    expect(contribution.entries).toEqual([]);
+  });
+
+  it("throws ContributionNotFoundError when the named file is absent", async () => {
+    // A binding exists but the evidence does not. Distinct from a LEGACY
+    // session carrying no binding at all, which the caller resolves and which
+    // never reaches this loader.
+    await expect(
+      loadVerifiedSessionContribution(repoRoot, bindingFor(CONTRIBUTION_BYTES)),
+    ).rejects.toThrow(ContributionNotFoundError);
+  });
+
+  it("throws ContributionDigestMismatchError when the bytes were altered", async () => {
+    // Schema-VALID but different bytes, and every identity binding still
+    // matches. So if the digest check were skipped this call would SUCCEED --
+    // which is what makes this test isolate the digest step rather than
+    // incidentally passing because something else refused.
+    const altered = serializeContribution(buildContribution({ captured_at: OLDER_TS }));
+    await seedContribution(altered);
+    await expect(
+      loadVerifiedSessionContribution(repoRoot, bindingFor(CONTRIBUTION_BYTES)),
+    ).rejects.toThrow(ContributionDigestMismatchError);
+  });
+
+  it("rejects an unsafe binding path", async () => {
+    // The binding is a plain object and never passed through
+    // SessionStateSchema's safeStoredRelativePath refine, so the loader must
+    // re-assert it rather than allowing a repo-relative join to escape the repo.
+    await expect(
+      loadVerifiedSessionContribution(repoRoot, {
+        ...bindingFor(CONTRIBUTION_BYTES),
+        path: "../../etc/passwd",
+      }),
+    ).rejects.toThrow(/unsafe contribution path/);
+  });
+
+  it("wraps invalid JSON with the file's identity", async () => {
+    const bytes = Buffer.from("{not json", "utf8");
+    await seedContribution(bytes);
+    await expect(loadVerifiedSessionContribution(repoRoot, bindingFor(bytes))).rejects.toThrow(
+      /is not valid JSON/,
+    );
+  });
+
+  it("surfaces the Zod failure for valid JSON that is not a contribution", async () => {
+    // The digest MATCHES, so this is not tampering: the artifact is genuinely
+    // what the session recorded, and genuinely malformed. Schema failures stay
+    // Zod failures rather than being collapsed into the typed trio, matching
+    // how loadSession reports a corrupt session.json.
+    const bytes = Buffer.from(JSON.stringify({ nope: true }), "utf8");
+    await seedContribution(bytes);
+    await expect(loadVerifiedSessionContribution(repoRoot, bindingFor(bytes))).rejects.toThrow(
+      ZodError,
+    );
+  });
+
+  // All three independently pinned: a loader checking only session_id would
+  // pass two of these.
+  it.each([
+    ["session_id", { sessionId: OLDER_ID }],
+    ["checkpoint_id", { checkpointId: OTHER_CHECKPOINT_ID }],
+    ["ended_at", { endedAt: OLDER_TS }],
+  ] as const)("throws ContributionBindingError when %s does not match", async (_f, overrides) => {
+    await seedContribution(CONTRIBUTION_BYTES);
+    await expect(
+      loadVerifiedSessionContribution(repoRoot, bindingFor(CONTRIBUTION_BYTES, overrides)),
+    ).rejects.toThrow(ContributionBindingError);
   });
 });
