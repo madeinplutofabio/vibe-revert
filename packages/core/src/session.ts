@@ -105,6 +105,7 @@ import { join } from "node:path";
 import {
   type ActiveSessionLock,
   ActiveSessionLockSchema,
+  type EvaluationSnapshot,
   SESSION_STATE_SCHEMA_VERSION,
   SessionContributionFileSchema,
   type SessionState,
@@ -172,6 +173,24 @@ export interface StartSessionOpts {
   readonly beforeStatusText: string;
   /** Optional agent command (reserved for M G2 wrapper mode). */
   readonly agentCommand?: string;
+  /**
+   * M 0.8.0: the resolved evaluation rules in force at `viberevert start`,
+   * already computed by the caller.
+   *
+   * Required, not optional. `.viberevert.yml` is a file the agent can rewrite
+   * during its own session, so session-bound checks and selective rollback
+   * read this snapshot rather than live config. A new session written without
+   * one would silently lose `--risk`, `--finding`, and the session-start
+   * verification commands at recovery time, which is the exact inversion the
+   * snapshot exists to prevent. `SessionState.evaluation_snapshot` remains
+   * optional on the READ side, because sessions written before 0.8.0
+   * genuinely have none and cannot be back-filled.
+   *
+   * Core persists this verbatim. It does NOT read config, apply defaults, or
+   * run framework detection: resolution belongs to the caller, which owns the
+   * single validated config snapshot the session is started under.
+   */
+  readonly evaluationSnapshot: EvaluationSnapshot;
 }
 
 /**
@@ -418,6 +437,7 @@ export async function startSession(opts: StartSessionOpts): Promise<void> {
     ...(opts.agentCommand !== undefined ? { agent_command: opts.agentCommand } : {}),
     before_status_path: beforeStatusPathRel,
     commands_log_path: commandsLogPathRel,
+    evaluation_snapshot: opts.evaluationSnapshot,
   };
   // Validate before writing — surfaces drift between this builder and
   // the schema as a loud failure, not a silent corruption on disk.

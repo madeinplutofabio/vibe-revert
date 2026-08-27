@@ -77,16 +77,110 @@ import {
   generateSessionId,
   loadActiveSessionLock,
   loadConfig,
+  mergeChecksConfig,
   resolveRepoRoot,
   SessionAlreadyActiveError,
   startSession,
 } from "@viberevert/core";
 import { createCheckpoint, getStatusPorcelainText } from "@viberevert/git";
+import {
+  type EvaluationSnapshot,
+  EvaluationSnapshotSchema,
+  normalizeStringArray,
+} from "@viberevert/session-format";
 
 import { type LockInfo, withExclusiveLock } from "../locks.js";
 import { resolveNowForCliTimestamp } from "../runtime-env.js";
 
 export const START_LOCK_REL = ".viberevert/.locks/start.lock";
+
+// =============================================================================
+// Session-start evaluation snapshot (M 0.8.0 step 5)
+// =============================================================================
+
+/**
+ * Whether `config.frameworks` is an EXPLICIT list rather than a request to
+ * auto-detect.
+ *
+ * This predicate is a deliberate duplicate of the branch inside
+ * `mergeChecksConfig` (packages/core/src/policy-resolve.ts): that function
+ * returns one flat framework list either way, so it cannot tell the two modes
+ * apart, and widening its public `ResolvedChecksConfig` would ripple into
+ * `check.ts`, `check-orchestration.ts`, and the MCP `get-policy` tool.
+ *
+ * The condition MUST stay identical to core's. An EMPTY list means
+ * auto-detect, not "explicitly no frameworks" — recording it as explicit
+ * would freeze an empty set and silently disable every framework rule for the
+ * session's whole life.
+ */
+function isExplicitFrameworks(config: Config): boolean {
+  return config.frameworks !== undefined && config.frameworks.length > 0;
+}
+
+/**
+ * Resolve the evaluation rules in force at `viberevert start`.
+ *
+ * `.viberevert.yml` is a file the agent can rewrite during its own session, so
+ * session-bound checks and selective rollback read this snapshot instead of
+ * live config. Two inversions follow if they do not: a rewritten
+ * `verify.commands` would run an agent-chosen command at the moment a human
+ * tries to recover, and `checks: { payments: false }` written mid-session
+ * would weaken `viberevert check` before the session even ends.
+ *
+ * Producer rules, each load-bearing:
+ *
+ *   - Defaults come from `mergeChecksConfig` and nowhere else. Per D57 its
+ *     four `DEFAULT_*` constants are the sole home of those values, so
+ *     re-deriving them here would create a second source that drifts.
+ *   - String SETS are normalized with `normalizeStringArray`, the same
+ *     producer `createCheckpoint` uses for `manifest.untracked.exclude_patterns`.
+ *     The snapshot's atoms VALIDATE the sorted-unique invariant rather than
+ *     imposing it, so an unnormalized array is rejected, not repaired; and
+ *     matching the checkpoint's producer is what lets the two exclude policies
+ *     be compared directly later.
+ *   - `verify_commands` is a SEQUENCE and is deliberately NOT sorted or
+ *     deduped. The commands run in the order written, and repeating one is a
+ *     legitimate configuration.
+ *   - Arrays are copied defensively, matching `mergeChecksConfig`, so later
+ *     mutation of the caller's Config cannot retroactively alter a persisted
+ *     snapshot.
+ *   - `rollback_exclude` normalizes the CALLER'S already-read exclude list,
+ *     passed in as `rollbackExcludePatterns`, NOT `mergeChecksConfig`'s own
+ *     `rollbackExclude`. Both ultimately derive from `config.rollback.exclude`,
+ *     but they are two separate reads of a caller-supplied object. Deriving
+ *     the snapshot from the same read that reaches `createCheckpoint` ensures
+ *     the checkpoint manifest and snapshot are produced from one policy
+ *     observation rather than relying on two reads agreeing. Both persisted
+ *     forms use `normalizeStringArray`, so they can later be compared directly.
+ *
+ * Validated here as well as by core's `SessionStateSchema.parse`. The two
+ * checks defend different boundaries and neither replaces the other: this one
+ * catches a producer defect before any expensive or session-mutating work,
+ * while core's defends the persistence boundary independently.
+ */
+async function buildEvaluationSnapshot(
+  config: Config,
+  repoRoot: string,
+  rollbackExcludePatterns: readonly string[],
+): Promise<EvaluationSnapshot> {
+  const resolved = await mergeChecksConfig(config, repoRoot);
+
+  const snapshot: EvaluationSnapshot = {
+    risk_block_on: resolved.riskBlockOn,
+    risk_warn_on: resolved.riskWarnOn,
+    checks: { ...resolved.checks },
+    frameworks: isExplicitFrameworks(config)
+      ? { mode: "explicit", values: normalizeStringArray(resolved.frameworks) }
+      : { mode: "auto", detected_at_start: normalizeStringArray(resolved.frameworks) },
+    rollback_exclude: normalizeStringArray(rollbackExcludePatterns),
+    verify_commands: (config.verify?.commands ?? []).map((entry) => ({
+      command: entry.command,
+      args: [...entry.args],
+    })),
+  };
+
+  return EvaluationSnapshotSchema.parse(snapshot);
+}
 
 export type StartSessionOperationOpts = {
   /** Directory to resolve the repo root from. Caller-supplied; the
@@ -112,9 +206,11 @@ export type StartSessionOperationOpts = {
   lockCommand?: string;
   /** Optional pre-validated config snapshot (M G4 4e-iv-a0). When present,
    *  the operation performs NO `loadConfig` and derives EVERY config-driven
-   *  value (currently the rollback excludes) from THIS object — so a caller
-   *  that already loaded + validated `.viberevert.yml` (the REPL, `run`, and
-   *  the PTY session adapter) starts the session under exactly the snapshot
+   *  value from THIS object: the rollback capture policy and, as of M 0.8.0,
+   *  the session-start evaluation snapshot. Both are resolved HERE and handed
+   *  onward already settled — core resolves neither. A caller that already
+   *  loaded + validated `.viberevert.yml` (the REPL, `run`, and the PTY
+   *  session adapter) therefore starts the session under exactly the snapshot
    *  it also uses for command policy, with no second on-disk read in the
    *  TOCTOU window. Callers that do not already hold config omit this and get
    *  the internal load unchanged. */
@@ -142,6 +238,21 @@ export async function startSessionOperation(
   const loadedConfig = opts.loadedConfig;
   const config = loadedConfig ?? (await loadConfig(repoRoot));
   const rollbackExcludePatterns: readonly string[] = config.rollback?.exclude ?? [];
+
+  // Step 2b (M 0.8.0 step 5): resolve the session-start evaluation snapshot
+  // ONCE, from that SAME config object, before the lock.
+  //
+  // Outside D22 deliberately. That lock serializes VibeRevert lifecycle
+  // state; it does not freeze arbitrary repository writes, so pulling the
+  // framework-signature probes under it would lengthen the critical section
+  // without making the observation any more atomic with respect to the
+  // working tree. Resolving here also means a malformed policy fails before
+  // any checkpoint work begins.
+  const evaluationSnapshot = await buildEvaluationSnapshot(
+    config,
+    repoRoot,
+    rollbackExcludePatterns,
+  );
 
   // Step 3: resolve the wall-clock timestamp ONCE for this operation.
   // Threaded into THREE slots — see header lock #5: persisted
@@ -197,7 +308,9 @@ export async function startSessionOperation(
 
       // Step 4g: hand off to core.startSession. Throws
       // SessionAlreadyActiveError if active-session.json appeared during
-      // the narrow race between step 4a and here.
+      // the narrow race between step 4a and here. The evaluation snapshot
+      // is passed already resolved and validated — core persists it and
+      // does not recompute any part of it.
       await startSession({
         repoRoot,
         tmpSessionDir,
@@ -205,6 +318,7 @@ export async function startSessionOperation(
         checkpointId,
         startedAt,
         beforeStatusText,
+        evaluationSnapshot,
         ...(opts.task !== undefined ? { task: opts.task } : {}),
         ...(opts.agentCommand !== undefined ? { agentCommand: opts.agentCommand } : {}),
       });

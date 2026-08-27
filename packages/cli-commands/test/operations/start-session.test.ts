@@ -13,6 +13,14 @@
 //      MCP override are observed at the lock boundary via a mocked
 //      withExclusiveLock, proving the resolved command is actually
 //      passed through (not silently dropped).
+//   5. M 0.8.0 step 5 — the session-start evaluation snapshot resolved from
+//      `.viberevert.yml` and persisted into session.json. Asserted end to
+//      end (real config file, real checkpoint, real core.startSession)
+//      rather than at a mock boundary, so the whole producer chain is
+//      covered: mergeChecksConfig defaults, auto-detection actually being
+//      wired in, the explicit/auto framework predicate, normalizeStringArray
+//      canonicalization, and the deliberately un-normalized verify_commands
+//      sequence.
 //
 // CLI-level coverage (stderr copy, exit codes, harness wiring) stays in
 // start-end.test.ts as drift-detection layer 1 — that file MUST continue
@@ -26,6 +34,7 @@ import { promisify } from "node:util";
 import { RepoRootNotFoundError, SessionAlreadyActiveError } from "@viberevert/core";
 import {
   type ActiveSessionLock,
+  type EvaluationSnapshot,
   SESSION_STATE_SCHEMA_VERSION,
   type SessionState,
   SessionStateSchema,
@@ -268,5 +277,184 @@ describe("startSessionOperation — D22 lock metadata (mocked locks boundary)", 
       lockCommand: "viberevert mcp start_session",
     });
     expect(info.command).toBe("viberevert mcp start_session");
+  });
+});
+
+// =============================================================================
+// M 0.8.0 step 5: session-start evaluation snapshot
+// =============================================================================
+
+/** Overwrite the repo's `.viberevert.yml` before starting a session. */
+async function writeConfigYaml(yaml: string): Promise<void> {
+  await writeFile(join(tmpRoot, ".viberevert.yml"), yaml);
+}
+
+/**
+ * Start a session and return the snapshot actually persisted in session.json.
+ *
+ * Throws rather than returning undefined: `evaluation_snapshot` is optional on
+ * the READ side only so pre-0.8.0 sessions stay parseable, and a session this
+ * harness just created must carry one. Failing here names the problem instead
+ * of surfacing it as an `undefined` mismatch inside an unrelated assertion.
+ */
+async function startAndReadSnapshot(): Promise<EvaluationSnapshot> {
+  const result = await startSessionOperation({ cwd: tmpRoot });
+  const parsed = SessionStateSchema.parse(
+    JSON.parse(
+      await readFile(
+        join(tmpRoot, ".viberevert", "sessions", result.sessionId, "session.json"),
+        "utf8",
+      ),
+    ),
+  );
+  if (parsed.evaluation_snapshot === undefined) {
+    throw new Error("expected the freshly started session.json to carry an evaluation_snapshot");
+  }
+  return parsed.evaluation_snapshot;
+}
+
+describe("startSessionOperation — evaluation snapshot (M 0.8.0 step 5)", () => {
+  it("resolves D57 omission defaults for a minimal config", async () => {
+    await writeConfigYaml("version: 1\n");
+
+    const snapshot = await startAndReadSnapshot();
+
+    // Defaults come from mergeChecksConfig, the sole home of DEFAULT_* per D57.
+    expect(snapshot.risk_block_on).toBe("critical");
+    expect(snapshot.risk_warn_on).toBe("medium");
+    expect(snapshot.checks).toEqual({
+      secrets: true,
+      dependencies: true,
+      migrations: true,
+      auth: true,
+      payments: true,
+      infra: true,
+      tests: true,
+      scope_expansion: true,
+    });
+    // Mode only. Whether detection is actually WIRED IN is a separate
+    // question, owned by the next test: an empty result here is equally
+    // consistent with a detector that ran and a producer that never called one.
+    expect(snapshot.frameworks.mode).toBe("auto");
+    expect(snapshot.rollback_exclude).toEqual([]);
+    expect(snapshot.verify_commands).toEqual([]);
+  });
+
+  it("wires auto-detection into the persisted snapshot", async () => {
+    await writeConfigYaml("version: 1\n");
+    // The smallest signature the detector's own suite establishes
+    // (packages/core/test/framework-detect.test.ts): `.lovable` as a
+    // DIRECTORY, a single-path isDirectory rule.
+    await mkdir(join(tmpRoot, ".lovable"));
+
+    const snapshot = await startAndReadSnapshot();
+
+    // Discriminating in the way a bare-repo assertion cannot be: a producer
+    // that hardcoded `{ mode: "auto", detected_at_start: [] }` without ever
+    // calling the detector passes the previous test and fails this one. This
+    // is the only place step 5 proves the detector reaches the persisted
+    // snapshot; whether the RULE is correct belongs to framework-detect.
+    expect(snapshot.frameworks).toEqual({ mode: "auto", detected_at_start: ["lovable"] });
+  });
+
+  it("records explicit config overrides rather than defaults", async () => {
+    await writeConfigYaml(
+      [
+        "version: 1",
+        "risk:",
+        "  block_on: high",
+        "  warn_on: low",
+        "checks:",
+        "  payments: false",
+        "  scope_expansion: false",
+        "",
+      ].join("\n"),
+    );
+
+    const snapshot = await startAndReadSnapshot();
+
+    expect(snapshot.risk_block_on).toBe("high");
+    expect(snapshot.risk_warn_on).toBe("low");
+    // Overridden keys take the configured value; every omitted key still
+    // resolves to its default, so the snapshot stays a COMPLETE resolved view
+    // rather than a sparse echo of what the user happened to write.
+    expect(snapshot.checks.payments).toBe(false);
+    expect(snapshot.checks.scope_expansion).toBe(false);
+    expect(snapshot.checks.secrets).toBe(true);
+    expect(snapshot.checks.migrations).toBe(true);
+  });
+
+  it("a non-empty frameworks list is EXPLICIT, authoritative and normalized", async () => {
+    await writeConfigYaml(["version: 1", "frameworks:", "  - node", "  - laravel", ""].join("\n"));
+
+    const snapshot = await startAndReadSnapshot();
+
+    // Discriminating: the fixture repo has no framework signatures, so an
+    // implementation that re-detected instead of honouring the configured list
+    // would produce an empty list here.
+    expect(snapshot.frameworks).toEqual({ mode: "explicit", values: ["laravel", "node"] });
+  });
+
+  it("an EMPTY frameworks list means auto-detect, not explicit-empty", async () => {
+    await writeConfigYaml("version: 1\nframeworks: []\n");
+
+    const snapshot = await startAndReadSnapshot();
+
+    // The predicate must match mergeChecksConfig's, which treats omitted OR
+    // empty as auto. Recording this as `explicit` with an empty list would
+    // freeze an empty set and silently disable every framework rule for the
+    // session's whole life. Both payloads would contain [] in this fixture, so
+    // `mode` is the discriminator that pins the omitted-or-empty => auto
+    // contract.
+    expect(snapshot.frameworks.mode).toBe("auto");
+  });
+
+  it("normalizes rollback_exclude: trimmed, deduped, sorted", async () => {
+    await writeConfigYaml(
+      [
+        "version: 1",
+        "rollback:",
+        "  exclude:",
+        '    - "vendor/**"',
+        '    - " node_modules/** "',
+        '    - "vendor/**"',
+        "",
+      ].join("\n"),
+    );
+
+    const snapshot = await startAndReadSnapshot();
+
+    // Same producer as manifest.untracked.exclude_patterns, which is what makes
+    // the two persisted policies directly comparable later.
+    expect(snapshot.rollback_exclude).toEqual(["node_modules/**", "vendor/**"]);
+  });
+
+  it("preserves verify_commands order and duplicates, sorting and deduping neither", async () => {
+    await writeConfigYaml(
+      [
+        "version: 1",
+        "verify:",
+        "  commands:",
+        "    - command: pnpm",
+        "      args:",
+        "        - typecheck",
+        "    - command: make",
+        "      args: []",
+        "    - command: pnpm",
+        "      args:",
+        "        - typecheck",
+        "",
+      ].join("\n"),
+    );
+
+    const snapshot = await startAndReadSnapshot();
+
+    // A SEQUENCE: sorting would put `make` first and deduping would drop the
+    // third entry, so this fixture fails under either normalization.
+    expect(snapshot.verify_commands).toEqual([
+      { command: "pnpm", args: ["typecheck"] },
+      { command: "make", args: [] },
+      { command: "pnpm", args: ["typecheck"] },
+    ]);
   });
 });

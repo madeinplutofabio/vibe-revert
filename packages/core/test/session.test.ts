@@ -130,6 +130,7 @@ import {
   type ActiveSessionLock,
   ActiveSessionLockSchema,
   CONTRIBUTION_FILE_SCHEMA_VERSION,
+  type EvaluationSnapshot,
   SESSION_STATE_SCHEMA_VERSION,
   type SessionContributionFile,
   type SessionState,
@@ -167,6 +168,40 @@ const OTHER_CHECKPOINT_ID = "cp_01JV8Z0N6E7ABCDEFGHJKMNPQR";
 const OLDER_TS = "2026-05-04T09:00:00Z";
 const NEWER_TS = "2026-05-04T10:30:11Z";
 const ENDED_TS = "2026-05-04T11:00:00Z";
+
+/**
+ * A fully resolved `EvaluationSnapshot` (M 0.8.0 step 5).
+ *
+ * Several sentinel values deliberately DIFFER from the D57 omission
+ * defaults: `risk_block_on` is not `critical`, `risk_warn_on` is not
+ * `medium`, and two check toggles are false. Persistence tests comparing
+ * against this fixture therefore catch replacement of caller-supplied values
+ * with those defaults without pretending every field differs.
+ *
+ * Array fields are pre-sorted because the snapshot's atoms VALIDATE the
+ * sorted-unique invariant rather than imposing it; an unsorted fixture would
+ * fail schema parse instead of exercising persistence.
+ */
+const EVALUATION_SNAPSHOT: EvaluationSnapshot = {
+  risk_block_on: "high",
+  risk_warn_on: "low",
+  checks: {
+    secrets: true,
+    dependencies: true,
+    migrations: true,
+    auth: true,
+    payments: false,
+    infra: true,
+    tests: true,
+    scope_expansion: false,
+  },
+  frameworks: { mode: "auto", detected_at_start: ["laravel", "node"] },
+  rollback_exclude: ["node_modules/**", "vendor/**"],
+  verify_commands: [
+    { command: "pnpm", args: ["typecheck"] },
+    { command: "pnpm", args: ["test"] },
+  ],
+};
 
 // Representative `git status --porcelain=v1 -z` bytes for endSession's
 // after-status.z snapshot. Two entries (modified + untracked),
@@ -317,6 +352,7 @@ describe("startSession", () => {
       checkpointId: CHECKPOINT_ID,
       startedAt: NEWER_TS,
       beforeStatusText: " M src/foo.ts\n?? src/bar.ts\n",
+      evaluationSnapshot: EVALUATION_SNAPSHOT,
     });
 
     // tmp dir consumed by rename (no leftover)
@@ -372,6 +408,7 @@ describe("startSession", () => {
       beforeStatusText: "",
       task: "Add yearly billing",
       agentCommand: "claude --dangerous",
+      evaluationSnapshot: EVALUATION_SNAPSHOT,
     });
 
     const session = SessionStateSchema.parse(
@@ -411,6 +448,7 @@ describe("startSession", () => {
         checkpointId: CHECKPOINT_ID,
         startedAt: NEWER_TS,
         beforeStatusText: "",
+        evaluationSnapshot: EVALUATION_SNAPSHOT,
       }),
     ).rejects.toMatchObject({
       name: "SessionAlreadyActiveError",
@@ -450,6 +488,7 @@ async function startInFlightSession(): Promise<string> {
     checkpointId: CHECKPOINT_ID,
     startedAt: NEWER_TS,
     beforeStatusText: "before",
+    evaluationSnapshot: EVALUATION_SNAPSHOT,
   });
   return join(repoRoot, ".viberevert", "sessions", NEWER_ID);
 }
@@ -949,6 +988,7 @@ describe("appendCommandsLogEntry", () => {
       checkpointId: CHECKPOINT_ID,
       startedAt: NEWER_TS,
       beforeStatusText: " M src/foo.ts\n?? src/bar.ts\n",
+      evaluationSnapshot: EVALUATION_SNAPSHOT,
     });
   }
 
@@ -1121,6 +1161,7 @@ describe("startSession agent_command persistence (M G2 threading target)", () =>
       startedAt: NEWER_TS,
       beforeStatusText: " M src/foo.ts\n",
       agentCommand: "claude --dangerously-skip-permissions",
+      evaluationSnapshot: EVALUATION_SNAPSHOT,
     });
     const raw = await readFile(
       join(repoRoot, ".viberevert", "sessions", NEWER_ID, "session.json"),
@@ -1128,5 +1169,76 @@ describe("startSession agent_command persistence (M G2 threading target)", () =>
     );
     const session = SessionStateSchema.parse(JSON.parse(raw));
     expect(session.agent_command).toBe("claude --dangerously-skip-permissions");
+  });
+});
+
+// =============================================================================
+// evaluation_snapshot persistence (M 0.8.0 step 5)
+// =============================================================================
+
+describe("startSession evaluation_snapshot persistence", () => {
+  it("persists the caller's snapshot unchanged in session.json", async () => {
+    const tmpDir = await makeTmpSessionDir(NEWER_ID);
+    await startSession({
+      repoRoot,
+      tmpSessionDir: tmpDir,
+      sessionId: NEWER_ID,
+      checkpointId: CHECKPOINT_ID,
+      startedAt: NEWER_TS,
+      beforeStatusText: "",
+      evaluationSnapshot: EVALUATION_SNAPSHOT,
+    });
+
+    const session = SessionStateSchema.parse(
+      JSON.parse(
+        await readFile(join(repoRoot, ".viberevert", "sessions", NEWER_ID, "session.json"), "utf8"),
+      ),
+    );
+    // Deep equality rather than field spot-checks: core must not reshape,
+    // normalize, or default any part of a record recovery later depends on.
+    expect(session.evaluation_snapshot).toEqual(EVALUATION_SNAPSHOT);
+  });
+
+  it("does NOT copy the snapshot into active-session.json", async () => {
+    const tmpDir = await makeTmpSessionDir(NEWER_ID);
+    await startSession({
+      repoRoot,
+      tmpSessionDir: tmpDir,
+      sessionId: NEWER_ID,
+      checkpointId: CHECKPOINT_ID,
+      startedAt: NEWER_TS,
+      beforeStatusText: "",
+      evaluationSnapshot: EVALUATION_SNAPSHOT,
+    });
+
+    const lockRaw = await readFile(join(repoRoot, ".viberevert", "active-session.json"), "utf8");
+    const lockParsed = JSON.parse(lockRaw) as { evaluation_snapshot?: unknown };
+    // ActiveSessionLockSchema deliberately does not .pick() this field: two
+    // copies of a safety-critical record could drift apart, and the lock
+    // already carries the session id needed to load the authoritative one.
+    expect(lockParsed.evaluation_snapshot).toBeUndefined();
+    expect(() => ActiveSessionLockSchema.parse(lockParsed)).not.toThrow();
+  });
+
+  it("survives endSession unchanged", async () => {
+    const finalDir = await startInFlightSession();
+
+    await endSession({
+      repoRoot,
+      endedAt: ENDED_TS,
+      afterStatusText: "after",
+      afterStatusZRaw: AFTER_STATUS_Z_BYTES,
+      contributionBytes: CONTRIBUTION_BYTES,
+    });
+
+    const session = SessionStateSchema.parse(
+      JSON.parse(await readFile(join(finalDir, "session.json"), "utf8")),
+    );
+    // endSession builds the terminal state from `{ ...existingState }`, so the
+    // snapshot rides through. Pinned because a refactor to an explicit
+    // field-by-field rebuild would silently drop it, and every ended-session
+    // check reads this record instead of live config.
+    expect(session.ended_at).toBe(ENDED_TS);
+    expect(session.evaluation_snapshot).toEqual(EVALUATION_SNAPSHOT);
   });
 });
