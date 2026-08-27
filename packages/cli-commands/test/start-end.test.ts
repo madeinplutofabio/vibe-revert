@@ -21,6 +21,8 @@ import {
   type ActiveSessionLock,
   ManifestSchema,
   SESSION_STATE_SCHEMA_VERSION,
+  type SessionContributionFile,
+  SessionContributionFileSchema,
   type SessionState,
   SessionStateSchema,
 } from "@viberevert/session-format";
@@ -689,5 +691,132 @@ describe("start command", () => {
         process.env[VIBEREVERT_TEST_FIXED_NOW] = previous;
       }
     }
+  });
+});
+
+// =============================================================================
+// M 0.8.0 step 8 B1 -- end-session framework observation
+// =============================================================================
+//
+// `end` persists `contribution.detected_frameworks_at_end` only when the
+// session-start evaluation snapshot records `auto` framework mode. These pin
+// the producer contract at the command layer.
+//
+// Deliberately NOT tested here: fence retry behavior. That needs deterministic
+// control over Pass A, which only the `onStore` seam in
+// packages/git/test/contribution.test.ts provides.
+
+describe("end -- framework observation (M 0.8.0 step 8 B1)", () => {
+  async function readContribution(sessionId: string): Promise<SessionContributionFile> {
+    return SessionContributionFileSchema.parse(
+      JSON.parse(
+        await readFile(
+          join(tmpRoot, ".viberevert", "sessions", sessionId, "contribution.json"),
+          "utf8",
+        ),
+      ),
+    );
+  }
+
+  /** Laravel detection is existence-only: composer.json AND artisan. */
+  async function writeLaravelSignature(): Promise<void> {
+    await writeFile(join(tmpRoot, "composer.json"), '{"name":"test/app"}\n');
+    await writeFile(join(tmpRoot, "artisan"), "#!/usr/bin/env php\n");
+  }
+
+  async function commitAll(message: string): Promise<void> {
+    await execFileAsync("git", ["add", "-A"], { cwd: tmpRoot });
+    await execFileAsync(
+      "git",
+      ["-c", "user.name=Test", "-c", "user.email=test@test.test", "commit", "-q", "-m", message],
+      { cwd: tmpRoot },
+    );
+  }
+
+  /** Start through the real operation, which always persists a snapshot. */
+  async function startRealSession(): Promise<string> {
+    const started = await runStart(["--task", "t"]);
+    expect(started.exitCode).toBe(0);
+    const lock: ActiveSessionLock = JSON.parse(
+      await readFile(join(tmpRoot, ".viberevert", "active-session.json"), "utf8"),
+    );
+    return lock.session_id;
+  }
+
+  it("auto mode: observes the END state, so a framework added mid-session is detected", async () => {
+    await writeMinimalConfig();
+    // No Laravel at start: detected_at_start would be empty.
+    const sessionId = await startRealSession();
+    await writeLaravelSignature();
+    expect((await runEnd([])).exitCode).toBe(0);
+
+    const contribution = await readContribution(sessionId);
+    // Only an end-state observation can see this. A start-state reading, or
+    // one taken from the candidate-only mirror, would miss it.
+    expect(contribution.detected_frameworks_at_end).toContain("laravel");
+  });
+
+  it("auto mode with no frameworks: the field is PRESENT and empty, not absent", async () => {
+    await writeMinimalConfig();
+    const sessionId = await startRealSession();
+    await writeFile(join(tmpRoot, "note.txt"), "x\n");
+    expect((await runEnd([])).exitCode).toBe(0);
+
+    const contribution = await readContribution(sessionId);
+    // Pin both parts of the contract explicitly: the observed result is empty,
+    // and the field is structurally PRESENT. `[]` means "observed, found none";
+    // absence means "never observed".
+    expect(contribution.detected_frameworks_at_end).toEqual([]);
+    expect("detected_frameworks_at_end" in contribution).toBe(true);
+  });
+
+  it("explicit mode: omits the field entirely", async () => {
+    await writeFile(join(tmpRoot, ".viberevert.yml"), "version: 1\nframeworks:\n  - nextjs\n");
+    // Laravel IS detectable here, so absence cannot be explained away as
+    // "there was nothing to find". It is a deliberate producer decision.
+    await writeLaravelSignature();
+    await commitAll("laravel");
+    const sessionId = await startRealSession();
+    await writeFile(join(tmpRoot, "note.txt"), "x\n");
+    expect((await runEnd([])).exitCode).toBe(0);
+
+    const contribution = await readContribution(sessionId);
+    expect("detected_frameworks_at_end" in contribution).toBe(false);
+  });
+
+  it("pre-0.8.0 session with no evaluation snapshot: omits the field", async () => {
+    await writeMinimalConfig();
+    // Again detectable, so absence is a decision rather than an empty repo.
+    await writeLaravelSignature();
+    await commitAll("laravel");
+    // setupActiveSession writes session.json WITHOUT evaluation_snapshot,
+    // which is exactly the pre-0.8.0 shape. No post-hoc stripping needed,
+    // so no risk of perturbing another field while simulating the state.
+    await setupActiveSession({ sessionId: SESSION_ID, startedAt: STARTED_AT });
+    await writeFile(join(tmpRoot, "note.txt"), "x\n");
+    expect((await runEnd([])).exitCode).toBe(0);
+
+    const contribution = await readContribution(SESSION_ID);
+    expect("detected_frameworks_at_end" in contribution).toBe(false);
+  });
+
+  it("unchanged signature files inform detection without becoming entries", async () => {
+    await writeMinimalConfig();
+    await writeLaravelSignature();
+    await commitAll("laravel");
+    const sessionId = await startRealSession();
+    // Only an unrelated file changes during the session.
+    await writeFile(join(tmpRoot, "note.txt"), "x\n");
+    expect((await runEnd([])).exitCode).toBe(0);
+
+    const contribution = await readContribution(sessionId);
+    // Observed, even though neither file changed...
+    expect(contribution.detected_frameworks_at_end).toContain("laravel");
+    // ...and NOT candidates. additionalObservationPaths must widen the
+    // observation set, never the contribution candidate set.
+    const paths = contribution.entries.map((e) => e.path);
+    expect(paths).not.toContain("composer.json");
+    expect(paths).not.toContain("artisan");
+    expect(paths).toContain("note.txt");
   });
 });

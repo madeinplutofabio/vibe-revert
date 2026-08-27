@@ -104,23 +104,39 @@
 //    disagree with the contribution built from it, and the session would
 //    persist two mutually inconsistent descriptions of its own end state.
 //
-// 7. **Step 4c persists no framework observation.** `publish` builds the
-//    contribution with no `detectedFrameworksAtEnd`, and capture is given
-//    `additionalObservationPaths: []`.
+// 7. **The framework observation is snapshot-directed.** Whether an end
+//    observation is meaningful depends on the framework mode recorded in
+//    the session-start evaluation snapshot (M 0.8.0 step 5), which is
+//    persisted session state, NOT live config -- reading it is compatible
+//    with lock #1.
 //
-//    Not an oversight and not a stub. `detected_frameworks_at_end` is
-//    meaningful only under `auto` framework mode; under `explicit` the
-//    schema requires it ABSENT, because detection is not consulted at all.
-//    Which mode applies is recorded in the session-start evaluation
-//    snapshot, which M 0.8.0 step 5 introduces. Until that snapshot exists
-//    there is no config-blind way to know whether a detection result would
-//    be authoritative or misleading, and lock #1 forbids reading live
-//    config to find out. Omitting the field is the honest state: absent
-//    means "not observed", which every reader already handles.
+//      auto     -> observe every declared framework-signature path and
+//                  persist `detected_frameworks_at_end`, EVEN WHEN EMPTY.
+//      explicit -> omit the field. Detection is not consulted at all, so
+//                  an observation would be noise.
+//      no snapshot (pre-0.8.0 session) -> omit. The mode is unknowable,
+//                  and guessing would be worse than absence.
 //
-//    Step 5 supplies the mode and, for `auto`, the framework-signature
-//    paths as `additionalObservationPaths` so detection reads the
-//    observation set rather than the candidate-only mirror.
+//    Present-but-empty and absent are DIFFERENT facts and must stay that
+//    way: `[]` means "observed, found none"; absence means "never
+//    observed". A reader that collapsed them would silently treat a
+//    frameworkless end state as unobserved, and the distinction cannot be
+//    recovered later. `buildContributionFile` preserves it by
+//    discriminating on `undefined` rather than on emptiness.
+//
+//    Absence under `explicit` is a PRODUCER convention enforced here, not
+//    a schema constraint. `detected_frameworks_at_end` is a plain optional
+//    field, and the contribution schema cannot see the session snapshot,
+//    so it is structurally incapable of enforcing mode-dependent absence.
+//
+//    Passing the signature paths as `additionalObservationPaths` is what
+//    makes the observation trustworthy rather than merely present: those
+//    paths join the observation set on BOTH sides, so the fence proves the
+//    framework evidence belongs to the same stable end state as the
+//    contribution itself. Detection then reads that observation set rather
+//    than the candidate-only mirror -- which matters because signature
+//    files are usually UNCHANGED (Laravel needs composer.json AND artisan),
+//    so a candidate-only view would miss them entirely.
 //
 // =============================================================================
 // Callers must catch these typed errors and map to presentation
@@ -141,7 +157,9 @@
 import { hostname } from "node:os";
 import { join } from "node:path";
 import {
+  detectFrameworksFromObservedStates,
   endSession,
+  FRAMEWORK_OBSERVATION_PATHS,
   loadActiveSessionLock,
   loadSession,
   NoActiveSessionError,
@@ -265,6 +283,12 @@ export async function endSessionOperation(
     // object store receives payloads no contribution would ever reference.
     const session = await loadSession(lock.session_id, repoRoot);
 
+    // Lock #7: the framework mode comes from the persisted session-start
+    // snapshot, never from live config. A pre-0.8.0 session has no snapshot,
+    // which has the same producer ACTION as `explicit` here: make no
+    // observation, without treating the unknown mode as explicit.
+    const isAutoFrameworkMode = session.evaluation_snapshot?.frameworks.mode === "auto";
+
     const checkpointDir = join(
       repoRoot,
       VIBEREVERT_DIR,
@@ -286,9 +310,12 @@ export async function endSessionOperation(
       captured = await captureContribution<string>(repoRoot, checkpointDir, {
         sessionId: lock.session_id,
         checkpointId: session.checkpoint_id,
-        // Lock #7: nothing extra to observe until step 5 supplies the
-        // framework mode that would make an observation meaningful.
-        additionalObservationPaths: [],
+        // Lock #7: the signature paths join the observation set on BOTH
+        // sides under `auto`, so the fence proves the framework evidence
+        // belongs to the same stable end state as the contribution. Under
+        // `explicit`, and for a pre-0.8.0 session with no snapshot, no
+        // observation is made, so there is nothing to fence.
+        additionalObservationPaths: isAutoFrameworkMode ? [...FRAMEWORK_OBSERVATION_PATHS] : [],
         storeObject: async (object) => {
           // Git derived `object.digest` from these bytes; core re-derives it
           // independently inside putObject and returns what IT computed.
@@ -311,7 +338,18 @@ export async function endSessionOperation(
           // written.
           const endedAt = resolveNowForCliTimestamp();
 
-          const contribution = buildContributionFile(stable, { endedAt });
+          const contribution = buildContributionFile(stable, {
+            endedAt,
+            // Lock #7: `[]` is a real result (observed, found none) and is
+            // persisted as such. Only a non-auto session omits the field.
+            ...(isAutoFrameworkMode
+              ? {
+                  detectedFrameworksAtEnd: detectFrameworksFromObservedStates(
+                    stable.endWorktreeStates,
+                  ),
+                }
+              : {}),
+          });
           // Lock #4: THESE bytes are what core digests and writes verbatim.
           const contributionBytes = Buffer.from(JSON.stringify(contribution, null, 2), "utf8");
 

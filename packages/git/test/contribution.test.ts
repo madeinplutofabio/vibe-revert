@@ -718,6 +718,65 @@ describe("captureContribution: the end-state fence", () => {
       await repo.cleanup();
     }
   });
+
+  it("a mutated observation-only path trips the fence and re-runs the capture", async () => {
+    const repo = await setupRepo();
+    try {
+      await write(repo, "composer.json", "{}\n");
+      await write(repo, "artisan", "#!/usr/bin/env php\n");
+      await write(repo, "a.txt", "original\n");
+      await git(repo.repoRoot, ["add", "-A"]);
+      await git(repo.repoRoot, ["commit", "-m", "seed"]);
+      await checkpoint(repo);
+
+      // a.txt is the ONLY candidate on attempt 1. composer.json and artisan
+      // are unchanged, so they are observation members and nothing else.
+      await write(repo, "a.txt", "first-edit\n");
+
+      const mutatedComposer = '{"name":"x"}\n';
+      let mutated = false;
+      const { capture, storedDigests } = await runCapture(repo, {
+        additionalObservationPaths: ["composer.json", "artisan"],
+        onStore: async () => {
+          // Guarded, or every retry would mutate again and the capture would
+          // never stabilize -- exhausting the attempts instead of proving one
+          // discarded attempt.
+          if (mutated) return;
+          mutated = true;
+          await writeFile(join(repo.repoRoot, "composer.json"), mutatedComposer);
+        },
+      });
+
+      expect(mutated).toBe(true);
+
+      // THE RETRY WITNESS. composer.json was unchanged on attempt 1, so it was
+      // not a candidate and none of its content could have been stored. Its
+      // mutated bytes can only be in the store if a SECOND Pass A ran -- which
+      // happens only if the observation-only path participated in the fence.
+      // Counting onStore calls would not prove this: the hook fires per stored
+      // OBJECT, not per attempt.
+      expect(storedDigests.has(sha256(mutatedComposer))).toBe(true);
+
+      // The published capture reflects the STABILIZED tree, not what the
+      // discarded attempt observed. Asserted as one object so the `kind` is
+      // mandatory: a narrowing `if` would silently skip the payload check if
+      // the kind ever became something other than "regular".
+      const composer = entryFor(capture, "composer.json");
+      expect(composer?.operation).toBe("modified");
+      expect(composer?.after.worktree).toMatchObject({
+        kind: "regular",
+        content_ref: sha256(mutatedComposer),
+      });
+
+      // artisan participated in the fence and never changed, so observation
+      // membership ALONE did not confer candidate status. This is the
+      // widen-the-observation-set-not-the-candidate-set invariant.
+      expect(entryFor(capture, "artisan")).toBeUndefined();
+      expect(capture.endWorktreeStates.get("artisan")?.kind).toBe("regular");
+    } finally {
+      await repo.cleanup();
+    }
+  });
 });
 
 // =============================================================================
