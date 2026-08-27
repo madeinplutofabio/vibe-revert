@@ -14,6 +14,7 @@ import {
   RepoRootNotFoundError,
   SessionAlreadyActiveError,
 } from "@viberevert/core";
+import { EndStateChangedDuringCaptureError } from "@viberevert/git";
 import { describe, expect, it } from "vitest";
 import type { InstalledInterception } from "../src/commands/pty-interception.js";
 import type { AuditAcceptedCommand } from "../src/commands/pty-interception-audit.js";
@@ -1914,7 +1915,7 @@ function makeSessionOps(
     resolveRepoRoot: over.resolveRepoRoot ?? (() => "/repo"),
     loadConfig: over.loadConfig ?? (async () => OPS_DEFAULT_CONFIG),
     startSessionOperation: over.startSessionOperation ?? (async () => ({ sessionId: "sess_1" })),
-    endSessionOperation: over.endSessionOperation ?? (async () => undefined),
+    endSessionOperation: over.endSessionOperation ?? (async () => ({ cleanupWarnings: [] })),
     loadActiveSessionLock: over.loadActiveSessionLock ?? (async () => null),
     appendCommandsLogEntry: over.appendCommandsLogEntry ?? (async () => undefined),
     resolveNow: over.resolveNow ?? (() => "2026-07-16T00:00:00Z"),
@@ -2715,23 +2716,100 @@ describe("createG3BackedPtyShellSession -- close (scoped teardown copy + idempot
     });
   });
 
-  it("EndSessionRaceError -> already-ended note + summary (exit 0)", async () => {
+  it("EndSessionRaceError -> generic close failure (exit 1), state stays retryable", async () => {
+    // M 0.8.0 step 4c: the end transaction holds the shared lifecycle lock,
+    // so a competing `viberevert end` is refused at acquisition and can never
+    // reach core's re-check. What remains is active-session.json vanishing
+    // out of protocol with NO terminal state published -- a failure, not an
+    // already-ended session. This test previously asserted the opposite.
+    let endCalls = 0;
     const session = await opened(
       makeSessionOps({
         loadActiveSessionLock: async () => ({ session_id: "sess_1" }),
         endSessionOperation: async () => {
-          throw new EndSessionRaceError();
+          endCalls += 1;
+          if (endCalls === 1) {
+            throw new EndSessionRaceError();
+          }
+          return { cleanupWarnings: [] };
         },
       }),
     );
+    const first = await session.close();
+    expect(first.exitCode).toBe(1);
+    expect(first.stderrText).toContain("The session could not be closed:");
+    expect(first.stderrText).toContain("Close it manually with:");
+    // The pre-4c claim must be gone.
+    expect(first.stderrText).not.toContain("already ended before the shell could close it");
+    // NOT `closed`: nothing proved terminal publication, so a retry is allowed.
+    expect(await session.close()).toEqual({
+      exitCode: 0,
+      stderrText: "Session: sess_1\nNext: viberevert check --since sess_1\n",
+    });
+  });
+
+  it("fence refusal -> retry copy, no changed-member leakage, state stays retryable", async () => {
+    let endCalls = 0;
+    const session = await opened(
+      makeSessionOps({
+        loadActiveSessionLock: async () => ({ session_id: "sess_1" }),
+        endSessionOperation: async () => {
+          endCalls += 1;
+          if (endCalls === 1) {
+            throw new EndStateChangedDuringCaptureError(3, [
+              "afterHeadSha",
+              "trackedStatus",
+              "rawInventory",
+            ]);
+          }
+          return { cleanupWarnings: [] };
+        },
+      }),
+    );
+    // Exact equality IS the no-leak assertion: the changed-member names and
+    // the attempt count appear nowhere in this string. This was the last site
+    // where they could still have reached a user through `formatErrorMessage`.
+    expect(await session.close()).toEqual({
+      exitCode: 1,
+      stderrText: [
+        "The session could not be closed because the project kept changing during capture.\n",
+        "Stop other writers or background processes changing the repo, then close it manually with:\n",
+        "  viberevert end\n",
+      ].join(""),
+    });
+    // Retryable: a refusing fence does not prove terminal publication.
+    expect(await session.close()).toEqual({
+      exitCode: 0,
+      stderrText: "Session: sess_1\nNext: viberevert check --since sess_1\n",
+    });
+  });
+
+  it("cleanup warnings precede the summary, keep exit 0, and still close the session", async () => {
+    const session = await opened(
+      makeSessionOps({
+        loadActiveSessionLock: async () => ({ session_id: "sess_1" }),
+        endSessionOperation: async () => ({
+          cleanupWarnings: [
+            "git worktree remove --force failed for /tmp/vr-x/worktree: EBUSY",
+            "rm -rf /tmp/vr-x failed: EBUSY",
+          ],
+        }),
+      }),
+    );
+    // Exact equality pins the `warning: ` prefix, the ORDER, and the position
+    // ahead of the summary.
     expect(await session.close()).toEqual({
       exitCode: 0,
       stderrText: [
-        "Note: the session was already ended before the shell could close it.\n",
+        "warning: git worktree remove --force failed for /tmp/vr-x/worktree: EBUSY\n",
+        "warning: rm -rf /tmp/vr-x failed: EBUSY\n",
         "Session: sess_1\n",
         "Next: viberevert check --since sess_1\n",
       ].join(""),
     });
+    // Non-fatal AND terminal: the session really was closed, so a repeat is
+    // quiet. A failed cleanup must not leave the adapter thinking it is open.
+    expect(await session.close()).toEqual({ exitCode: 0, stderrText: "" });
   });
 
   it("read failure stays `opened` so a later close can retry", async () => {
@@ -2772,7 +2850,7 @@ describe("createG3BackedPtyShellSession -- close (scoped teardown copy + idempot
           if (endCalls === 1) {
             throw new Error("end boom");
           }
-          return undefined;
+          return { cleanupWarnings: [] };
         },
       }),
     );

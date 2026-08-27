@@ -117,12 +117,13 @@ import {
   resolveRepoRoot,
   SessionAlreadyActiveError,
 } from "@viberevert/core";
+import { EndStateChangedDuringCaptureError } from "@viberevert/git";
 import { Command, Option } from "clipanion";
 
 import { type CommandsPolicyConfig, evaluateCommandPolicy } from "../command-guard.js";
 import { truncateIdForDisplay } from "../format.js";
-import { ConcurrentOperationError } from "../locks.js";
-import { EndSessionRaceError, endSessionOperation } from "../operations/end-session.js";
+import { ConcurrentOperationError, formatConcurrentOperationRefusal } from "../locks.js";
+import { endSessionOperation } from "../operations/end-session.js";
 import { START_LOCK_REL, startSessionOperation } from "../operations/start-session.js";
 import { RuntimeEnvInvalidError, resolveNowForCliTimestamp } from "../runtime-env.js";
 import { createRunPtyShellDeps, runPtyShell } from "./shell-pty.js";
@@ -171,6 +172,18 @@ function writeInvalidConfigCopy(stderr: Writable, message: string): void {
   stderr.write("Fix the file, or re-run:\n");
   stderr.write("  viberevert init\n\n");
   stderr.write("to start fresh.\n");
+}
+
+/**
+ * Emit non-fatal end-of-session cleanup diagnostics (M 0.8.0), in the
+ * same `warning: ` form `end.ts`, `run.ts`, and `sessions.ts` use. An
+ * empty list writes nothing, and this never influences an exit code: the
+ * session WAS ended, only its scratch state outlived it.
+ */
+function writeCleanupWarnings(stderr: Writable, warnings: readonly string[]): void {
+  for (const warning of warnings) {
+    stderr.write(`warning: ${warning}\n`);
+  }
 }
 
 /**
@@ -378,11 +391,11 @@ export class ShellCommand extends Command {
         return 1;
       }
       if (err instanceof ConcurrentOperationError) {
-        stderr.write(
-          err.info !== null
-            ? `Another viberevert operation is already running:\n  command:  ${err.info.command}\n  pid:      ${err.info.pid}\n  since:    ${err.info.started_at}\n\nIf you're sure that command isn't running anymore (e.g., crashed),\nremove this stale lock directory manually:\n  ${START_LOCK_REL}\n`
-            : `Another viberevert operation is already running (lock metadata unavailable).\n\nIf you're sure no other viberevert command is running,\nremove this stale lock directory manually:\n  ${START_LOCK_REL}\n`,
-        );
+        // D22 locked refusal copy, rendered by the canonical formatter
+        // beside the error class. This is the START lock; end-time
+        // contention stays in scopedTeardown's contextual failure path,
+        // which supplies information this standalone block cannot.
+        stderr.write(formatConcurrentOperationRefusal(err.info, START_LOCK_REL));
         return 1;
       }
       if (err instanceof RepoRootNotFoundError) {
@@ -688,7 +701,12 @@ export class ShellCommand extends Command {
    *  - present AND ours -> end + two-line summary (exit 0)
    *  - missing          -> already ended/lost; no end, no summary (0)
    *  - different id      -> another session; never end it, no summary (1)
+   *  - already ended     -> NoActiveSessionError; summary still prints (0)
+   *  - unstable end state -> fence refused; retry hint (exit 1)
    *  - read/end failure  -> manual `viberevert end` hint (exit 1)
+   *
+   * A successful end may also return non-fatal `cleanupWarnings`, written
+   * to stderr immediately before the summary.
    */
   private async scopedTeardown(
     stderr: Writable,
@@ -720,24 +738,52 @@ export class ShellCommand extends Command {
     }
 
     // Present AND ours: end it, then print the two-line summary (the
-    // D102.G shape). NoActiveSessionError / EndSessionRaceError mean it
-    // was ended between the re-read and the end -- the id is still known,
-    // so the summary still prints.
+    // D102.G shape).
+    //
+    // NoActiveSessionError means the session was ended between the re-read
+    // and the end -- the id is still known, so the summary still prints and
+    // this is NOT a failure. EndSessionRaceError is different after M 0.8.0
+    // step 4c: the end transaction holds the shared lifecycle lock, so a
+    // competing `viberevert end` is refused at acquisition and can never
+    // reach core's re-check. What remains is active-session.json vanishing
+    // through something outside the lifecycle-lock protocol, with NO
+    // terminal state published -- an end FAILURE, handled by the generic
+    // branch below rather than reported as a successful close.
+    let endWarnings: readonly string[] = [];
     try {
-      await endSessionOperation({ cwd: invocationCwd });
+      const ended = await endSessionOperation({ cwd: invocationCwd });
+      endWarnings = ended.cleanupWarnings;
     } catch (err) {
-      if (err instanceof NoActiveSessionError || err instanceof EndSessionRaceError) {
+      if (err instanceof NoActiveSessionError) {
         stderr.write("Note: the session was already ended before the shell could close it.\n");
         stderr.write(`Session: ${sessionId}\n`);
         stderr.write(`Next: viberevert check --since ${sessionId}\n`);
         return 0;
       }
+      if (err instanceof EndStateChangedDuringCaptureError) {
+        // The fence refused. Its message enumerates every changed
+        // observation -- internal vocabulary `end` deliberately withholds,
+        // so forwarding it would give ONE failure two different privacy
+        // contracts depending on which command hit it.
+        stderr.write(
+          "The session could not be closed because the project kept changing during capture.\n",
+        );
+        stderr.write(
+          "Stop other writers or background processes changing the repo, then close it manually with:\n",
+        );
+        stderr.write("  viberevert end\n");
+        return 1;
+      }
+      // Everything else, including end-time lock contention and
+      // EndSessionRaceError, keeps this contextual wrapper: it is more
+      // informative here than a standalone refusal would be.
       stderr.write(`The session could not be closed: ${(err as Error).message}\n`);
       stderr.write("Close it manually with:\n");
       stderr.write("  viberevert end\n");
       return 1;
     }
 
+    writeCleanupWarnings(stderr, endWarnings);
     stderr.write(`Session: ${sessionId}\n`);
     stderr.write(`Next: viberevert check --since ${sessionId}\n`);
     return 0;

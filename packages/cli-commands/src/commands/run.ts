@@ -22,10 +22,26 @@
 //   startSessionOperation → commands.log entry → spawn → wait →
 //   endSessionOperation → summary. The child NEVER runs under the D22
 //   start lock (the lock lives inside startSessionOperation). If the
-//   session is already gone when end runs (ended inside the child, or
-//   a concurrent end won the race — NoActiveSessionError or
-//   EndSessionRaceError), warn on stderr, still print the summary (the
+//   session was already ended when end runs (ended inside the child —
+//   NoActiveSessionError), warn on stderr, still print the summary (the
 //   id is known), still propagate the child's exit code.
+//
+//   **M 0.8.0 step 4c:** EndSessionRaceError no longer belongs in that
+//   already-ended family. End now holds the shared lifecycle lock for its
+//   whole transaction, so a competing `viberevert end` is refused at
+//   acquisition and cannot reach core's re-check. What remains is
+//   active-session.json disappearing through something outside the
+//   lifecycle-lock protocol — and core did NOT publish terminal session
+//   state. It is therefore an end FAILURE, reported through the
+//   contextual "could not be closed" path, never as a successfully
+//   already-ended session.
+//
+//   A successful end can also return non-fatal `cleanupWarnings` (the
+//   contribution oracle's scratch worktree could not be reclaimed).
+//   Those are surfaced with the SESSION presentation, immediately before
+//   the two-line summary — never at the call site, which would interleave
+//   session-cleanup noise ahead of the user learning what happened to
+//   their command. They never change an exit code.
 //
 // D102.D stream lock — ALL wrapper text (refusals, prompts, warnings,
 //   the two-line summary) goes to STDERR. The child owns stdout via
@@ -91,12 +107,13 @@ import {
   resolveRepoRoot,
   SessionAlreadyActiveError,
 } from "@viberevert/core";
+import { EndStateChangedDuringCaptureError } from "@viberevert/git";
 import { Command, Option } from "clipanion";
 
 import { type CommandsPolicyConfig, evaluateCommandPolicy } from "../command-guard.js";
 import { truncateIdForDisplay } from "../format.js";
-import { ConcurrentOperationError } from "../locks.js";
-import { EndSessionRaceError, endSessionOperation } from "../operations/end-session.js";
+import { ConcurrentOperationError, formatConcurrentOperationRefusal } from "../locks.js";
+import { endSessionOperation } from "../operations/end-session.js";
 import { START_LOCK_REL, startSessionOperation } from "../operations/start-session.js";
 import { RuntimeEnvInvalidError } from "../runtime-env.js";
 import { classifyResolvedTarget, type ResolvedTargetKind } from "./command-launcher.js";
@@ -132,6 +149,22 @@ function writeInvalidConfigCopy(stderr: Writable, message: string): void {
   stderr.write("Fix the file, or re-run:\n");
   stderr.write("  viberevert init\n\n");
   stderr.write("to start fresh.\n");
+}
+
+/**
+ * Emit non-fatal end-of-session cleanup diagnostics (M 0.8.0), in the
+ * same `warning: ` form `end.ts` and `sessions.ts` use. An empty list
+ * writes nothing, and this never influences an exit code: the session
+ * WAS ended, only its scratch state outlived it.
+ *
+ * Shared because run has two end call sites and both owe the same
+ * contract — `endSessionOperation` documents that no caller may silently
+ * discard a non-empty list.
+ */
+function writeCleanupWarnings(stderr: Writable, warnings: readonly string[]): void {
+  for (const warning of warnings) {
+    stderr.write(`warning: ${warning}\n`);
+  }
 }
 
 export interface ChildExitStatus {
@@ -354,11 +387,11 @@ export class RunCommand extends Command {
         return 1;
       }
       if (err instanceof ConcurrentOperationError) {
-        stderr.write(
-          err.info !== null
-            ? `Another viberevert operation is already running:\n  command:  ${err.info.command}\n  pid:      ${err.info.pid}\n  since:    ${err.info.started_at}\n\nIf you're sure that command isn't running anymore (e.g., crashed),\nremove this stale lock directory manually:\n  ${START_LOCK_REL}\n`
-            : `Another viberevert operation is already running (lock metadata unavailable).\n\nIf you're sure no other viberevert command is running,\nremove this stale lock directory manually:\n  ${START_LOCK_REL}\n`,
-        );
+        // D22 locked refusal copy, rendered by the canonical formatter
+        // beside the error class. This is the START lock: end contention
+        // is handled by the contextual end-failure branch further down,
+        // which supplies information this standalone block cannot.
+        stderr.write(formatConcurrentOperationRefusal(err.info, START_LOCK_REL));
         return 1;
       }
       if (err instanceof RepoRootNotFoundError) {
@@ -395,12 +428,19 @@ export class RunCommand extends Command {
       // violate D102.F's contract. Close the session if possible, and
       // report the close outcome honestly — three states, consistent
       // with the post-child end handling in Step 7.
+      //
+      // Only NoActiveSessionError proves the session was already ended.
+      // EndSessionRaceError falls through to "unknown": the active marker
+      // vanished out of protocol, and core did not publish terminal state,
+      // so claiming a successful close would be false.
       let closeState: "closed" | "already-ended" | "unknown" = "unknown";
+      let closeWarnings: readonly string[] = [];
       try {
-        await endSessionOperation({ cwd: invocationCwd });
+        const closed = await endSessionOperation({ cwd: invocationCwd });
         closeState = "closed";
+        closeWarnings = closed.cleanupWarnings;
       } catch (closeErr) {
-        if (closeErr instanceof NoActiveSessionError || closeErr instanceof EndSessionRaceError) {
+        if (closeErr instanceof NoActiveSessionError) {
           closeState = "already-ended";
         }
       }
@@ -408,6 +448,11 @@ export class RunCommand extends Command {
         `Could not record the command in the session's commands.log: ${(err as Error).message}\n`,
       );
       stderr.write("Command not run.\n");
+      // Cleanup diagnostics sit with the session guidance, after the user
+      // has been told what happened to their command. The contract is the
+      // same here as on the success path: an unrelated failure mode must
+      // not make these disappear.
+      writeCleanupWarnings(stderr, closeWarnings);
       if (closeState === "closed") {
         stderr.write("The session was closed.\n");
       } else if (closeState === "already-ended") {
@@ -482,18 +527,37 @@ export class RunCommand extends Command {
     }
 
     // Step 7: end the session (finally-shaped: every outcome path
-    // arrives here). D102.B/D102.E end-failure semantics. Both
-    // NoActiveSessionError (ended inside the child) and
-    // EndSessionRaceError (a concurrent end won core's re-check race)
-    // mean the same thing for run: the session is ALREADY ended.
+    // arrives here). D102.B/D102.E end-failure semantics.
+    //
+    // NoActiveSessionError means the session was already ended before this
+    // wrapper could close it. EndSessionRaceError is different after step 4c:
+    // disappearance of active-session.json inside the lifecycle lock is an
+    // out-of-protocol mutation, so it remains an end failure rather than being
+    // reported as an already-ended session.
     let sessionAlreadyEnded = false;
     let endFailureMessage: string | null = null;
+    let endFailureHint: string | null = null;
+    let endWarnings: readonly string[] = [];
     try {
-      await endSessionOperation({ cwd: invocationCwd });
+      const ended = await endSessionOperation({ cwd: invocationCwd });
+      endWarnings = ended.cleanupWarnings;
     } catch (err) {
-      if (err instanceof NoActiveSessionError || err instanceof EndSessionRaceError) {
+      if (err instanceof NoActiveSessionError) {
         sessionAlreadyEnded = true;
+      } else if (err instanceof EndStateChangedDuringCaptureError) {
+        // The fence refused. Its message enumerates every changed
+        // observation, which is internal vocabulary `end` deliberately
+        // withholds; forwarding it here would give ONE failure two
+        // different privacy contracts depending on which command hit it.
+        // Substitute the user-facing reason and add the actionable hint.
+        endFailureMessage = "the project kept changing during capture";
+        endFailureHint = "Stop other writers or background processes changing the repo, then";
       } else {
+        // Everything else keeps the generic contextual wrapper, which is
+        // more informative than any standalone refusal would be here --
+        // including lock contention and EndSessionRaceError, where "the
+        // command ran but its session could not be closed" plus a retry is
+        // exactly the right report.
         endFailureMessage = (err as Error).message;
       }
     }
@@ -554,6 +618,9 @@ export class RunCommand extends Command {
           `The wrapped command finished (exit status: ${exitCode}), but the session could not be closed: ${endFailureMessage}\n`,
         );
       }
+      if (endFailureHint !== null) {
+        stderr.write(`${endFailureHint}\n`);
+      }
       stderr.write("Close it manually with:\n");
       stderr.write("  viberevert end\n");
       return 1;
@@ -561,6 +628,11 @@ export class RunCommand extends Command {
     if (sessionAlreadyEnded) {
       stderr.write("Note: the session was already ended before the wrapper could close it.\n");
     }
+
+    // Session-scoped diagnostics, grouped with the summary below rather
+    // than emitted at the end call site (which sits above the command
+    // outcome). The user learns what happened to their command first.
+    writeCleanupWarnings(stderr, endWarnings);
 
     stderr.write(`Session: ${sessionId}\n`);
     stderr.write(`Next: viberevert check --since ${sessionId}\n`);

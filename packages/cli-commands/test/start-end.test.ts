@@ -418,6 +418,55 @@ describe("end command", () => {
     }
   });
 
+  it("refuses with the friendly checkpoint refusal when the session's checkpoint is missing", async () => {
+    await setupActiveSession({
+      sessionId: SESSION_ID,
+      startedAt: STARTED_AT,
+    });
+
+    // Remove the checkpoint the end transaction must reconstruct. This is the
+    // REAL operation-to-command integration path, and the one that actually
+    // regressed in M 0.8.0 step 4c: the fixture used to create an empty
+    // checkpoint/ dir, `end` began reconstructing it, and the resulting
+    // CheckpointNotFoundError reached clipanion as a raw stack. The
+    // presentation contracts live in end-presentation.test.ts; what THIS test
+    // proves is that the operation genuinely throws that class and the command
+    // genuinely catches it.
+    await rm(join(tmpRoot, ".viberevert", "sessions", SESSION_ID, "checkpoint"), {
+      recursive: true,
+      force: true,
+    });
+
+    const result = await runEnd([]);
+
+    expect(result.exitCode).toBe(1);
+    // Exact-empty rather than "contains no stack": clipanion 3.2.1 writes
+    // UNCAUGHT command errors to STDOUT, so an unmapped error would land
+    // precisely here. This assertion is the regression guard.
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("Cannot end this session: its checkpoint is missing.");
+    expect(result.stderr).toContain("manifest.json not found");
+    expect(result.stderr).toContain("The session is left active and unchanged.");
+
+    // The end transaction refuses BEFORE any publication, so the session is
+    // untouched and still endable once the checkpoint is restored.
+    const lock: ActiveSessionLock = JSON.parse(
+      await readFile(join(tmpRoot, ".viberevert", "active-session.json"), "utf8"),
+    );
+    expect(lock.session_id).toBe(SESSION_ID);
+
+    const sessionDir = join(tmpRoot, ".viberevert", "sessions", SESSION_ID);
+    const session = SessionStateSchema.parse(
+      JSON.parse(await readFile(join(sessionDir, "session.json"), "utf8")),
+    );
+    expect(session.ended_at).toBeUndefined();
+
+    // Nothing terminal was written.
+    await expect(stat(join(sessionDir, "contribution.json"))).rejects.toThrow();
+    await expect(stat(join(sessionDir, "after-status.txt"))).rejects.toThrow();
+    await expect(stat(join(sessionDir, "after-status.z"))).rejects.toThrow();
+  });
+
   // The RepoRootNotFoundError path in end.ts is intentionally not
   // tested end-to-end here. Triggering it requires a temp directory
   // with no `.git`/`.viberevert.yml` in any parent up to the

@@ -96,11 +96,12 @@ import {
   resolveRepoRoot,
   SessionAlreadyActiveError,
 } from "@viberevert/core";
+import { EndStateChangedDuringCaptureError } from "@viberevert/git";
 
 import type { CommandsPolicyConfig } from "../command-guard.js";
 import { truncateIdForDisplay } from "../format.js";
-import { ConcurrentOperationError } from "../locks.js";
-import { EndSessionRaceError, endSessionOperation } from "../operations/end-session.js";
+import { ConcurrentOperationError, formatConcurrentOperationRefusal } from "../locks.js";
+import { endSessionOperation } from "../operations/end-session.js";
 import { START_LOCK_REL, startSessionOperation } from "../operations/start-session.js";
 import { RuntimeEnvInvalidError, resolveNowForCliTimestamp } from "../runtime-env.js";
 import { createHostExecutablePathResolver } from "./executable-probe.js";
@@ -1205,11 +1206,14 @@ function sessionAlreadyActiveCopy(lock: SessionAlreadyActiveError["active"]): st
   return text;
 }
 
-/** The "another operation is already running" block (with/without lock info). */
-function concurrentOperationCopy(info: ConcurrentOperationError["info"]): string {
-  return info !== null
-    ? `Another viberevert operation is already running:\n  command:  ${info.command}\n  pid:      ${info.pid}\n  since:    ${info.started_at}\n\nIf you're sure that command isn't running anymore (e.g., crashed),\nremove this stale lock directory manually:\n  ${START_LOCK_REL}\n`
-    : `Another viberevert operation is already running (lock metadata unavailable).\n\nIf you're sure no other viberevert command is running,\nremove this stale lock directory manually:\n  ${START_LOCK_REL}\n`;
+/**
+ * Non-fatal end-of-session cleanup diagnostics (M 0.8.0), in the same
+ * `warning: ` form the other commands use — returned as text because this
+ * adapter hands back `stderrText` rather than writing to a stream. Empty
+ * for an empty list, so a clean close is byte-identical to before.
+ */
+function cleanupWarningsText(warnings: readonly string[]): string {
+  return warnings.map((warning) => `warning: ${warning}\n`).join("");
 }
 
 // --- G3-backed session adapter ---
@@ -1230,7 +1234,9 @@ export interface G3BackedPtyShellSessionOps {
     readonly task?: string;
     readonly loadedConfig?: Config;
   }) => Promise<{ readonly sessionId: string }>;
-  readonly endSessionOperation: (input: { readonly cwd: string }) => Promise<unknown>;
+  readonly endSessionOperation: (input: {
+    readonly cwd: string;
+  }) => Promise<{ readonly cleanupWarnings: readonly string[] }>;
   readonly loadActiveSessionLock: (
     repoRoot: string,
   ) => Promise<{ readonly session_id: string } | null>;
@@ -1422,7 +1428,11 @@ export function createG3BackedPtyShellSession(
         return { kind: "refused", exitCode: 1, stderrText: sessionAlreadyActiveCopy(err.active) };
       }
       if (err instanceof ConcurrentOperationError) {
-        return { kind: "refused", exitCode: 1, stderrText: concurrentOperationCopy(err.info) };
+        return {
+          kind: "refused",
+          exitCode: 1,
+          stderrText: formatConcurrentOperationRefusal(err.info, START_LOCK_REL),
+        };
       }
       if (err instanceof RepoRootNotFoundError) {
         return { kind: "refused", exitCode: 1, stderrText: repoRootNotFoundCopy() };
@@ -1482,18 +1492,37 @@ export function createG3BackedPtyShellSession(
       };
     }
 
+    let endWarnings: readonly string[] = [];
     try {
-      await ops.endSessionOperation({ cwd });
+      const ended = await ops.endSessionOperation({ cwd });
+      endWarnings = ended.cleanupWarnings;
     } catch (err) {
-      if (err instanceof NoActiveSessionError || err instanceof EndSessionRaceError) {
+      if (err instanceof NoActiveSessionError) {
         state = { kind: "closed" };
         return {
           exitCode: 0,
           stderrText: `Note: the session was already ended before the shell could close it.\nSession: ${sessionId}\nNext: viberevert check --since ${sessionId}\n`,
         };
       }
-      // Unknown end failure: the session may still exist -> stay `opened` for a
-      // possible retry; surface the failure.
+      if (err instanceof EndStateChangedDuringCaptureError) {
+        // The fence refused. Its message enumerates every changed
+        // observation -- internal vocabulary the other commands withhold, so
+        // forwarding it through formatErrorMessage would give ONE failure two
+        // privacy contracts. Retryable, so state stays `opened`.
+        return {
+          exitCode: 1,
+          stderrText:
+            "The session could not be closed because the project kept changing during capture.\n" +
+            "Stop other writers or background processes changing the repo, then close it manually with:\n" +
+            "  viberevert end\n",
+        };
+      }
+      // Unknown end failure -- including end-time lock contention and, since
+      // M 0.8.0 step 4c, EndSessionRaceError. The lifecycle lock refuses a
+      // competing `end` at acquisition, so the race now means
+      // active-session.json vanished out of protocol with NO terminal state
+      // published: a failure, not a successful close. The session may still
+      // exist -> stay `opened` for a possible retry; surface the failure.
       return {
         exitCode: 1,
         stderrText: `The session could not be closed: ${formatErrorMessage(err)}\nClose it manually with:\n  viberevert end\n`,
@@ -1503,7 +1532,7 @@ export function createG3BackedPtyShellSession(
     state = { kind: "closed" };
     return {
       exitCode: 0,
-      stderrText: `Session: ${sessionId}\nNext: viberevert check --since ${sessionId}\n`,
+      stderrText: `${cleanupWarningsText(endWarnings)}Session: ${sessionId}\nNext: viberevert check --since ${sessionId}\n`,
     };
   };
 
