@@ -26,6 +26,7 @@
     "results": [
       {
         "id": "path-classifier.generic.gh-actions",
+        "finding_id": "fnd_d8405d5cedb52b1b8ae43f2d84a8cb14f2e59b27883baccdf31cadcb2c799053",
         "title": "Deployment path changed",
         "level": "high",
         "confidence": "high",
@@ -36,6 +37,9 @@
             "detail": "generic.gh-actions",
             "file": ".github/workflows/deploy.yml"
           }
+        ],
+        "affected_paths": [
+          ".github/workflows/deploy.yml"
         ],
         "recommendation": "Deployment configuration changes affect how and where the app runs. Verify the change in a non-production environment first, and confirm CI gates still pass before merging."
       }

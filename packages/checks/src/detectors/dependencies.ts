@@ -4,7 +4,7 @@
 // Dependency detector (M C Step 5 file 2). Pure synchronous Check
 // implementation. Three D34-locked rules emit `dependencies`-category
 // findings; the check's top-level Check.id is "dependencies" while
-// each emitted CheckResult carries a per-rule id ("dependencies.<rule>")
+// each emitted DetectorResult carries a per-rule id ("dependencies.<rule>")
 // per D40's identity-based dedup convention.
 //
 // =============================================================================
@@ -141,7 +141,7 @@
 // runs.
 
 import { normalizePathSeparators } from "../path-normalization.js";
-import type { Check, CheckContext, CheckResult } from "../types.js";
+import type { Check, CheckContext, DetectorResult } from "../types.js";
 import {
   DEPENDENCY_SECTION_KEYS,
   INSTALL_SCRIPT_KEYS,
@@ -450,8 +450,8 @@ const INSTALL_SCRIPT_RECOMMENDATION =
 export const dependenciesCheck: Check = {
   id: "dependencies",
   category: "dependencies",
-  run: (ctx: CheckContext): readonly CheckResult[] => {
-    const results: CheckResult[] = [];
+  run: (ctx: CheckContext): readonly DetectorResult[] => {
+    const results: DetectorResult[] = [];
 
     // Pre-pass: build a normalized-path Set for sibling-pairing
     // lookups in rule 1. O(N) up-front avoids O(N²) per-lockfile
@@ -494,6 +494,12 @@ export const dependenciesCheck: Check = {
             detail: `lockfile-without-manifest: expected sibling ${expectedManifestPath}`,
           },
         ],
+        // The canonical changed-file identity: the lockfile that changed. The
+        // expected sibling manifest named in the message and evidence detail
+        // is deliberately NOT included — its ABSENCE from the diff is the
+        // finding, so it is not a changed-file identity and would fail the
+        // engine's domain assertion.
+        affected_paths: [normalized],
         recommendation: LOCKFILE_RECOMMENDATION,
       });
     }
@@ -534,6 +540,10 @@ export const dependenciesCheck: Check = {
                 detail: `install-script: ${key} [occurrence ${n}]`,
               },
             ],
+            // The canonical changed-file identity. One finding per
+            // (key, occurrence), so several findings in one manifest each
+            // name it.
+            affected_paths: [normalized],
             recommendation: INSTALL_SCRIPT_RECOMMENDATION,
           });
         }
@@ -603,6 +613,12 @@ export const dependenciesCheck: Check = {
         title: "New dependencies added",
         message: `${newDeps.length} new ${countWord} added to ${normalized}${overflowSuffix}`,
         evidence,
+        // The canonical changed-file identity. MAX_NEW_DEPENDENCY_EVIDENCE
+        // caps evidence over dependency NAMES within one manifest, not over
+        // files, so the complete path set is this single manifest however many
+        // deps were added. Contrast scope-expansion, where the cap IS over
+        // files and the path set must therefore stay uncapped.
+        affected_paths: [normalized],
       });
     }
 

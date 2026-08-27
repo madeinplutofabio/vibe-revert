@@ -130,8 +130,8 @@ import { normalizePathSeparators } from "../path-normalization.js";
 import type {
   Check,
   CheckContext,
-  CheckResult,
   Confidence,
+  DetectorResult,
   LineChunk,
   RiskLevel,
 } from "../types.js";
@@ -449,8 +449,8 @@ const RECOMMENDATION =
 export const secretsCheck: Check = {
   id: "secrets.regex",
   category: "secrets",
-  run: (ctx: CheckContext): readonly CheckResult[] => {
-    const results: CheckResult[] = [];
+  run: (ctx: CheckContext): readonly DetectorResult[] => {
+    const results: DetectorResult[] = [];
     for (const file of ctx.changedFiles) {
       if (file.isBinary) continue;
       if (file.addedLines.length === 0) continue;
@@ -519,6 +519,12 @@ export const secretsCheck: Check = {
                 detail,
               },
             ],
+            // The canonical changed-file identity, obtained by normalizing the
+            // input path — the same value used for evidence and the message.
+            // One finding per occurrence, so several findings in one file each
+            // name it; their occurrence-specific rule/evidence identity keeps
+            // them distinct.
+            affected_paths: [normalizedFilePath],
             recommendation: RECOMMENDATION,
           });
         }

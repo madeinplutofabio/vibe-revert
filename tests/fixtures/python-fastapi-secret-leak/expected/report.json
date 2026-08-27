@@ -26,6 +26,7 @@
     "results": [
       {
         "id": "secrets.regex",
+        "finding_id": "fnd_4eadc4f3b34397d08cb14f0c3c0a3619d7d7dfa8bbd949128e2245d57d31d7f1",
         "title": "Possible secret committed",
         "level": "critical",
         "confidence": "medium",
@@ -37,6 +38,9 @@
             "file": "app/config.py",
             "line": 3
           }
+        ],
+        "affected_paths": [
+          "app/config.py"
         ],
         "recommendation": "Rotate the credential immediately if real. Remove from git history (git filter-repo / BFG). If this is a test fixture, move it to a `.example`/`.template` file or add `# pragma: viberevert-allow` / `// viberevert-allow` to the line."
       }

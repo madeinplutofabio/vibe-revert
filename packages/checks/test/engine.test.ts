@@ -21,9 +21,10 @@
 //       riskLevelByPath must be computed from POST-Layer-2 findings, NOT
 //       from raw or pre-Layer-2 ones).
 //   - Schema validation: raw findings from check.run are validated against
-//     CheckResultSchema BEFORE the toggle filter. An invalid finding throws
-//     even when its category would have been filtered away (because schema
-//     violations are detector bugs, not configuration outcomes).
+//     DetectorResultSchema BEFORE the toggle filter, and their affected_paths
+//     are asserted to be changed files in the same position. Either failure
+//     throws even when the finding's category would have been filtered away
+//     (both are detector bugs, not configuration outcomes).
 //   - riskTagsByPath:
 //     - Built from the injected classifier's matches per file.
 //     - Only enabled-category rules contribute tags (D28 toggle filter
@@ -52,21 +53,23 @@
 //   - Check iteration order matches registry order.
 //
 // Tests use vitest spies (vi.fn) to verify invocation behavior. Synthetic
-// Check stubs return hand-crafted CheckResult[] arrays — no dependency on
+// Check stubs return hand-crafted DetectorResult[] arrays — no dependency on
 // any real detector implementation. All category values used in tests are
 // valid CHECKS_TOGGLE_MAP values so Layer 1 doesn't unintentionally skip
 // checks built for testing other behaviors. Classifier-dependent tests
 // inject their own classifier so the assertions don't depend on the
 // current contents of PATH_RULES (which Step 3+ populates).
 
+import { deriveFindingId } from "@viberevert/session-format";
 import { describe, expect, it, vi } from "vitest";
 
 import type {
   ChangedFileInput,
   Check,
   CheckContext,
-  CheckResult,
   ChecksToggleConfig,
+  DetectorResult,
+  IdentifiedRunChecksResult,
   RiskLevel,
 } from "../src/index.js";
 import { runChecks } from "../src/index.js";
@@ -107,7 +110,8 @@ function buildFinding(opts: {
   line?: number;
   detail?: string;
   recommendation?: string;
-}): CheckResult {
+  affectedPaths?: readonly string[];
+}): DetectorResult {
   const level: RiskLevel = opts.level ?? "medium";
   const evidence = [
     {
@@ -124,6 +128,11 @@ function buildFinding(opts: {
     category: opts.category ?? "auth",
     message: "test message",
     evidence,
+    // Defaults to the evidence file, which is what a fixture finding is
+    // normally about. Deliberately NOT sorted or deduped: a test supplying
+    // `affectedPaths` owns the exact shape it wants to exercise, including an
+    // intentionally invalid or out-of-domain one.
+    affected_paths: [...(opts.affectedPaths ?? (opts.file !== undefined ? [opts.file] : []))],
   };
   if (level === "high" || level === "critical") {
     return { ...base, recommendation: opts.recommendation ?? "fix it" };
@@ -142,8 +151,8 @@ function buildCheck(opts: {
   id: string;
   category: string;
   emittedCategories?: readonly string[];
-  findings?: readonly CheckResult[];
-  run?: (ctx: CheckContext) => readonly CheckResult[];
+  findings?: readonly DetectorResult[];
+  run?: (ctx: CheckContext) => readonly DetectorResult[];
 }): Check {
   return {
     id: opts.id,
@@ -455,7 +464,7 @@ describe("runChecks — schema validation", () => {
             message: "msg",
             evidence: [],
           },
-        ] as unknown as readonly CheckResult[],
+        ] as unknown as readonly DetectorResult[],
     };
     expect(() => runChecks([badCheck], buildContext({ configChecks: { auth: true } }))).toThrow();
   });
@@ -476,7 +485,7 @@ describe("runChecks — schema validation", () => {
             evidence: [{ detail: "x" }],
             // no recommendation → M B refine rejects
           },
-        ] as unknown as readonly CheckResult[],
+        ] as unknown as readonly DetectorResult[],
     };
     expect(() => runChecks([badCheck], buildContext({ configChecks: { auth: true } }))).toThrow();
   });
@@ -501,7 +510,7 @@ describe("runChecks — schema validation", () => {
             message: "msg",
             evidence: [],
           },
-        ] as unknown as readonly CheckResult[],
+        ] as unknown as readonly DetectorResult[],
     };
     // payments disabled, auth enabled → Layer 1 doesn't skip (auth enabled
     // means check runs), but Layer 2 WOULD filter out the "payments"
@@ -665,23 +674,30 @@ describe("runChecks — riskLevelByPath", () => {
     expect(result.riskLevelByPath.get("a.ts")).toBe("low");
   });
 
-  it("findings pointing OUTSIDE ctx.changedFiles do NOT leak into the map", () => {
-    // test-gap-style scenario: check's evidence references a file that's
-    // not in the diff (e.g., the missing-test path it suggests creating).
-    // That file MUST NOT appear in riskLevelByPath.
+  it("a finding's EVIDENCE may name a non-changed path without leaking a riskLevelByPath key", () => {
+    // EvidenceSchema.file accepts any canonical relative path, so evidence may
+    // legitimately point outside the diff. `affected_paths` may not, and
+    // riskLevelByPath is keyed only from `affected_paths` — so an evidence
+    // path can never become a key. Pinned as a regression against
+    // reintroducing evidence-based aggregation (the pre-0.8.0 source).
+    //
+    // Empty affected_paths is valid for a finding with no changed-file
+    // subject, so this isolates the evidence-domain behavior from risk
+    // aggregation.
     //
     // The check's category is "test-gap" (the emitted category, NOT the
     // toggle key "tests"). configChecks.tests=true maps to enabled
     // categories ["test-gap"] per CHECKS_TOGGLE_MAP.
     const check = buildCheck({
-      id: "test-gap",
+      id: "advisory",
       category: "test-gap",
       findings: [
         buildFinding({
-          id: "missing.test",
+          id: "advisory.finding",
           category: "test-gap",
           level: "high",
-          file: "tests/Feature/SuggestedMissingTest.php", // NOT in changedFiles
+          file: "tests/Feature/SomewhereElse.php", // NOT in changedFiles
+          affectedPaths: [],
         }),
       ],
     });
@@ -693,12 +709,66 @@ describe("runChecks — riskLevelByPath", () => {
       }),
     );
     // Finding still appears in results...
-    expect(result.results.map((r) => r.id)).toEqual(["missing.test"]);
-    // ...but the suggested-missing-test path is NOT in riskLevelByPath.
-    expect(result.riskLevelByPath.has("tests/Feature/SuggestedMissingTest.php")).toBe(false);
-    // And the actually-changed file stays at "low" (no finding evidence
-    // pointed at it).
+    expect(result.results.map((r) => r.id)).toEqual(["advisory.finding"]);
+    // ...but its evidence path is NOT a riskLevelByPath key.
+    expect(result.riskLevelByPath.has("tests/Feature/SomewhereElse.php")).toBe(false);
+    // And the actually-changed file stays at "low" (no finding named it).
     expect(result.riskLevelByPath.get("app/Http/Controllers/X.php")).toBe("low");
+  });
+
+  it("throws when a finding's affected_paths names a file outside ctx.changedFiles", () => {
+    const check = buildCheck({
+      id: "bad",
+      category: "auth",
+      findings: [
+        buildFinding({
+          id: "bad.finding",
+          category: "auth",
+          file: "app/Real.ts",
+          affectedPaths: ["app/NotInDiff.ts"],
+        }),
+      ],
+    });
+    expect(() =>
+      runChecks(
+        [check],
+        buildContext({
+          changedFiles: [buildChangedFile({ path: "app/Real.ts" })],
+          configChecks: { auth: true },
+        }),
+      ),
+    ).toThrow(/affected path outside the changed files/);
+  });
+
+  it("throws on an out-of-domain affected path even when the finding's category is disabled", () => {
+    // The check RUNS because one of its emittedCategories is enabled, so the
+    // layer-1 pre-run skip does not fire. The malformed finding's own category
+    // is disabled, so layer 2 would drop it — but the domain assertion runs
+    // BEFORE that filter, exactly as schema validation does. A wholly-disabled
+    // check would be skipped before run() and would prove nothing about
+    // ordering.
+    const check = buildCheck({
+      id: "multi",
+      category: "auth",
+      emittedCategories: ["auth", "payments"],
+      findings: [
+        buildFinding({
+          id: "disabled.finding",
+          category: "payments",
+          file: "app/Real.ts",
+          affectedPaths: ["app/NotInDiff.ts"],
+        }),
+      ],
+    });
+    expect(() =>
+      runChecks(
+        [check],
+        buildContext({
+          changedFiles: [buildChangedFile({ path: "app/Real.ts" })],
+          configChecks: { auth: true, payments: false },
+        }),
+      ),
+    ).toThrow(/affected path outside the changed files/);
   });
 
   it("PRE-clustering: critical finding swept into a cluster summary STILL surfaces at file level (D28 lock)", () => {
@@ -710,7 +780,7 @@ describe("runChecks — riskLevelByPath", () => {
     // riskLevelByPath.get("src/critical.ts") would be "low" (no surviving
     // finding evidence references it). With the lock, it MUST be
     // "critical" because the level is computed from the pre-cluster pool.
-    const findings: CheckResult[] = [];
+    const findings: DetectorResult[] = [];
 
     for (let i = 0; i < 35; i++) {
       const idx = String(i).padStart(2, "0");
@@ -764,7 +834,7 @@ describe("runChecks — final result sort order", () => {
     //   (critical, auth, b, a.ts, 2) → "b"
     //   (high,     auth, c, a.ts, 1) → "c"
     //   (low,      payments, z, z.ts, 100) → "z"
-    const findings: CheckResult[] = [
+    const findings: DetectorResult[] = [
       buildFinding({ id: "z", category: "payments", level: "low", file: "z.ts", line: 100 }),
       buildFinding({ id: "b", category: "auth", level: "critical", file: "a.ts", line: 2 }),
       buildFinding({ id: "a", category: "auth", level: "critical", file: "a.ts", line: 1 }),
@@ -911,5 +981,170 @@ describe("runChecks — check iteration order", () => {
     });
     runChecks([checkA, checkB, checkC], buildContext({ configChecks: { auth: true } }));
     expect(invocations).toEqual(["a", "b", "c"]);
+  });
+});
+
+// =============================================================================
+// M 0.8.0 step 6: canonical paths, complete aggregation, and identity modes
+// =============================================================================
+
+describe("runChecks: affected_paths drives risk aggregation", () => {
+  it("raises EVERY path a finding names, not just its first evidence file", () => {
+    // The pre-0.8.0 source was `evidence[0].file`, so a finding spanning three
+    // files raised exactly one of them. This is the regression that kills that
+    // behavior: evidence still names only src/a.ts.
+    const check = buildCheck({
+      id: "multi",
+      category: "auth",
+      findings: [
+        buildFinding({
+          id: "auth.multi",
+          category: "auth",
+          level: "high",
+          file: "src/a.ts",
+          affectedPaths: ["src/a.ts", "src/b.ts", "src/c.ts"],
+        }),
+      ],
+    });
+    const result = runChecks(
+      [check],
+      buildContext({
+        changedFiles: [
+          buildChangedFile({ path: "src/a.ts" }),
+          buildChangedFile({ path: "src/b.ts" }),
+          buildChangedFile({ path: "src/c.ts" }),
+        ],
+        configChecks: { auth: true },
+      }),
+    );
+    expect(result.riskLevelByPath.get("src/a.ts")).toBe("high");
+    expect(result.riskLevelByPath.get("src/b.ts")).toBe("high");
+    expect(result.riskLevelByPath.get("src/c.ts")).toBe("high");
+  });
+
+  it("a cluster mixing critical and medium does NOT promote the medium member's paths", () => {
+    // 34 critical + 1 medium in one category. Sorted [level desc, id asc] the
+    // criticals lead, so the per-category cap keeps 29 criticals and absorbs
+    // 5 criticals PLUS the medium into ONE summary whose level is critical.
+    //
+    // Aggregation is per-finding and PRE-cluster, so the medium member's path
+    // must stay medium. Computing levels after clustering would let the
+    // summary's critical level bleed onto it.
+    const findings: DetectorResult[] = [];
+    const changedFiles: ChangedFileInput[] = [];
+    for (let i = 0; i < 35; i++) {
+      const n = String(i).padStart(2, "0");
+      const path = `src/f${n}.ts`;
+      changedFiles.push(buildChangedFile({ path }));
+      findings.push(
+        buildFinding({
+          id: `auth.f${n}`,
+          category: "auth",
+          level: i < 34 ? "critical" : "medium",
+          file: path,
+        }),
+      );
+    }
+    const result = runChecks(
+      [buildCheck({ id: "many", category: "auth", findings })],
+      buildContext({ changedFiles, configChecks: { auth: true } }),
+    );
+    // The summary exists and is critical...
+    const summary = result.results.find((r) => r.id === "cluster.auth-tail");
+    expect(summary?.level).toBe("critical");
+    // ...an absorbed critical member's path is still critical...
+    expect(result.riskLevelByPath.get("src/f29.ts")).toBe("critical");
+    // ...and the absorbed MEDIUM member's path was not promoted with it.
+    expect(result.riskLevelByPath.get("src/f34.ts")).toBe("medium");
+  });
+});
+
+describe("runChecks: canonical path identity", () => {
+  it("Windows- and POSIX-shaped inputs yield the same classifier input and the same map keys", () => {
+    const CANONICAL = "app/Http/Controllers/X.php";
+    const WINDOWS = "app\\Http\\Controllers\\X.php";
+
+    /** Records what the injected classifier actually receives. */
+    function recordingRun(path: string): { seen: string[]; result: ReturnType<typeof runChecks> } {
+      const seen: string[] = [];
+      const result = runChecks([], buildContext({ changedFiles: [buildChangedFile({ path })] }), {
+        classifyPath: (p: string) => {
+          seen.push(p);
+          return [];
+        },
+      });
+      return { seen, result };
+    }
+
+    const posix = recordingRun(CANONICAL);
+    const windows = recordingRun(WINDOWS);
+
+    // The injection seam receives the canonical path in BOTH runs. Detectors
+    // already canonicalize before calling classifyPath; the engine must too,
+    // or picomatch treats a backslash as an escape on a Linux host and matches
+    // no rules.
+    expect(posix.seen).toEqual([CANONICAL]);
+    expect(windows.seen).toEqual([CANONICAL]);
+
+    // Both path-keyed outputs are keyed canonically, so a Windows-shaped input
+    // cannot produce a second, raw-path entry.
+    expect([...windows.result.riskTagsByPath.keys()]).toEqual([CANONICAL]);
+    expect([...windows.result.riskLevelByPath.keys()]).toEqual([CANONICAL]);
+    expect([...windows.result.riskTagsByPath.entries()]).toEqual([
+      ...posix.result.riskTagsByPath.entries(),
+    ]);
+    expect([...windows.result.riskLevelByPath.entries()]).toEqual([
+      ...posix.result.riskLevelByPath.entries(),
+    ]);
+  });
+});
+
+describe("runChecks: identity modes", () => {
+  const REPORT_ID = "sess_01JV8Z0N6E7ABCDEFGHJKMNPQR";
+
+  it("pre-identity results are NOT assignable to IdentifiedRunChecksResult", () => {
+    // COMPILE-TIME assertion. `@ts-expect-error` is enforced by `pnpm
+    // typecheck`, NOT by vitest — at runtime these assignments are no-ops, so
+    // this test body asserts nothing beyond the positive control. Its value is
+    // that the build fails if the type error ever disappears.
+    const pre = runChecks([], buildContext({}));
+    // @ts-expect-error DetectorResult lacks finding_id, so this must not compile.
+    const wrong: IdentifiedRunChecksResult = pre;
+    void wrong;
+
+    // Positive control: the identity-bearing overload IS assignable. Without
+    // it, the negative above could pass because both sides became unusable for
+    // some unrelated typing reason.
+    const identified = runChecks([], buildContext({}), { reportId: REPORT_ID });
+    const right: IdentifiedRunChecksResult = identified;
+    expect(right.results).toEqual([]);
+  });
+
+  it("derives finding_id from the final affected_paths when reportId is supplied", () => {
+    const check = buildCheck({
+      id: "c",
+      category: "auth",
+      findings: [buildFinding({ id: "auth.one", category: "auth", file: "src/a.ts" })],
+    });
+    const ctx = buildContext({
+      changedFiles: [buildChangedFile({ path: "src/a.ts" })],
+      configChecks: { auth: true },
+    });
+
+    const identified = runChecks([check], ctx, { reportId: REPORT_ID });
+    expect(identified.results[0]?.finding_id).toBe(
+      deriveFindingId(REPORT_ID, "auth.one", ["src/a.ts"]),
+    );
+
+    const omitted = runChecks([check], ctx);
+    expect(omitted.results[0]).not.toHaveProperty("finding_id");
+
+    // Explicit `undefined` must select PRE-IDENTITY mode, identically to
+    // omission. This is the runtime regression for the discriminator: a
+    // `"reportId" in opts` test would classify this as identity-bearing and
+    // mint ids from a caller that never asked for them.
+    const explicitUndefined = runChecks([check], ctx, { reportId: undefined });
+    expect(explicitUndefined.results[0]).not.toHaveProperty("finding_id");
+    expect(explicitUndefined.results).toEqual(omitted.results);
   });
 });

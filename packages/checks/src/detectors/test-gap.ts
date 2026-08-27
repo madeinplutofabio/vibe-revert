@@ -46,6 +46,22 @@
 // the invariant in the section header above would silently weaken.
 //
 // =============================================================================
+// AFFECTED PATHS (M 0.8.0 step 6)
+// =============================================================================
+//
+// Each finding's `affected_paths` is the ONE changed file that lacks a paired
+// test change. The rule's `testSiblingPatterns` describe qualifying sibling
+// locations, but when a finding emits no OTHER changed file matches them.
+// The inspected file itself is explicitly excluded from satisfying its own
+// sibling requirement, so there is no second changed-file identity to name.
+//
+// The path recorded is the canonical changed-file identity, obtained by
+// normalizing the input path — the same `normalized` value already used for
+// matching, evidence, and the message. `ChangedFileInput.path` may be
+// Windows-shaped at the detector/engine boundary; `affected_paths` always
+// carries the canonical POSIX form.
+//
+// =============================================================================
 // PATH-CLASSIFIER COMPOSITION
 // =============================================================================
 //
@@ -65,7 +81,7 @@ import picomatch from "picomatch";
 
 import { classifyPath } from "../classifiers/match.js";
 import { normalizePathSeparators } from "../path-normalization.js";
-import type { Check, CheckContext, CheckResult } from "../types.js";
+import type { Check, CheckContext, DetectorResult } from "../types.js";
 
 // =============================================================================
 // Locked picomatch options (uniform across @viberevert/checks usages)
@@ -132,8 +148,8 @@ const TEST_GAP_RECOMMENDATION =
 export const testGapCheck: Check = {
   id: "test-gap",
   category: "test-gap",
-  run: (ctx: CheckContext): readonly CheckResult[] => {
-    const results: CheckResult[] = [];
+  run: (ctx: CheckContext): readonly DetectorResult[] => {
+    const results: DetectorResult[] = [];
 
     // -----------------------------------------------------------
     // Pre-pass: normalize every changed file's path ONCE
@@ -142,6 +158,10 @@ export const testGapCheck: Check = {
     // The sibling-test search iterates the entire diff for each
     // (file, rule) pair, so normalizing inside the inner loop
     // would multiply work N*M*K times. Cached here.
+    //
+    // This canonical form is the changed-file identity: it feeds matching,
+    // evidence, the message, AND `affected_paths`. See the AFFECTED PATHS
+    // block in this file's header.
     const normalizedPaths: string[] = ctx.changedFiles.map((f) => normalizePathSeparators(f.path));
 
     // Per-run matcher cache keyed by rule.id. Each rule's
@@ -203,6 +223,11 @@ export const testGapCheck: Check = {
                 detail: `path-rule: ${rule.id}`,
               },
             ],
+            // The canonical changed-file identity, obtained by normalizing the
+            // input path. `ChangedFileInput.path` may be Windows-shaped at the
+            // detector/engine boundary; `affected_paths` always carries the
+            // canonical POSIX form.
+            affected_paths: [normalized],
             recommendation: TEST_GAP_RECOMMENDATION,
           });
         }

@@ -491,7 +491,13 @@ Exit codes:
         detectedFrameworks: resolved.frameworks,
         configChecks: resolved.checks,
       };
-      const runResult = runChecks(BUILTIN_CHECKS, ctx);
+      // Identity-bearing mode: `base.reportId` was resolved by
+      // resolveCheckBase above, so new findings carry finding_id derived
+      // from their final post-cluster affected_paths. The pre-identity
+      // overload exists for callers exercising detector or severity behavior;
+      // the production report path always supplies an identity. Persisted
+      // schemas remain permissive only for legacy findings that lack the pair.
+      const runResult = runChecks(BUILTIN_CHECKS, ctx, { reportId: base.reportId });
 
       // Step 10a: assemble sinceMeta with a PROVISIONAL
       // rollbackAvailable=false. The provisional value is required

@@ -27,10 +27,10 @@
 //   - CLUSTER_CAP_* constants are the expected values
 //   - compareLevel re-export smoke test (function exists + works)
 
-import { CheckResultSchema } from "@viberevert/session-format";
+import { DetectorResultSchema } from "@viberevert/session-format";
 import { describe, expect, it } from "vitest";
 
-import type { CheckResult, RiskLevel } from "../src/index.js";
+import type { DetectorResult, RiskLevel } from "../src/index.js";
 import {
   CLUSTER_CAP_LOW,
   CLUSTER_CAP_PER_CATEGORY,
@@ -60,7 +60,8 @@ function buildFinding(opts: {
   line?: number;
   detail?: string;
   recommendation?: string;
-}): CheckResult {
+  affectedPaths?: readonly string[];
+}): DetectorResult {
   const level: RiskLevel = opts.level ?? "medium";
   const evidence = [
     {
@@ -77,6 +78,11 @@ function buildFinding(opts: {
     category: opts.category ?? "test",
     message: "test message",
     evidence,
+    // Defaults to the evidence file, which is what a fixture finding is
+    // normally about. Deliberately NOT sorted or deduped: a test supplying
+    // `affectedPaths` owns the exact shape it wants to exercise, including an
+    // intentionally invalid one.
+    affected_paths: [...(opts.affectedPaths ?? (opts.file !== undefined ? [opts.file] : []))],
   };
   if (level === "high" || level === "critical") {
     return { ...base, recommendation: opts.recommendation ?? "fix it" };
@@ -96,9 +102,9 @@ function buildFinding(opts: {
  * where a malformed cluster summary could slip past severity's own
  * tests and only surface as an engine.ts re-validation throw.
  */
-function expectAllFindingsSchemaValid(findings: readonly CheckResult[]): void {
+function expectAllFindingsSchemaValid(findings: readonly DetectorResult[]): void {
   for (const finding of findings) {
-    expect(() => CheckResultSchema.parse(finding)).not.toThrow();
+    expect(() => DetectorResultSchema.parse(finding)).not.toThrow();
   }
 }
 
@@ -333,7 +339,7 @@ describe("clusterFindings — Pass 2: per-category cap", () => {
   it("preserves all findings when count is at or below the cap", () => {
     // Exactly CLUSTER_CAP_PER_CATEGORY: no clustering should occur (the
     // pass fires only on `> CAP`).
-    const input: CheckResult[] = [];
+    const input: DetectorResult[] = [];
     for (let i = 0; i < CLUSTER_CAP_PER_CATEGORY; i++) {
       input.push(buildFinding({ id: `f${i}`, file: `f${i}.ts`, category: "cat-x" }));
     }
@@ -344,7 +350,7 @@ describe("clusterFindings — Pass 2: per-category cap", () => {
   });
 
   it("clusters at 35 findings: 29 individual + 1 summary = 30 outputs", () => {
-    const input: CheckResult[] = [];
+    const input: DetectorResult[] = [];
     for (let i = 0; i < 35; i++) {
       input.push(buildFinding({ id: `f${i}`, file: `f${i}.ts`, category: "cat-x" }));
     }
@@ -355,7 +361,7 @@ describe("clusterFindings — Pass 2: per-category cap", () => {
   });
 
   it("cluster summary carries category 'summary' (not the original category)", () => {
-    const input: CheckResult[] = [];
+    const input: DetectorResult[] = [];
     for (let i = 0; i < 35; i++) {
       input.push(buildFinding({ id: `f${i}`, file: `f${i}.ts`, category: "auth" }));
     }
@@ -370,7 +376,7 @@ describe("clusterFindings — Pass 2: per-category cap", () => {
     // KEPT (29 by sort, level DESC) = 5 critical + 24 high.
     // DROPPED (6) = remaining 6 high.
     // Summary level = max(...dropped) = "high".
-    const input: CheckResult[] = [];
+    const input: DetectorResult[] = [];
     for (let i = 0; i < 5; i++) {
       input.push(
         buildFinding({ id: `c${i}`, file: `c${i}.ts`, category: "auth", level: "critical" }),
@@ -386,7 +392,7 @@ describe("clusterFindings — Pass 2: per-category cap", () => {
   });
 
   it("cluster summary carries a recommendation when level is high/critical", () => {
-    const input: CheckResult[] = [];
+    const input: DetectorResult[] = [];
     for (let i = 0; i < 35; i++) {
       input.push(
         buildFinding({
@@ -407,7 +413,7 @@ describe("clusterFindings — Pass 2: per-category cap", () => {
   });
 
   it("cluster summary evidence[0] uses '+N more findings summarized' product-facing text", () => {
-    const input: CheckResult[] = [];
+    const input: DetectorResult[] = [];
     for (let i = 0; i < 35; i++) {
       input.push(buildFinding({ id: `f${i}`, file: `f${i}.ts`, category: "cat-x" }));
     }
@@ -426,7 +432,7 @@ describe("clusterFindings — Pass 2: per-category cap", () => {
     // crossed with the three forbidden tokens (D40, noise budget,
     // clustered) — so a regression in ANY field for ANY token surfaces
     // immediately.
-    const input: CheckResult[] = [];
+    const input: DetectorResult[] = [];
     for (let i = 0; i < 35; i++) {
       input.push(buildFinding({ id: `f${i}`, file: `f${i}.ts`, category: "cat-x" }));
     }
@@ -452,7 +458,7 @@ describe("clusterFindings — Pass 2: per-category cap", () => {
   });
 
   it("cluster summary evidence file paths are sorted ASCII-asc", () => {
-    const input: CheckResult[] = [];
+    const input: DetectorResult[] = [];
     // Use file paths that need sorting (out of order).
     const paths = ["z.ts", "a.ts", "m.ts", "b.ts"];
     for (let i = 0; i < 35; i++) {
@@ -479,7 +485,7 @@ describe("clusterFindings — Pass 2: per-category cap", () => {
   it("does NOT cluster within a category when the cap is not exceeded", () => {
     // Two categories, each with 25 findings. No category exceeds 30, so
     // no clustering should occur in this pass.
-    const input: CheckResult[] = [];
+    const input: DetectorResult[] = [];
     for (let i = 0; i < 25; i++) {
       input.push(buildFinding({ id: `a${i}`, file: `a${i}.ts`, category: "cat-a" }));
     }
@@ -498,7 +504,7 @@ describe("clusterFindings — Pass 2: per-category cap", () => {
     // 16 dropped findings. Summary evidence should include:
     //   evidence[0]    = descriptive "+N more" entry with first file
     //   evidence[1..] = at most 10 representative file paths
-    const input: CheckResult[] = [];
+    const input: DetectorResult[] = [];
     for (let i = 0; i < 45; i++) {
       const n = String(i).padStart(2, "0");
       input.push(buildFinding({ id: `finding.${n}`, file: `file-${n}.ts`, category: "cat-x" }));
@@ -523,7 +529,7 @@ describe("clusterFindings — Pass 2: per-category cap", () => {
     // 35 high findings in one category. Per-category cap keeps ids 00..28,
     // drops ids 29..34, then builds the summary recommendation from the
     // first 3 distinct dropped recommendations sorted by [level desc, id asc].
-    const input: CheckResult[] = [];
+    const input: DetectorResult[] = [];
     for (let i = 0; i < 35; i++) {
       const n = String(i).padStart(2, "0");
       input.push(
@@ -544,7 +550,7 @@ describe("clusterFindings — Pass 2: per-category cap", () => {
   });
 
   it("cluster summary recommendation is truncated with an ellipsis when it exceeds the cap", () => {
-    const input: CheckResult[] = [];
+    const input: DetectorResult[] = [];
     const longText = "x".repeat(180);
     for (let i = 0; i < 35; i++) {
       const n = String(i).padStart(2, "0");
@@ -575,7 +581,7 @@ describe("clusterFindings — Pass 2: per-category cap", () => {
 describe("clusterFindings — Pass 3: low-finding global cap", () => {
   it("preserves all lows when count is at or below the cap", () => {
     // 20 lows distributed across 2 categories (each ≤ 30 per-cat cap).
-    const input: CheckResult[] = [];
+    const input: DetectorResult[] = [];
     for (let i = 0; i < 10; i++) {
       input.push(buildFinding({ id: `a${i}`, file: `a${i}.ts`, category: "cat-a", level: "low" }));
     }
@@ -592,7 +598,7 @@ describe("clusterFindings — Pass 3: low-finding global cap", () => {
     // 25 lows distributed across 3 categories (each ≤ 30 per-cat cap).
     // After low cap fires: 19 individual lows + 1 cluster.low-tail summary
     // (also low) = 20 lows total — matching the cap.
-    const input: CheckResult[] = [];
+    const input: DetectorResult[] = [];
     for (let i = 0; i < 9; i++) {
       input.push(buildFinding({ id: `a${i}`, file: `a${i}.ts`, category: "cat-a", level: "low" }));
     }
@@ -610,7 +616,7 @@ describe("clusterFindings — Pass 3: low-finding global cap", () => {
   });
 
   it("cluster.low-tail summary has level 'low' by definition", () => {
-    const input: CheckResult[] = [];
+    const input: DetectorResult[] = [];
     for (let i = 0; i < 25; i++) {
       input.push(
         buildFinding({ id: `f${i}`, file: `f${i}.ts`, category: `cat-${i % 3}`, level: "low" }),
@@ -631,7 +637,7 @@ describe("clusterFindings — Pass 4: total cap", () => {
   it("preserves all findings when total is at or below the cap", () => {
     // 80 medium findings spread across 4 categories. No per-cat hit, no
     // low cap (all medium), no total cap (80 < 90).
-    const input: CheckResult[] = [];
+    const input: DetectorResult[] = [];
     for (let i = 0; i < 80; i++) {
       input.push(
         buildFinding({ id: `f${i}`, file: `f${i}.ts`, category: `cat-${i % 4}`, level: "medium" }),
@@ -646,7 +652,7 @@ describe("clusterFindings — Pass 4: total cap", () => {
   it("clusters at 95 findings: 89 individual + 1 summary = 90 outputs", () => {
     // 95 medium findings spread across 4 categories (each ≤ 30 per-cat;
     // none low).
-    const input: CheckResult[] = [];
+    const input: DetectorResult[] = [];
     for (let i = 0; i < 95; i++) {
       input.push(
         buildFinding({ id: `f${i}`, file: `f${i}.ts`, category: `cat-${i % 4}`, level: "medium" }),
@@ -663,7 +669,7 @@ describe("clusterFindings — Pass 4: total cap", () => {
     // KEPT (89 by sort, level DESC) = 5 critical + 84 medium.
     // DROPPED (6) = remaining 6 medium.
     // Summary level = "medium".
-    const input: CheckResult[] = [];
+    const input: DetectorResult[] = [];
     for (let i = 0; i < 5; i++) {
       input.push(
         buildFinding({
@@ -713,13 +719,157 @@ describe("clusterFindings — pass-ordering invariant", () => {
     // ≤20. The exact composition is implementation-determined; what we
     // assert is the OBSERVABLE invariant: total low count never exceeds
     // CLUSTER_CAP_LOW after both passes.
-    const input: CheckResult[] = [];
+    const input: DetectorResult[] = [];
     for (let i = 0; i < 35; i++) {
       input.push(buildFinding({ id: `f${i}`, file: `f${i}.ts`, category: "cat-x", level: "low" }));
     }
     const result = clusterFindings(input);
     const lows = result.filter((r) => r.level === "low");
     expect(lows.length).toBeLessThanOrEqual(CLUSTER_CAP_LOW);
+    expectAllFindingsSchemaValid(result);
+  });
+});
+
+// =============================================================================
+// M 0.8.0 step 6: affected_paths survives every path-losing operation
+// =============================================================================
+//
+// This pipeline both DISCARDS findings (dedup, three cap passes) and
+// SYNTHESIZES them (summaries), so it is where a machine path set would go
+// missing. Ids are zero-padded so [level desc, category asc, id asc] ordering
+// is deterministic and the expected unions can be exact. Boundaries derive
+// from the cap constants: these tests are about preservation ACROSS cap
+// mechanics, not about pinning the cap values themselves.
+
+/** `src/f07.ts` … inclusive range, in ASCII (== numeric, zero-padded) order. */
+function pathRange(from: number, to: number): string[] {
+  return Array.from(
+    { length: to - from + 1 },
+    (_, k) => `src/f${String(from + k).padStart(2, "0")}.ts`,
+  );
+}
+
+describe("clusterFindings: affected_paths preservation", () => {
+  it("dedup unions both path sets when the FIRST finding wins on level", () => {
+    const input: DetectorResult[] = [
+      buildFinding({
+        id: "dup",
+        category: "auth",
+        level: "high",
+        file: "src/a.ts",
+        detail: "same",
+        recommendation: "from-prev",
+        affectedPaths: ["src/a.ts", "src/b.ts"],
+      }),
+      buildFinding({
+        id: "dup",
+        category: "auth",
+        level: "low",
+        file: "src/a.ts",
+        detail: "same",
+        recommendation: "from-f",
+        affectedPaths: ["src/c.ts"],
+      }),
+    ];
+    const [survivor, ...rest] = clusterFindings(input);
+    expect(rest).toHaveLength(0);
+    // Winner selection took the higher level and ITS other fields...
+    expect(survivor?.level).toBe("high");
+    expect(survivor?.recommendation).toBe("from-prev");
+    // ...but the loser's paths survived regardless.
+    expect(survivor?.affected_paths).toEqual(["src/a.ts", "src/b.ts", "src/c.ts"]);
+  });
+
+  it("dedup unions both path sets when the SECOND finding wins on level", () => {
+    // Inverse of the case above. Together these prove path union is
+    // INDEPENDENT of which finding wins: winner selection must never decide
+    // whose machine path set is kept.
+    const input: DetectorResult[] = [
+      buildFinding({
+        id: "dup",
+        category: "auth",
+        level: "low",
+        file: "src/a.ts",
+        detail: "same",
+        recommendation: "from-prev",
+        affectedPaths: ["src/c.ts"],
+      }),
+      buildFinding({
+        id: "dup",
+        category: "auth",
+        level: "high",
+        file: "src/a.ts",
+        detail: "same",
+        recommendation: "from-f",
+        affectedPaths: ["src/a.ts", "src/b.ts"],
+      }),
+    ];
+    const [survivor, ...rest] = clusterFindings(input);
+    expect(rest).toHaveLength(0);
+    expect(survivor?.level).toBe("high");
+    expect(survivor?.recommendation).toBe("from-f");
+    expect(survivor?.affected_paths).toEqual(["src/a.ts", "src/b.ts", "src/c.ts"]);
+  });
+
+  it("a summary's affected_paths is UNCAPPED while its evidence stays capped", () => {
+    // MEDIUM is explicit, not inherited from buildFinding's default: at "low"
+    // the low cap would also fire and absorb the per-category summary, turning
+    // this into the multi-pass case below instead of isolating the evidence
+    // cap. Only the per-category pass should apply here.
+    const count = CLUSTER_CAP_PER_CATEGORY + 15;
+    const firstAbsorbed = CLUSTER_CAP_PER_CATEGORY - 1;
+    const input: DetectorResult[] = [];
+    for (let i = 0; i < count; i++) {
+      const n = String(i).padStart(2, "0");
+      input.push(
+        buildFinding({ id: `f${n}`, category: "auth", level: "medium", file: `src/f${n}.ts` }),
+      );
+    }
+    const result = clusterFindings(input);
+    const summary = result.find((r) => r.id === "cluster.auth-tail");
+    expect(summary).toBeDefined();
+    // EXACTLY 1 descriptive entry + CLUSTER_EVIDENCE_FILE_CAP (10)
+    // representatives. That constant is module-private, so the literal is
+    // deliberate. Exact rather than an upper bound: the absorbed set is larger
+    // than the cap, so the cap must actually engage — `<= 11` would also pass
+    // if a regression shrank the presentation set to 1.
+    expect(summary?.evidence.length).toBe(11);
+    // The machine set carries every absorbed path. This gap is the whole
+    // reason the field exists.
+    expect(summary?.affected_paths.length).toBe(count - firstAbsorbed);
+    expect(summary?.affected_paths).toEqual(pathRange(firstAbsorbed, count - 1));
+    expectAllFindingsSchemaValid(result);
+  });
+
+  it("paths survive a summary being absorbed by a LATER cap pass", () => {
+    // The strongest case: a synthetic summary is itself swept up downstream.
+    //
+    // LOW findings, so both caps engage. The per-category pass keeps
+    // CLUSTER_CAP_PER_CATEGORY - 1 and emits cluster.auth-tail carrying the
+    // rest. That leaves CLUSTER_CAP_PER_CATEGORY lows — more than
+    // CLUSTER_CAP_LOW — so the low cap keeps CLUSTER_CAP_LOW - 1 and absorbs
+    // the remainder INCLUDING the summary, because among equal levels the sort
+    // key is category ASC and "auth" < "summary".
+    //
+    // cluster.low-tail must therefore carry every path from the low-cap
+    // boundary onward, including ones that reached it only THROUGH an
+    // intermediate summary, with no schema parse in between.
+    const count = CLUSTER_CAP_PER_CATEGORY + 5;
+    const firstAbsorbedByLowCap = CLUSTER_CAP_LOW - 1;
+    const input: DetectorResult[] = [];
+    for (let i = 0; i < count; i++) {
+      const n = String(i).padStart(2, "0");
+      input.push(
+        buildFinding({ id: `f${n}`, category: "auth", level: "low", file: `src/f${n}.ts` }),
+      );
+    }
+    const result = clusterFindings(input);
+    const lowTail = result.find((r) => r.id === "cluster.low-tail");
+    expect(lowTail).toBeDefined();
+    // The intermediate summary is gone, absorbed.
+    expect(result.some((r) => r.id === "cluster.auth-tail")).toBe(false);
+    // Its paths are not.
+    expect(lowTail?.affected_paths).toEqual(pathRange(firstAbsorbedByLowCap, count - 1));
     expectAllFindingsSchemaValid(result);
   });
 });

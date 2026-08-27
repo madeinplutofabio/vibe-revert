@@ -82,6 +82,22 @@
 // follow the same rule.
 //
 // =============================================================================
+// AFFECTED PATHS (M 0.8.0 step 6)
+// =============================================================================
+//
+// This detector is the canonical case for why `affected_paths` cannot be
+// derived from `evidence`. Evidence is capped at MAX_EVIDENCE_PER_CATEGORY
+// (5) and the message says "+N more"; the machine path set carries ALL
+// contributing files, however many. A category finding spanning 40 files
+// yields 5 evidence entries and 40 affected paths.
+//
+// The paths recorded are canonical changed-file identities, obtained by
+// normalizing the input paths — the same `normalizedPath` values already used
+// for tokenizing, evidence, and the [overlap asc, path asc] ordering.
+// `ChangedFileInput.path` may be Windows-shaped at the detector/engine
+// boundary; `affected_paths` always carries the canonical POSIX form.
+//
+// =============================================================================
 // TOGGLE-OWNERSHIP NOTE
 // =============================================================================
 //
@@ -93,7 +109,7 @@
 
 import { classifyPath } from "../classifiers/match.js";
 import { normalizePathSeparators } from "../path-normalization.js";
-import type { Check, CheckContext, CheckResult } from "../types.js";
+import type { Check, CheckContext, DetectorResult } from "../types.js";
 
 // =============================================================================
 // Locked tuning constants
@@ -232,7 +248,7 @@ function tokenizePath(path: string): Set<string> {
 export const scopeExpansionCheck: Check = {
   id: "scope-expansion",
   category: "scope-expansion",
-  run: (ctx: CheckContext): readonly CheckResult[] => {
+  run: (ctx: CheckContext): readonly DetectorResult[] => {
     // -----------------------------------------------------------
     // Trigger gates (D37 short-circuits)
     // -----------------------------------------------------------
@@ -264,7 +280,11 @@ export const scopeExpansionCheck: Check = {
     // Each entry's value carries the file path AND its overlap
     // value (for stable sort + evidence-detail formatting).
     interface SuspiciousFile {
-      readonly file: string;
+      /**
+       * The canonical changed-file identity. Serves every role at once:
+       * tokenizing input, evidence, ordering, and `affected_paths`.
+       */
+      readonly normalizedPath: string;
       readonly overlap: number;
     }
     const filesByCategory = new Map<string, SuspiciousFile[]>();
@@ -315,7 +335,7 @@ export const scopeExpansionCheck: Check = {
           arr = [];
           filesByCategory.set(category, arr);
         }
-        arr.push({ file: normalized, overlap });
+        arr.push({ normalizedPath: normalized, overlap });
       }
     }
 
@@ -327,7 +347,7 @@ export const scopeExpansionCheck: Check = {
     // Map iteration is insertion-order, which depends on which
     // file was scanned first → would be sensitive to changedFiles
     // ordering; explicit sort is the locked invariant.
-    const results: CheckResult[] = [];
+    const results: DetectorResult[] = [];
     const categories = [...filesByCategory.keys()].sort();
     for (const category of categories) {
       const files = filesByCategory.get(category);
@@ -337,13 +357,13 @@ export const scopeExpansionCheck: Check = {
       // (most suspicious), then alphabetical for stability.
       files.sort((a, b) => {
         if (a.overlap !== b.overlap) return a.overlap - b.overlap;
-        if (a.file < b.file) return -1;
-        if (a.file > b.file) return 1;
+        if (a.normalizedPath < b.normalizedPath) return -1;
+        if (a.normalizedPath > b.normalizedPath) return 1;
         return 0;
       });
 
       const evidence = files.slice(0, MAX_EVIDENCE_PER_CATEGORY).map((f) => ({
-        file: f.file,
+        file: f.normalizedPath,
         detail: `overlap: ${f.overlap.toFixed(2)}`,
       }));
 
@@ -355,6 +375,13 @@ export const scopeExpansionCheck: Check = {
           ? `${totalCount} ${fileWord} in the ${category} area had low overlap with the task (showing first ${MAX_EVIDENCE_PER_CATEGORY}; +${moreCount} more)`
           : `${totalCount} ${fileWord} in the ${category} area had low overlap with the task`;
 
+      // The COMPLETE set, deliberately independent of MAX_EVIDENCE_PER_CATEGORY.
+      // `files` is ordered by [overlap asc, path asc] for evidence purposes, so
+      // the machine set needs its own ASCII sort to satisfy
+      // sortedUniquePathArray. Deduped defensively: a file contributes at most
+      // once per category by construction, but the schema requires uniqueness.
+      const affectedPaths = [...new Set(files.map((f) => f.normalizedPath))].sort();
+
       results.push({
         id: `scope-expansion.${category}`,
         category: "scope-expansion",
@@ -363,6 +390,7 @@ export const scopeExpansionCheck: Check = {
         title: `Suspicious scope expansion: ${category}`,
         message,
         evidence,
+        affected_paths: affectedPaths,
         recommendation: SCOPE_EXPANSION_RECOMMENDATION,
       });
     }

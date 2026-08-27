@@ -29,6 +29,7 @@
     "results": [
       {
         "id": "migration.danger-term.rails.drop-table",
+        "finding_id": "fnd_7195f0155a44767885ecd20a496e6694f51e5ccb80aa02109606d0beb1095fc0",
         "title": "Destructive migration: Rails drop_table",
         "level": "high",
         "confidence": "medium",
@@ -41,10 +42,14 @@
             "line": 3
           }
         ],
+        "affected_paths": [
+          "db/migrate/20260101000000_drop_old_table.rb"
+        ],
         "recommendation": "Run the migration locally before deploying. Confirm a rollback path exists. Consider splitting destructive operations into a forward-only deploy + a separate cleanup migration."
       },
       {
         "id": "migration.missing-down",
+        "finding_id": "fnd_f114a445fc49f32080e2e9b2c78f219430f4dc762a8f2fe3df3fcd7acf4430e1",
         "title": "New migration has destructive operation without down() method",
         "level": "high",
         "confidence": "high",
@@ -56,10 +61,14 @@
             "file": "db/migrate/20260101000000_drop_old_table.rb"
           }
         ],
+        "affected_paths": [
+          "db/migrate/20260101000000_drop_old_table.rb"
+        ],
         "recommendation": "Add a down() method to enable rollback of this migration. If the destructive operation is intentional and irreversible, document the no-rollback decision in the migration body and confirm with the team before deploying."
       },
       {
         "id": "path-classifier.rails.migrations",
+        "finding_id": "fnd_ba3e2c59d7e1cf5240a5de67f9559466be1890b9f237bf35fbd34706d3b4a188",
         "title": "Database/migration path changed",
         "level": "high",
         "confidence": "high",
@@ -71,10 +80,14 @@
             "file": "db/migrate/20260101000000_drop_old_table.rb"
           }
         ],
+        "affected_paths": [
+          "db/migrate/20260101000000_drop_old_table.rb"
+        ],
         "recommendation": "Database/migration changes can be destructive and hard to roll back. Run the migration locally, confirm a rollback path exists, and consider splitting destructive operations into a forward-only deploy plus a separate cleanup migration."
       },
       {
         "id": "test-gap.rails.migrations",
+        "finding_id": "fnd_e3fc3d708bbc45fa8fa489c7fe466424788b385fc9accc79f2c9117bc741082c",
         "title": "Risky change without paired test: rails.migrations",
         "level": "high",
         "confidence": "medium",
@@ -85,6 +98,9 @@
             "detail": "path-rule: rails.migrations",
             "file": "db/migrate/20260101000000_drop_old_table.rb"
           }
+        ],
+        "affected_paths": [
+          "db/migrate/20260101000000_drop_old_table.rb"
         ],
         "recommendation": "Add or update sibling tests for this change in the same diff. Risky-area changes without paired test changes are difficult to verify and easy to regress. If the change is intentionally test-exempt (e.g., a pure config tweak), document the exemption in the change description."
       }

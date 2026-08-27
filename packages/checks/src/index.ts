@@ -13,9 +13,14 @@
 //   - lowerCamelFunction: callable helper.
 //
 // What's public in Step 2 of M C:
-//   - The check engine: runChecks + RunChecksOptions.
+//   - The check engine: runChecks, in the two lifecycle modes selected by
+//     `reportId` — RunChecksOptions/RunChecksResult (pre-identity) and
+//     IdentifiedRunChecksOptions/IdentifiedRunChecksResult (identity-bearing).
 //   - The check interface + context types: Check, CheckContext,
-//     ChangedFileInput, LineChunk, RunChecksResult, ChecksToggleConfig.
+//     ChangedFileInput, LineChunk, ChecksToggleConfig.
+//   - The finding lifecycle types: DetectorResult (what a check emits, with
+//     affected_paths required and finding_id structurally absent) and
+//     IdentifiedCheckResult (a final finding carrying both).
 //   - Re-exports of session-format types frequently used by check
 //     authors: ChangedFile, ChangedFileStatus, CheckResult, Confidence,
 //     Evidence, RiskLevel.
@@ -35,7 +40,6 @@
 //   - PATH_RULES (data table whose shape may evolve in Step 3+).
 
 export type { PathRule } from "./classifiers/path-rules.js";
-export type { RunChecksOptions } from "./engine.js";
 export { runChecks } from "./engine.js";
 
 export { BUILTIN_CHECKS, CHECKS_TOGGLE_MAP, deriveEnabledCategories } from "./registry.js";
@@ -57,8 +61,13 @@ export type {
   CheckResult,
   ChecksToggleConfig,
   Confidence,
+  DetectorResult,
   Evidence,
+  IdentifiedCheckResult,
+  IdentifiedRunChecksOptions,
+  IdentifiedRunChecksResult,
   LineChunk,
   RiskLevel,
+  RunChecksOptions,
   RunChecksResult,
 } from "./types.js";

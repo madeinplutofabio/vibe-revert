@@ -29,6 +29,7 @@
     "results": [
       {
         "id": "path-classifier.laravel.webhook-controllers",
+        "finding_id": "fnd_c897115965d74ce60d19967106d73c546db8e5ec118b395c9c3371d30bc7a390",
         "title": "Payments-related path changed",
         "level": "critical",
         "confidence": "high",
@@ -40,10 +41,14 @@
             "file": "app/Http/Controllers/Webhooks/StripeWebhookController.php"
           }
         ],
+        "affected_paths": [
+          "app/Http/Controllers/Webhooks/StripeWebhookController.php"
+        ],
         "recommendation": "Payment-related code is high-impact: bugs here can charge or refund the wrong amounts. Review the change against the payment-flow spec, verify with a sandbox transaction, and confirm webhook idempotency where relevant."
       },
       {
         "id": "test-gap.laravel.webhook-controllers",
+        "finding_id": "fnd_c493a0ed57ced723bb7d402c304b02bac6df58ba9fe3bb2d398543fbd91eaa76",
         "title": "Risky change without paired test: laravel.webhook-controllers",
         "level": "high",
         "confidence": "medium",
@@ -54,6 +59,9 @@
             "detail": "path-rule: laravel.webhook-controllers",
             "file": "app/Http/Controllers/Webhooks/StripeWebhookController.php"
           }
+        ],
+        "affected_paths": [
+          "app/Http/Controllers/Webhooks/StripeWebhookController.php"
         ],
         "recommendation": "Add or update sibling tests for this change in the same diff. Risky-area changes without paired test changes are difficult to verify and easy to regress. If the change is intentionally test-exempt (e.g., a pure config tweak), document the exemption in the change description."
       }

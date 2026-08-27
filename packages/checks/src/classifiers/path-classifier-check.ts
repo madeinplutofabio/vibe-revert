@@ -5,7 +5,7 @@
 //
 // Wraps the pure `classifyPath` matcher (from ./match.ts) as a `Check`
 // the engine can invoke per-file in its main pipeline. The check emits
-// ONE CheckResult per (matched rule, changed file) pair so that:
+// ONE DetectorResult per (matched rule, changed file) pair so that:
 //   - Multiple rules matching the same path produce multiple distinct
 //     findings (D40 identity-based dedup: per-rule id prevents accidental
 //     collapse — see D40 lock + classifiers/multi-match.test.ts regression).
@@ -53,17 +53,18 @@
 //      with a category not present in PATH_RULES (a contract violation
 //      in its own right, but cheap to keep the local call site
 //      fail-closed).
-//   - Title fallback is intentionally permissive: `title` is
-//     schema-OPTIONAL on CheckResult, so a missing TITLES_BY_CATEGORY
-//     entry degrades to a generic human-readable label rather than
-//     throwing. The consequence of a missing title entry is purely
+//   - Title fallback is intentionally permissive: `title` is REQUIRED by
+//     DetectorResultSchema (via the shared finding base), so a missing
+//     TITLES_BY_CATEGORY entry degrades to a generic human-readable label
+//     rather than emitting a finding the schema would reject. The
+//     consequence of a missing title entry is purely
 //     cosmetic.
 //
 // PURITY: this check performs no I/O, makes no Date / random / clock
 // calls, and contains no async code per D29.
 
 import { normalizePathSeparators } from "../path-normalization.js";
-import type { Check, CheckContext, CheckResult } from "../types.js";
+import type { Check, CheckContext, DetectorResult } from "../types.js";
 import { classifyPath } from "./match.js";
 import { PATH_RULES } from "./path-rules.js";
 
@@ -122,9 +123,10 @@ if (MISSING_HIGH_IMPACT_RECOMMENDATION_CATEGORIES.length > 0) {
 }
 
 /**
- * Per-category short titles for emitted findings. `title` is
- * schema-OPTIONAL on `CheckResult`, so a missing entry degrades to
- * `FALLBACK_TITLE` rather than throwing. The cost of a missing title
+ * Per-category short titles for emitted findings. `title` is REQUIRED by
+ * `DetectorResultSchema` (via the shared finding base), so a missing entry
+ * degrades to `FALLBACK_TITLE` rather than emitting a finding the schema
+ * would reject. The cost of a missing title
  * is purely cosmetic, so a generic fallback is acceptable here (in
  * contrast to recommendations, where a missing entry is a schema-level
  * bug — see the module-load invariant above plus
@@ -199,15 +201,15 @@ export const pathClassifierCheck: Check = {
   id: "path-classifier",
   category: "path-classifier",
   emittedCategories: EMITTED_CATEGORIES_UNION,
-  run: (ctx: CheckContext): readonly CheckResult[] => {
-    const results: CheckResult[] = [];
+  run: (ctx: CheckContext): readonly DetectorResult[] => {
+    const results: DetectorResult[] = [];
     for (const file of ctx.changedFiles) {
       // POSIX-normalize ONCE at the top of the per-file loop so the
       // matcher AND the emitted evidence.file + message strings all
       // see the canonical form. Without this, a Windows-shaped input
       // path (backslashes — from a Windows CLI, MCP adapter, or
-      // third-party caller) produces a CheckResult whose evidence.file
-      // fails CheckResultSchema's safeStoredRelativePath rule, and the
+      // third-party caller) produces a DetectorResult whose evidence.file
+      // fails DetectorResultSchema's safeStoredRelativePath rule, and the
       // engine's D28 layer-2 parse step throws a ZodError. Shared
       // helper from ../path-normalization.ts so this discipline stays
       // identical across all detectors (D17c single source of truth).
@@ -220,7 +222,7 @@ export const pathClassifierCheck: Check = {
           : undefined;
         const title = TITLES_BY_CATEGORY[rule.category] ?? FALLBACK_TITLE;
         const message = `File '${normalizedPath}' matches path-classifier rule '${rule.id}' for category '${rule.category}'.`;
-        const finding: CheckResult = {
+        const finding: DetectorResult = {
           id: `path-classifier.${rule.id}`,
           category: rule.category,
           level: rule.defaultLevel,
@@ -228,6 +230,14 @@ export const pathClassifierCheck: Check = {
           title,
           message,
           evidence: [{ file: normalizedPath, detail: rule.id }],
+          // The canonical changed-file identity, obtained by normalizing the
+          // input path — the same value used for evidence above.
+          // `ChangedFileInput.path` may be Windows-shaped at the
+          // detector/engine boundary; `affected_paths` always carries the
+          // canonical POSIX form. One rule matches one file, so exactly one
+          // path; multiple rules matching the same file emit multiple
+          // findings that each name it.
+          affected_paths: [normalizedPath],
           ...(recommendation !== undefined ? { recommendation } : {}),
         };
         results.push(finding);

@@ -61,7 +61,7 @@ import picomatch from "picomatch";
 
 import { classifyPath } from "../classifiers/match.js";
 import { normalizePathSeparators } from "../path-normalization.js";
-import type { Check, CheckContext, CheckResult } from "../types.js";
+import type { Check, CheckContext, DetectorResult } from "../types.js";
 import {
   type DangerTerm,
   type DangerTermMatch,
@@ -207,8 +207,8 @@ const MISSING_DOWN_RECOMMENDATION =
 export const migrationsCheck: Check = {
   id: "migrations",
   category: "database",
-  run: (ctx: CheckContext): readonly CheckResult[] => {
-    const results: CheckResult[] = [];
+  run: (ctx: CheckContext): readonly DetectorResult[] => {
+    const results: DetectorResult[] = [];
 
     for (const file of ctx.changedFiles) {
       // Early skips: binary files have no scannable content; empty
@@ -282,6 +282,12 @@ export const migrationsCheck: Check = {
               detail: `danger-term: ${term.id}`,
             },
           ],
+          // The canonical changed-file identity, obtained by normalizing the
+          // input path — the same value used for evidence and the message.
+          // One migration file per finding; several danger terms in the same
+          // file emit several findings that each name it, and their
+          // rule/evidence identity keeps those findings distinct.
+          affected_paths: [normalized],
           recommendation: DANGER_TERM_RECOMMENDATION,
         });
       }
@@ -317,6 +323,8 @@ export const migrationsCheck: Check = {
               detail: "missing-down",
             },
           ],
+          // The canonical changed-file identity for this finding.
+          affected_paths: [normalized],
           recommendation: MISSING_DOWN_RECOMMENDATION,
         });
       }
