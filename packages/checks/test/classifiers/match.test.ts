@@ -44,6 +44,10 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  canonicalChangedFilePath,
+  changedFilePathCandidates,
+  classifyChangedFile,
+  classifyChangedFileWithCompiledRules,
   classifyPath,
   classifyPathWithCompiledRules,
   compilePathRules,
@@ -440,5 +444,142 @@ describe("compilePathRules — pure compiler", () => {
     expect(compiledB[0]?.rule.id).toBe("b");
     expect(compiledA[0]?.matchPattern("b.ts")).toBe(false);
     expect(compiledB[0]?.matchPattern("a.ts")).toBe(false);
+  });
+});
+
+// =============================================================================
+// Rename aliases (M 0.8.0 step 7)
+// =============================================================================
+
+describe("changedFilePathCandidates", () => {
+  it("a non-rename yields one candidate", () => {
+    expect(changedFilePathCandidates({ path: "src/a.ts" })).toEqual([
+      { path: "src/a.ts", source: "current" },
+    ]);
+  });
+
+  it("a rename yields current then previous", () => {
+    expect(
+      changedFilePathCandidates({ path: "utils/webhook.ts", previous_path: "payments/webhook.ts" }),
+    ).toEqual([
+      { path: "utils/webhook.ts", source: "current" },
+      { path: "payments/webhook.ts", source: "previous" },
+    ]);
+  });
+
+  it("canonicalizes BOTH sides, not just the current path", () => {
+    // previous_path arrives in the same transport form as path and is not
+    // canonicalized anywhere upstream, so a Windows-shaped rename origin would
+    // otherwise be classified as a literal-backslash path.
+    expect(
+      changedFilePathCandidates({
+        path: "utils\\webhook.ts",
+        previous_path: "payments\\webhook.ts",
+      }),
+    ).toEqual([
+      { path: "utils/webhook.ts", source: "current" },
+      { path: "payments/webhook.ts", source: "previous" },
+    ]);
+  });
+
+  it("collapses to a single 'both' candidate when the two canonicalize alike", () => {
+    // Degenerate but reachable: no reason to classify the same path twice.
+    expect(changedFilePathCandidates({ path: "a/b.ts", previous_path: "a\\b.ts" })).toEqual([
+      { path: "a/b.ts", source: "both" },
+    ]);
+  });
+});
+
+describe("canonicalChangedFilePath", () => {
+  it("is the POSIX form of the current path", () => {
+    expect(canonicalChangedFilePath({ path: "a\\b\\c.ts" })).toBe("a/b/c.ts");
+  });
+});
+
+describe("classifyChangedFileWithCompiledRules", () => {
+  it("a non-rename behaves like single-path classification, with source 'current'", () => {
+    const compiled = compilePathRules([rule({ id: "ts", pattern: "**/*.ts" })]);
+    const result = classifyChangedFileWithCompiledRules({ path: "src/a.ts" }, [], compiled);
+    expect(result).toHaveLength(1);
+    expect(result[0]?.source).toBe("current");
+    expect(result[0]?.currentPath).toBe("src/a.ts");
+    expect(result[0]?.previousPath).toBeUndefined();
+  });
+
+  it("retains risk from the rename ORIGIN while identity stays the new path", () => {
+    // The canonical step 7 case: payments/webhook.ts -> utils/webhook.ts.
+    // The payments rule matches only the old location, but the finding's
+    // identity is the new one.
+    const compiled = compilePathRules([
+      rule({ id: "payments", pattern: "payments/**", category: "payments" }),
+    ]);
+    const result = classifyChangedFileWithCompiledRules(
+      { path: "utils/webhook.ts", previous_path: "payments/webhook.ts" },
+      [],
+      compiled,
+    );
+    expect(result).toHaveLength(1);
+    expect(result[0]?.rule.id).toBe("payments");
+    expect(result[0]?.source).toBe("previous");
+    expect(result[0]?.currentPath).toBe("utils/webhook.ts");
+    expect(result[0]?.previousPath).toBe("payments/webhook.ts");
+  });
+
+  it("a rule matching both aliases is emitted ONCE with source 'both'", () => {
+    const compiled = compilePathRules([rule({ id: "ts", pattern: "**/*.ts" })]);
+    const result = classifyChangedFileWithCompiledRules(
+      { path: "new.ts", previous_path: "old.ts" },
+      [],
+      compiled,
+    );
+    expect(result).toHaveLength(1);
+    expect(result[0]?.source).toBe("both");
+  });
+
+  it("emits in compiled-rule order, NOT current-then-previous concatenation order", () => {
+    // Table is [a, b]; only the PREVIOUS path matches a, only the CURRENT
+    // matches b. Each single-path call preserves order individually, so naive
+    // concatenation would yield [b, a].
+    const compiled = compilePathRules([
+      rule({ id: "a", pattern: "old.ts" }),
+      rule({ id: "b", pattern: "new.ts" }),
+    ]);
+    const result = classifyChangedFileWithCompiledRules(
+      { path: "new.ts", previous_path: "old.ts" },
+      [],
+      compiled,
+    );
+    expect(result.map((m) => m.rule.id)).toEqual(["a", "b"]);
+    expect(result.map((m) => m.source)).toEqual(["previous", "current"]);
+  });
+
+  it("emits a repeated rule object once", () => {
+    // compilePathRules accepts arbitrary arrays, so "no object repeats" is as
+    // unverifiable an assumption as "ids are unique".
+    const shared = rule({ id: "dup", pattern: "**/*.ts" });
+    const compiled = compilePathRules([shared, shared]);
+    const result = classifyChangedFileWithCompiledRules({ path: "a.ts" }, [], compiled);
+    expect(result).toHaveLength(1);
+  });
+
+  it("does NOT collapse distinct rule objects that share an id", () => {
+    // Rule ids are not an asserted uniqueness boundary in this module.
+    // Dedupe is by PathRule object identity, so two distinct rules with the
+    // same id remain distinct matches in compiled-rule order.
+    const first = rule({ id: "shared", pattern: "**/*.ts", category: "auth" });
+    const second = rule({ id: "shared", pattern: "**/*.ts", category: "payments" });
+    const compiled = compilePathRules([first, second]);
+
+    const result = classifyChangedFileWithCompiledRules({ path: "a.ts" }, [], compiled);
+
+    expect(result).toHaveLength(2);
+    expect(result[0]?.rule).toBe(first);
+    expect(result[1]?.rule).toBe(second);
+  });
+});
+
+describe("classifyChangedFile (production wrapper)", () => {
+  it("returns an array (shape sanity without locking PATH_RULES contents)", () => {
+    expect(Array.isArray(classifyChangedFile({ path: "anything.ts" }, []))).toBe(true);
   });
 });

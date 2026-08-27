@@ -31,12 +31,23 @@
 // touching either package's picomatch invocation should cross-check the
 // other.
 //
-// TESTABILITY: the matcher splits into three layers:
+// TESTABILITY: the matcher splits into layers. Single-path first:
 //   - `compilePathRules(rules)` — pure compiler from any rule array
 //   - `classifyPathWithCompiledRules(path, frameworks, compiled)` — pure
 //     matcher taking pre-compiled rules
 //   - `classifyPath(path, frameworks)` — convenience wrapper using
 //     production PATH_RULES, compiled once at module load
+//
+// and the M 0.8.0 step 7 changed-file layers built on those:
+//   - `canonicalChangedFilePath(file)` — the changed-file identity
+//   - `changedFilePathCandidates(file)` — rename-alias semantics, the SOLE
+//     definition of what an alias is
+//   - `classifyChangedFileWithCompiledRules(file, frameworks, compiled)` —
+//     alias-aware matcher with provenance; the test seam
+//   - `classifyChangedFile(file, frameworks)` — production wrapper
+//
+// `test-gap` deliberately stays on plain `classifyPath(currentPath, …)`; see
+// the rename-alias section below for why.
 //
 // This split lets Step 2's match.test.ts validate framework gating, exclude
 // patterns, multi-match, dotfile behavior, nonegate semantics, etc., using
@@ -56,6 +67,7 @@
 import picomatch from "picomatch";
 
 import { normalizePathSeparators } from "../path-normalization.js";
+import type { ChangedFileInput } from "../types.js";
 import { PATH_RULES, type PathRule } from "./path-rules.js";
 
 /**
@@ -183,4 +195,155 @@ export function classifyPath(
   detectedFrameworks: readonly string[],
 ): readonly PathRule[] {
   return classifyPathWithCompiledRules(path, detectedFrameworks, COMPILED_RULES);
+}
+
+// =============================================================================
+// Rename aliases (M 0.8.0 step 7)
+// =============================================================================
+//
+// A rename must not erase where code came from: `payments/webhook.ts` moved to
+// `utils/webhook.ts` should retain its payments risk. But the alias influences
+// CLASSIFICATION ONLY — never identity. The canonical CURRENT path stays the
+// changed-file identity, and remains the sole value any consumer puts in
+// `affected_paths` or uses as a path-keyed map key.
+//
+// `changedFilePathCandidates` is the single definition of what a rename alias
+// IS. The richer classifier below builds on it, and so does the engine's tag
+// union, so alias semantics cannot drift between them.
+//
+// `test-gap` deliberately does NOT use any of this. It asks whether THIS diff
+// paired a risky change with a test change, so a pure move would otherwise
+// start emitting a high-severity finding it never emitted before. If moved
+// risky code should require moved tests, that deserves its own rule with a
+// trigger distinguishing a pure rename from a substantive edit.
+
+/** Which changed-file alias a path or match came from. */
+export type ChangedFilePathSource = "current" | "previous" | "both";
+
+/** One canonical path to classify, tagged with the alias it represents. */
+export interface ChangedFilePathCandidate {
+  readonly path: string;
+  readonly source: ChangedFilePathSource;
+}
+
+/**
+ * A matched rule plus the provenance a consumer needs to describe it
+ * truthfully. `path-classifier-check` emits "File 'X' matches rule 'Y'"; when
+ * the match came from the previous path, X does not match Y, and the message
+ * must say so rather than assert something false.
+ *
+ * `currentPath` is the identity. `previousPath` is present only for a rename
+ * and is provenance, never identity.
+ */
+export interface ChangedFilePathRuleMatch {
+  readonly rule: PathRule;
+  readonly source: ChangedFilePathSource;
+  readonly currentPath: string;
+  readonly previousPath?: string;
+}
+
+/** The canonical changed-file identity for a file. */
+export function canonicalChangedFilePath(file: Pick<ChangedFileInput, "path">): string {
+  return normalizePathSeparators(file.path);
+}
+
+/**
+ * The canonical paths a changed file should be classified under.
+ *
+ * Sole owner of rename-alias semantics: a non-rename yields one candidate; a
+ * rename yields current and previous; and if the two canonicalize to the same
+ * value they collapse to a single `"both"` candidate rather than classifying
+ * the same path twice.
+ */
+export function changedFilePathCandidates(
+  file: Pick<ChangedFileInput, "path" | "previous_path">,
+): readonly ChangedFilePathCandidate[] {
+  const current = canonicalChangedFilePath(file);
+  if (file.previous_path === undefined) {
+    return [{ path: current, source: "current" }];
+  }
+  const previous = normalizePathSeparators(file.previous_path);
+  if (previous === current) {
+    return [{ path: current, source: "both" }];
+  }
+  return [
+    { path: current, source: "current" },
+    { path: previous, source: "previous" },
+  ];
+}
+
+/** `current` + `previous` collapse to `both`; matching values keep their own. */
+function mergeSource(a: ChangedFilePathSource, b: ChangedFilePathSource): ChangedFilePathSource {
+  return a === b ? a : "both";
+}
+
+/**
+ * Alias-aware classification over pre-compiled rules. Test seam, mirroring
+ * `classifyPathWithCompiledRules`.
+ *
+ * Deduped by rule OBJECT identity rather than `rule.id`: both classify calls
+ * draw from the same compiled-rule array, so a rule matching both aliases
+ * yields the same reference. That is collision-proof without assuming
+ * `PATH_RULES` ids are unique, an assumption this module cannot verify. The
+ * emit loop additionally guards against the same rule object appearing twice
+ * in a supplied compiled-rule array, since `compilePathRules` accepts
+ * arbitrary arrays and "no object repeats" would be the same class of
+ * unverifiable assumption.
+ *
+ * Results are emitted in COMPILED-RULE-ARRAY order, not current-then-previous
+ * concatenation order. Each `classifyPathWithCompiledRules` call preserves
+ * rule order individually, but concatenating them does not: with a table of
+ * [A, B], where only the current path matches B and only the previous matches
+ * A, naive concatenation yields [B, A].
+ */
+export function classifyChangedFileWithCompiledRules(
+  file: Pick<ChangedFileInput, "path" | "previous_path">,
+  detectedFrameworks: readonly string[],
+  compiledRules: readonly CompiledPathRule[],
+): readonly ChangedFilePathRuleMatch[] {
+  const sourceByRule = new Map<PathRule, ChangedFilePathSource>();
+  for (const candidate of changedFilePathCandidates(file)) {
+    for (const rule of classifyPathWithCompiledRules(
+      candidate.path,
+      detectedFrameworks,
+      compiledRules,
+    )) {
+      const prior = sourceByRule.get(rule);
+      sourceByRule.set(
+        rule,
+        prior === undefined ? candidate.source : mergeSource(prior, candidate.source),
+      );
+    }
+  }
+
+  const currentPath = canonicalChangedFilePath(file);
+  const previousPath =
+    file.previous_path === undefined ? undefined : normalizePathSeparators(file.previous_path);
+
+  const matches: ChangedFilePathRuleMatch[] = [];
+  const emittedRules = new Set<PathRule>();
+  for (const { rule } of compiledRules) {
+    if (emittedRules.has(rule)) continue;
+    const source = sourceByRule.get(rule);
+    if (source === undefined) continue;
+    emittedRules.add(rule);
+    matches.push({
+      rule,
+      source,
+      currentPath,
+      ...(previousPath !== undefined ? { previousPath } : {}),
+    });
+  }
+  return matches;
+}
+
+/**
+ * Alias-aware classification against production PATH_RULES. The changed-file
+ * counterpart to `classifyPath`.
+ */
+export function classifyChangedFile(
+  file: Pick<ChangedFileInput, "path" | "previous_path">,
+  detectedFrameworks: readonly string[],
+): readonly ChangedFilePathRuleMatch[] {
+  return classifyChangedFileWithCompiledRules(file, detectedFrameworks, COMPILED_RULES);
 }
