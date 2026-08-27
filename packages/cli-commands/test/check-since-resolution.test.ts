@@ -35,6 +35,7 @@ import { ensureViberevertDirs, generateSessionId, SessionNotFoundError } from "@
 import { CheckpointNotFoundError, CommitRefNotFoundError, createCheckpoint } from "@viberevert/git";
 import {
   type ActiveSessionLock,
+  type EvaluationSnapshot,
   SESSION_STATE_SCHEMA_VERSION,
   type SessionState,
 } from "@viberevert/session-format";
@@ -166,8 +167,18 @@ async function makeStandaloneCheckpoint(
  */
 async function makeSession(
   repoRoot: string,
-  opts: { task?: string; markAsActive?: boolean } = {},
+  opts: {
+    task?: string;
+    markAsActive?: boolean;
+    evaluationSnapshot?: EvaluationSnapshot;
+    ended?: { endedAt: string; contribution?: { path: string; sha256: string } };
+  } = {},
 ): Promise<{ sessionId: string; checkpointId: string }> {
+  // Fixture integrity, not production behavior: an active lock pointing at an
+  // ended session is not a state these tests should manufacture by accident.
+  if (opts.ended !== undefined && opts.markAsActive === true) {
+    throw new Error("an ended session cannot be marked active");
+  }
   const sessionId = generateSessionId();
   const sessionDir = join(repoRoot, ".viberevert", "sessions", sessionId);
   await mkdir(sessionDir, { recursive: true });
@@ -189,10 +200,31 @@ async function makeSession(
     ...(opts.task !== undefined ? { task: opts.task } : {}),
     before_status_path: `.viberevert/sessions/${sessionId}/before-status.txt`,
     commands_log_path: `.viberevert/sessions/${sessionId}/commands.log`,
+    ...(opts.evaluationSnapshot !== undefined
+      ? { evaluation_snapshot: opts.evaluationSnapshot }
+      : {}),
+    ...(opts.ended !== undefined
+      ? {
+          ended_at: opts.ended.endedAt,
+          // Schema-coupled: ended_at requires after_status_path.
+          after_status_path: `.viberevert/sessions/${sessionId}/after-status.txt`,
+          // Schema-coupled: path and digest are both-or-neither, and a
+          // contribution is valid only on an ended session.
+          ...(opts.ended.contribution !== undefined
+            ? {
+                contribution_path: opts.ended.contribution.path,
+                contribution_sha256: opts.ended.contribution.sha256,
+              }
+            : {}),
+        }
+      : {}),
   };
   await writeFile(join(sessionDir, "session.json"), JSON.stringify(sessionState, null, 2));
   await writeFile(join(sessionDir, "before-status.txt"), "");
   await writeFile(join(sessionDir, "commands.log"), "");
+  if (opts.ended !== undefined) {
+    await writeFile(join(sessionDir, "after-status.txt"), "");
+  }
 
   if (opts.markAsActive === true) {
     const lock: ActiveSessionLock = {
@@ -245,6 +277,22 @@ function asCheckpointBase(
  * Helper to narrow a ResolvedCheckBase to its "git-ref" variant.
  * Throws if the actual mode is "checkpoint".
  */
+/**
+ * Narrow to the session-bound checkpoint variant (M 0.8.0 step 8).
+ *
+ * `asCheckpointBase` narrows only on `mode`, which since the step 8 union
+ * split still yields BOTH checkpoint variants — and the ad-hoc one carries no
+ * `sessionContext`. Reaching that field needs narrowing on `kind`.
+ */
+function asSessionBoundBase(
+  base: ResolvedCheckBase,
+): Extract<ResolvedCheckBase, { kind: "session_bound" }> {
+  if (base.mode !== "checkpoint" || base.kind !== "session_bound") {
+    throw new Error(`expected session_bound checkpoint base, got ${base.mode}/${base.kind}`);
+  }
+  return base;
+}
+
 function asGitRefBase(base: ResolvedCheckBase): Extract<ResolvedCheckBase, { mode: "git-ref" }> {
   if (base.mode !== "git-ref") {
     throw new Error(`expected git-ref mode, got ${base.mode}`);
@@ -683,6 +731,124 @@ describe("resolveCheckBase", () => {
         });
         expect(checkpointBase.sinceResolvedSha).toBe(SENTINEL_SHA);
         expect(checkpointBase.sinceRef).toBe(checkpointId);
+      } finally {
+        await repo.cleanup();
+      }
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Section 5 — session evaluation context projection (M 0.8.0 step 8)
+  // ---------------------------------------------------------------------------
+  //
+  // resolveCheckBase already holds the authoritative SessionState, so it
+  // projects what check execution is entitled to know ONCE. These pin the
+  // projection, not the persistence: the raw snapshot passes through
+  // unchanged, lifecycle is explicit rather than inferred downstream, and the
+  // contribution pair travels as a unit.
+
+  describe("Section 5 — sessionContext projection", () => {
+    const SNAPSHOT: EvaluationSnapshot = {
+      risk_block_on: "high",
+      risk_warn_on: "low",
+      checks: {
+        secrets: true,
+        dependencies: true,
+        migrations: true,
+        auth: true,
+        payments: false,
+        infra: true,
+        tests: true,
+        scope_expansion: false,
+      },
+      frameworks: { mode: "auto", detected_at_start: ["laravel", "node"] },
+      rollback_exclude: ["node_modules/**", "vendor/**"],
+      verify_commands: [{ command: "pnpm", args: ["test"] }],
+    };
+    const ENDED_AT = "2026-05-04T11:00:00Z";
+    const CONTRIBUTION_SHA = "a".repeat(64);
+
+    it("5a: an in-flight session projects lifecycle 'active'", async () => {
+      const repo = await setupRepo();
+      try {
+        const { sessionId } = await makeSession(repo.repoRoot);
+        const base = asSessionBoundBase(
+          await resolveCheckBase({ repoRoot: repo.repoRoot, since: sessionId, staged: false }),
+        );
+        expect(base.sessionContext.lifecycle).toEqual({ state: "active" });
+      } finally {
+        await repo.cleanup();
+      }
+    });
+
+    it("5b: an ended session with NO contribution projects contribution: undefined", async () => {
+      // The legacy-ended state: pre-0.8.0 sessions ended before contributions
+      // existed, and their after-state cannot be back-filled.
+      const repo = await setupRepo();
+      try {
+        const { sessionId } = await makeSession(repo.repoRoot, { ended: { endedAt: ENDED_AT } });
+        const base = asSessionBoundBase(
+          await resolveCheckBase({ repoRoot: repo.repoRoot, since: sessionId, staged: false }),
+        );
+        expect(base.sessionContext.lifecycle).toEqual({
+          state: "ended",
+          endedAt: ENDED_AT,
+          contribution: undefined,
+        });
+      } finally {
+        await repo.cleanup();
+      }
+    });
+
+    it("5c: an ended contribution-backed session projects the pair together", async () => {
+      const repo = await setupRepo();
+      try {
+        const { sessionId } = await makeSession(repo.repoRoot, {
+          ended: {
+            endedAt: ENDED_AT,
+            contribution: { path: "contribution.json", sha256: CONTRIBUTION_SHA },
+          },
+        });
+        const base = asSessionBoundBase(
+          await resolveCheckBase({ repoRoot: repo.repoRoot, since: sessionId, staged: false }),
+        );
+        expect(base.sessionContext.lifecycle).toEqual({
+          state: "ended",
+          endedAt: ENDED_AT,
+          contribution: { path: "contribution.json", sha256: CONTRIBUTION_SHA },
+        });
+      } finally {
+        await repo.cleanup();
+      }
+    });
+
+    it("5d: a persisted evaluation snapshot projects through unchanged", async () => {
+      // Deep equality, not spot-checks: the base must hand check.ts the RAW
+      // snapshot, not a reshaped or partially merged view of it.
+      const repo = await setupRepo();
+      try {
+        const { sessionId } = await makeSession(repo.repoRoot, { evaluationSnapshot: SNAPSHOT });
+        const base = asSessionBoundBase(
+          await resolveCheckBase({ repoRoot: repo.repoRoot, since: sessionId, staged: false }),
+        );
+        expect(base.sessionContext.evaluationSnapshot).toEqual(SNAPSHOT);
+      } finally {
+        await repo.cleanup();
+      }
+    });
+
+    it("5e: a legacy session leaves evaluationSnapshot genuinely ABSENT", async () => {
+      // `in` rather than toBeUndefined(): under exactOptionalPropertyTypes an
+      // explicitly-present `undefined` is a different thing from absence, and
+      // only absence is the legacy signal check.ts branches on. toBeUndefined()
+      // would pass either way and prove nothing about the contract.
+      const repo = await setupRepo();
+      try {
+        const { sessionId } = await makeSession(repo.repoRoot);
+        const base = asSessionBoundBase(
+          await resolveCheckBase({ repoRoot: repo.repoRoot, since: sessionId, staged: false }),
+        );
+        expect("evaluationSnapshot" in base.sessionContext).toBe(false);
       } finally {
         await repo.cleanup();
       }

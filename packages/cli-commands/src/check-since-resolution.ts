@@ -139,6 +139,7 @@ import {
   loadCheckpoint,
   resolveCommitRef,
 } from "@viberevert/git";
+import type { EvaluationSnapshot } from "@viberevert/session-format";
 
 import { resolveSinceResolvedShaForReport } from "./runtime-env.js";
 
@@ -201,6 +202,38 @@ export interface ResolveCheckBaseOptions {
  * only when `kind === "session_bound"` — the session's bound checkpoint
  * id, persisted to `report.checkpoint_id`.
  */
+/**
+ * What check execution is entitled to know about a session-bound base's
+ * owning session (M 0.8.0 step 8).
+ *
+ * A narrow PROJECTION of `SessionState`, not the record itself: this module
+ * has already interpreted that persistence object, and handing it onward
+ * would let `check.ts` depend on storage details the base contract never
+ * promised.
+ *
+ * `evaluationSnapshot` is the RAW persisted snapshot, deliberately NOT a
+ * merged checks config — choosing the authoritative config source belongs to
+ * `check.ts` once the base is known. Its ABSENCE means a pre-0.8.0 session,
+ * which is the explicit legacy signal rather than an error.
+ *
+ * The lifecycle discriminant mirrors constraints the persisted schema already
+ * enforces: `ended_at` is coupled to `after_status_path`, `contribution_path`
+ * is coupled to `contribution_sha256`, and a contribution is valid ONLY on an
+ * ended session. So an active session cannot carry a contribution and a
+ * half-populated contribution pair cannot exist — neither is representable
+ * here either.
+ */
+export type ResolvedSessionEvaluationContext = {
+  readonly evaluationSnapshot?: EvaluationSnapshot;
+  readonly lifecycle:
+    | { readonly state: "active" }
+    | {
+        readonly state: "ended";
+        readonly endedAt: string;
+        readonly contribution: { readonly path: string; readonly sha256: string } | undefined;
+      };
+};
+
 export type ResolvedCheckBase =
   | {
       readonly mode: "git-ref";
@@ -215,16 +248,35 @@ export type ResolvedCheckBase =
     }
   | {
       readonly mode: "checkpoint";
-      readonly kind: "session_bound" | "ad_hoc";
-      readonly sinceKind: "checkpoint_id" | "checkpoint_name" | "session_id" | "active_session";
+      readonly kind: "session_bound";
+      readonly sinceKind: "session_id" | "active_session";
       readonly sinceRef: string;
       readonly sinceResolvedSha: string;
       readonly checkpointDir: string;
-      readonly checkpointId?: string;
+      readonly checkpointId: string;
       readonly startedAt: string;
       readonly reportId: string;
       readonly stagedOnly: false;
       readonly task?: string;
+      readonly sessionContext: ResolvedSessionEvaluationContext;
+    }
+  | {
+      readonly mode: "checkpoint";
+      readonly kind: "ad_hoc";
+      readonly sinceKind: "checkpoint_id" | "checkpoint_name";
+      readonly sinceRef: string;
+      readonly sinceResolvedSha: string;
+      readonly checkpointDir: string;
+      // Never set by the ad-hoc checkpoint resolver. Declared as
+      // `?: undefined` rather than omitted because consumers narrow on
+      // `mode === "checkpoint"` and then read `.checkpointId`; omitting it
+      // would make that access a type error on the narrowed union. Same
+      // idiom as `task?: undefined` on the git-ref variant.
+      readonly checkpointId?: undefined;
+      readonly startedAt: string;
+      readonly reportId: string;
+      readonly stagedOnly: false;
+      readonly task?: undefined;
     };
 
 // =============================================================================
@@ -417,6 +469,28 @@ async function resolveFromSessionId(
     reportId: sessionId, // D31 identity: session_bound reuses session id
     stagedOnly: false,
     ...(session.task !== undefined ? { task: session.task } : {}),
+    sessionContext: {
+      // Conditional spread, not `evaluationSnapshot: session.evaluation_snapshot`:
+      // under exactOptionalPropertyTypes an explicitly-present `undefined` is a
+      // different thing from absence, and absence is the legacy signal.
+      ...(session.evaluation_snapshot !== undefined
+        ? { evaluationSnapshot: session.evaluation_snapshot }
+        : {}),
+      lifecycle:
+        session.ended_at === undefined
+          ? { state: "active" }
+          : {
+              state: "ended",
+              endedAt: session.ended_at,
+              // Schema-coupled: path and digest are both-or-neither, and a
+              // contribution is valid only on an ended session. So this is
+              // never half-populated and never appears on an active one.
+              contribution:
+                session.contribution_path !== undefined && session.contribution_sha256 !== undefined
+                  ? { path: session.contribution_path, sha256: session.contribution_sha256 }
+                  : undefined,
+            },
+    },
   };
 }
 

@@ -11,13 +11,14 @@
 // schema validity. Resolver-internal branches are NOT re-tested here
 // (covered exhaustively in check-since-resolution.test.ts).
 //
-// Six sections, 14 tests total:
+// Seven sections, 21 tests total:
 //   1. Exit codes (D24): no-changes / non-blocker / blocker             3 tests
 //   2. --threshold semantics (D38)                                       3 tests
 //   3. Output modes (--json shape + render-vs-persist parity)            2 tests
 //   4. Persistence dispatch on base.kind (D26)                           2 tests
 //   5. Input flag validation (--threshold, --task)                       2 tests
 //   6. Config error surfacing                                            2 tests
+//   7. Config-source authority (M 0.8.0 step 8)                          7 tests
 //
 // Fixtures (locked):
 //   - Non-blocker: stage `.github/workflows/test.yml` → triggers
@@ -45,6 +46,7 @@ import { ensureViberevertDirs, generateSessionId } from "@viberevert/core";
 import { createCheckpoint } from "@viberevert/git";
 import {
   type ActiveSessionLock,
+  type EvaluationSnapshot,
   ReportFileSchema,
   SESSION_STATE_SCHEMA_VERSION,
   type SessionState,
@@ -199,7 +201,11 @@ async function stageNonBlockerFixture(repoRoot: string): Promise<void> {
  */
 async function makeSession(
   repoRoot: string,
-  opts: { task?: string; markAsActive?: boolean } = {},
+  opts: {
+    task?: string;
+    markAsActive?: boolean;
+    evaluationSnapshot?: EvaluationSnapshot;
+  } = {},
 ): Promise<{ sessionId: string; checkpointId: string }> {
   const sessionId = generateSessionId();
   const sessionDir = join(repoRoot, ".viberevert", "sessions", sessionId);
@@ -220,6 +226,14 @@ async function makeSession(
     ...(opts.task !== undefined ? { task: opts.task } : {}),
     before_status_path: `.viberevert/sessions/${sessionId}/before-status.txt`,
     commands_log_path: `.viberevert/sessions/${sessionId}/commands.log`,
+    // Conditional spread, not `evaluation_snapshot: opts.evaluationSnapshot`:
+    // under exactOptionalPropertyTypes an explicit `undefined` is NOT the
+    // same as an absent key, and a pre-0.8.0 session must have the key
+    // structurally ABSENT. That absence is exactly what selects the legacy
+    // live-config path in resolveChecksConfigForBase.
+    ...(opts.evaluationSnapshot !== undefined
+      ? { evaluation_snapshot: opts.evaluationSnapshot }
+      : {}),
   };
   await writeFile(join(sessionDir, "session.json"), JSON.stringify(sessionState, null, 2));
   await writeFile(join(sessionDir, "before-status.txt"), "");
@@ -467,6 +481,171 @@ describe("viberevert check", () => {
       // Locked stderr copy from handleKnownError's
       // ConfigParseError/ConfigValidationError arm.
       expect(result.stderr).toContain("Invalid .viberevert.yml");
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Section 7 -- Config-source authority (M 0.8.0 step 8)
+  // ---------------------------------------------------------------------------
+  //
+  // These pin WHICH config source check.ts treats as authoritative, through
+  // observable command behavior only. The live `.viberevert.yml` is made to
+  // materially DISAGREE with the snapshot, so each assertion distinguishes
+  // the two sources rather than merely confirming that some config applied.
+  //
+  // Tests 1-4 share one live config that disables `secrets` against the
+  // blocker fixture: identical file, three bases, two outcomes. That A/B is
+  // what proves "no snapshot" selects live config rather than silently
+  // falling through to defaults.
+
+  describe("Section 7 -- config-source authority (M 0.8.0 step 8)", () => {
+    const LARAVEL_MIDDLEWARE_ID = "path-classifier.laravel.middleware";
+
+    /** Live config disabling the secrets check. */
+    async function writeSecretsDisabledConfig(): Promise<void> {
+      await writeFile(join(tmpRoot, ".viberevert.yml"), "version: 1\nchecks:\n  secrets: false\n");
+    }
+
+    /** A resolved snapshot with every check ENABLED, parameterized on the
+     *  one field that is not a straight copy in resolveChecksConfigForBase. */
+    function makeSnapshot(frameworks: EvaluationSnapshot["frameworks"]): EvaluationSnapshot {
+      return {
+        risk_block_on: "critical",
+        risk_warn_on: "medium",
+        checks: {
+          secrets: true,
+          dependencies: true,
+          migrations: true,
+          auth: true,
+          payments: true,
+          infra: true,
+          tests: true,
+          scope_expansion: true,
+        },
+        frameworks,
+        rollback_exclude: [],
+        verify_commands: [],
+      };
+    }
+
+    /** Laravel detection is existence-only: composer.json AND artisan. */
+    async function writeLaravelSignature(): Promise<void> {
+      await writeFile(join(tmpRoot, "composer.json"), '{"name":"test/app"}\n');
+      await writeFile(join(tmpRoot, "artisan"), "#!/usr/bin/env php\n");
+    }
+
+    /** `laravel.middleware` is the ONLY rule matching app/Http/Middleware/**;
+     *  the filename is deliberately neutral so no filename-driven generic
+     *  rule (e.g. an *Auth* pattern) can compete for the match. */
+    async function changeLaravelMiddleware(): Promise<void> {
+      await mkdir(join(tmpRoot, "app", "Http", "Middleware"), { recursive: true });
+      await writeFile(join(tmpRoot, "app", "Http", "Middleware", "Foo.php"), "<?php\n");
+    }
+
+    async function findingIds(args: readonly string[]): Promise<readonly string[]> {
+      const result = await runCheck([...args, "--json"]);
+      const file = ReportFileSchema.parse(JSON.parse(result.stdout));
+      return file.report.results.map((r) => r.id);
+    }
+
+    it("session base: snapshot wins over a mutated but VALID live config", async () => {
+      const { sessionId } = await makeSession(tmpRoot, {
+        evaluationSnapshot: makeSnapshot({ mode: "auto", detected_at_start: [] }),
+      });
+      await stageBlockerFixture(tmpRoot);
+      // The agent disables the very check that would flag its own work.
+      await writeSecretsDisabledConfig();
+      const result = await runCheck(["--since", sessionId]);
+      // Snapshot has secrets ENABLED, so the critical finding survives.
+      // If live config won this would be exit 0.
+      expect(result.exitCode).toBe(2);
+    });
+
+    it("session base: snapshot is used even when live YAML is UNPARSABLE", async () => {
+      const { sessionId } = await makeSession(tmpRoot, {
+        evaluationSnapshot: makeSnapshot({ mode: "auto", detected_at_start: [] }),
+      });
+      await stageBlockerFixture(tmpRoot);
+      // An unclosed flow sequence is unequivocally malformed -- loadConfig
+      // cannot parse it at all. Asserting exit 2 (rather than just "not 1")
+      // proves in one assertion BOTH that loadConfig was never called AND
+      // that the snapshot supplied the policy.
+      await writeFile(join(tmpRoot, ".viberevert.yml"), "version: [\n");
+      const result = await runCheck(["--since", sessionId]);
+      expect(result.exitCode).toBe(2);
+      expect(result.stderr).not.toContain("Invalid .viberevert.yml");
+    });
+
+    it("session base with NO snapshot falls back to live config (pre-0.8.0)", async () => {
+      const { sessionId } = await makeSession(tmpRoot);
+      await stageBlockerFixture(tmpRoot);
+      await writeSecretsDisabledConfig();
+      const result = await runCheck(["--since", sessionId]);
+      // Live config wins on the legacy path, suppressing secrets. Absence of
+      // a snapshot must select LIVE CONFIG, never defaults -- defaults would
+      // re-enable secrets and give exit 2 here.
+      expect(result.exitCode).toBe(0);
+    });
+
+    it("non-session base (--staged) uses live config", async () => {
+      await stageBlockerFixture(tmpRoot);
+      await writeSecretsDisabledConfig();
+      const result = await runCheck(["--staged"]);
+      expect(result.exitCode).toBe(0);
+    });
+
+    it("explicit snapshot frameworks are NOT augmented by current detection", async () => {
+      // Laravel detectable at start and now. Committed pre-session so the
+      // signature sits inside the checkpoint. Explicit mode deliberately
+      // overrides detection, so this IS a producible step 5 state.
+      await writeLaravelSignature();
+      await runGit(tmpRoot, ["add", "."]);
+      await runGit(tmpRoot, ["commit", "-q", "-m", "laravel"]);
+      const { sessionId } = await makeSession(tmpRoot, {
+        evaluationSnapshot: makeSnapshot({ mode: "explicit", values: ["nextjs"] }),
+      });
+      await changeLaravelMiddleware();
+      const ids = await findingIds(["--since", sessionId]);
+      // Detection sees laravel; the snapshot says nextjs. Explicit wins, so
+      // the laravel-gated rule must not fire. A regression that unioned
+      // explicit values with detection would surface exactly here.
+      expect(ids).not.toContain(LARAVEL_MIDDLEWARE_ID);
+    });
+
+    it("auto snapshot RETAINS detected_at_start when the signature is gone now", async () => {
+      // Laravel present at session start...
+      await writeLaravelSignature();
+      await runGit(tmpRoot, ["add", "."]);
+      await runGit(tmpRoot, ["commit", "-q", "-m", "laravel"]);
+      const { sessionId } = await makeSession(tmpRoot, {
+        evaluationSnapshot: makeSnapshot({ mode: "auto", detected_at_start: ["laravel"] }),
+      });
+      // ...and deleted during the session, so current detection sees none.
+      await rm(join(tmpRoot, "composer.json"));
+      await rm(join(tmpRoot, "artisan"));
+      await changeLaravelMiddleware();
+      const ids = await findingIds(["--since", sessionId]);
+      // The union retains the start observation, so deleting a framework
+      // signature mid-session cannot make its risk rules disappear.
+      expect(ids).toContain(LARAVEL_MIDDLEWARE_ID);
+    });
+
+    it("auto snapshot ADDS current detection when start detected nothing", async () => {
+      // No Laravel signature at session start, so `detected_at_start: []` is
+      // what the step 5 producer would genuinely have written here.
+      const { sessionId } = await makeSession(tmpRoot, {
+        evaluationSnapshot: makeSnapshot({ mode: "auto", detected_at_start: [] }),
+      });
+      // The agent introduces Laravel during the session.
+      await writeLaravelSignature();
+      await changeLaravelMiddleware();
+      const ids = await findingIds(["--since", sessionId]);
+      // Current detection joins the union, so a framework introduced
+      // mid-session activates its rules. The signature files also show up as
+      // changed files here; that is tolerated deliberately, because adding
+      // exclusions to hide them would couple this test to rollback-exclude
+      // behavior.
+      expect(ids).toContain(LARAVEL_MIDDLEWARE_ID);
     });
   });
 });

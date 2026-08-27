@@ -12,14 +12,21 @@
 // Architectural locks (must be preserved by all changes here)
 // =============================================================================
 //
-// 1. **D19 -- REQUIRES valid config.** `risk.block_on` controls the exit
-//    code (D24), `risk.warn_on` controls the default output threshold
-//    (D38), `frameworks` flows into the checks engine context (D41/D42),
-//    `checks.*` toggles the per-category enable map (D28/D57), and
-//    `rollback.exclude` filters the diff for D3 symmetry (D56). Silent
-//    defaults from a missing config would diverge the exit code and the
-//    filtered set from user expectations. Hard-fail on missing/invalid
-//    config with the locked directive copy.
+// 1. **D19 -- REQUIRES a resolved config, from the authoritative source.**
+//    `risk.block_on` controls the exit code (D24), `risk.warn_on` controls
+//    the default output threshold (D38), `frameworks` flows into the checks
+//    engine context (D41/D42), `checks.*` toggles the per-category enable
+//    map (D28/D57), and `rollback.exclude` filters the diff for D3 symmetry
+//    (D56). Silent defaults would diverge the exit code and the filtered set
+//    from user expectations, so check never evaluates on them.
+//
+//    M 0.8.0 step 8: WHICH source is authoritative is decided from the
+//    resolved base, in `resolveChecksConfigForBase`. A session-bound base
+//    carrying an evaluation snapshot resolves entirely from that persisted
+//    session-start policy and does NOT read `.viberevert.yml` at all. Every
+//    other base, and a pre-0.8.0 session with no snapshot, loads live config
+//    and hard-fails on missing/invalid with the locked directive copy. Both
+//    paths satisfy D19: neither evaluates on invented defaults.
 //
 // 2. **D24 -- Exit codes are locked.** 0 = no findings at-or-above
 //    `resolved.riskBlockOn`. 1 = internal/config error (any typed-error
@@ -27,7 +34,7 @@
 //    rethrow Clipanion turns into its own non-zero). 2 = >= 1 finding
 //    at-or-above `resolved.riskBlockOn`. **--threshold does NOT affect
 //    exit code** per D38 -- the gate always uses `resolved.riskBlockOn`
-//    from `mergeChecksConfig`.
+//    from the authoritative config source (see lock 1).
 //
 // 3. **D26 + D58 -- --since dispatch via resolveCheckBase.** The
 //    resolver in `check-since-resolution.ts` owns the D26 resolution
@@ -120,9 +127,11 @@ import {
   ConfigNotFoundError,
   ConfigParseError,
   ConfigValidationError,
+  detectFrameworks,
   loadConfig,
   mergeChecksConfig,
   RepoRootNotFoundError,
+  type ResolvedChecksConfig,
   resolveRepoRoot,
   SessionNotFoundError,
 } from "@viberevert/core";
@@ -137,7 +146,7 @@ import {
   type RawDiff,
 } from "@viberevert/git";
 import { type RenderInput, renderJson, renderTerminal } from "@viberevert/reporters";
-import type { ReportFile, RiskLevel } from "@viberevert/session-format";
+import { normalizeStringArray, type ReportFile, type RiskLevel } from "@viberevert/session-format";
 import { Command, Option } from "clipanion";
 
 import { renameDirAtomic, writeFileAtomic } from "../atomic.js";
@@ -185,6 +194,88 @@ function shouldExitWithBlocker(results: readonly CheckResult[], blockOn: RiskLev
     if (compareLevel(r.level, blockOn) >= 0) return true;
   }
   return false;
+}
+
+// =============================================================================
+// Check-config authority (M 0.8.0 step 8)
+// =============================================================================
+
+/**
+ * Choose the authoritative check configuration FROM the resolved base.
+ *
+ *   session-bound + evaluation snapshot -> the session-start snapshot
+ *   session-bound, no snapshot          -> live config (pre-0.8.0 fallback)
+ *   any other base                      -> live config, exactly as before
+ *
+ * WHY the snapshot wins: `.viberevert.yml` is a file the agent can rewrite
+ * DURING its own session, so `checks: { payments: false }` added mid-session
+ * must not weaken the check OF that session.
+ *
+ * WHY live config is not merely overridden but not READ AT ALL on the snapshot
+ * path: taking it as a parameter would make a snapshot-backed check fail
+ * whenever the live file is malformed. That is the same inversion pointed the
+ * other way -- denial of evaluation rather than weakening of it -- and an agent
+ * could trigger it just by leaving invalid YAML behind. D19's own config-blind
+ * rationale already names this harm: a corrupt `.viberevert.yml` must not block
+ * the paths a user needs in order to clean up state.
+ *
+ * This does NOT relax D19 for check. D19 requires that check never evaluate on
+ * SILENT DEFAULTS, because block_on drives the exit code (D24) and warn_on the
+ * output threshold (D38). A snapshot is the opposite of a silent default: it is
+ * a recorded, user-authored value captured at `viberevert start`. The
+ * no-snapshot path still hard-fails on missing or invalid config as before.
+ *
+ * Frameworks are the one field that is not a straight copy, because `auto` is a
+ * stored START state plus an observation (D41/D42):
+ *
+ *   explicit -> snapshot values, verbatim and authoritative
+ *   auto     -> detected_at_start UNION an observation of the file universe
+ *               actually being evaluated
+ *
+ * The observation calls `detectFrameworks` DIRECTLY and never reads the live
+ * config's `frameworks`. A config that flipped auto -> explicit, or edited its
+ * values, must not leak policy back into a snapshot-backed session; only the
+ * OBSERVATION may be re-derived. The union keeps both directions safe: a
+ * framework introduced mid-session activates its rules, and deleting a
+ * framework signature cannot make its rules disappear.
+ *
+ * TRANSITIONAL (step 8 slice A): an ended session is still checked as
+ * checkpoint-vs-live-tree, so observing the current tree is coherent with the
+ * file universe being evaluated -- it is not an approximation of the ended
+ * contract. Slice B moves the changed-file universe AND the framework
+ * observation to the persisted contribution together, at which point
+ * `detected_frameworks_at_end` becomes the correct source and no ended-session
+ * current-tree detection should remain.
+ */
+async function resolveChecksConfigForBase(
+  base: ResolvedCheckBase,
+  repoRoot: string,
+): Promise<ResolvedChecksConfig> {
+  const snapshot =
+    base.mode === "checkpoint" && base.kind === "session_bound"
+      ? base.sessionContext.evaluationSnapshot
+      : undefined;
+
+  if (snapshot !== undefined) {
+    const frameworks =
+      snapshot.frameworks.mode === "explicit"
+        ? [...snapshot.frameworks.values]
+        : normalizeStringArray([
+            ...snapshot.frameworks.detected_at_start,
+            ...(await detectFrameworks(repoRoot)),
+          ]);
+    return {
+      riskBlockOn: snapshot.risk_block_on,
+      riskWarnOn: snapshot.risk_warn_on,
+      checks: { ...snapshot.checks },
+      frameworks,
+      rollbackExclude: [...snapshot.rollback_exclude],
+    };
+  }
+
+  // No snapshot: live config, loaded HERE so the snapshot path above never
+  // depends on it. D19 -- REQUIRED for check on this path.
+  return mergeChecksConfig(await loadConfig(repoRoot), repoRoot);
 }
 
 // =============================================================================
@@ -412,14 +503,25 @@ Exit codes:
         return 1;
       }
 
-      // Step 3: load config (D19 -- REQUIRED for check).
-      const config = await loadConfig(repoRoot);
+      // Step 3 (was step 5): resolve the since base (D26 + D58 dispatch).
+      // All the hard policy lives in resolveCheckBase; check.ts just passes
+      // flags through and dispatches on base.mode / base.kind.
+      //
+      // M 0.8.0 step 8: this now precedes config resolution. The base decides
+      // WHICH config source is authoritative, so resolving config first was
+      // the ordering bug -- the command settled its evaluation policy before
+      // knowing whether it was checking a session at all.
+      const base = await resolveCheckBase({
+        repoRoot,
+        ...(this.since !== undefined ? { since: this.since } : {}),
+        staged: this.staged,
+      });
 
-      // Step 4: merge M C defaults (D57). Returns ResolvedChecksConfig
-      // with every field guaranteed non-undefined (block_on, warn_on,
-      // checks toggles, frameworks (auto-detected if omitted),
-      // rollback.exclude).
-      const resolved = await mergeChecksConfig(config, repoRoot);
+      // Step 4 (was steps 3-4): choose the authoritative check config FROM
+      // the base, merging M C defaults (D57) on the live-config path. Returns
+      // a ResolvedChecksConfig with every field non-undefined (block_on,
+      // warn_on, checks toggles, frameworks, rollback.exclude).
+      const resolved = await resolveChecksConfigForBase(base, repoRoot);
 
       // Compute the OUTPUT threshold per D38 -- distinct from the gate
       // threshold (resolved.riskBlockOn) which we use in step 13.
@@ -435,15 +537,6 @@ Exit codes:
       } else if (!this.json) {
         renderThreshold = resolved.riskWarnOn;
       }
-
-      // Step 5: resolve the since base (D26 + D58 dispatch). All the
-      // hard policy lives in resolveCheckBase; check.ts just passes
-      // flags through and dispatches on base.mode / base.kind.
-      const base = await resolveCheckBase({
-        repoRoot,
-        ...(this.since !== undefined ? { since: this.since } : {}),
-        staged: this.staged,
-      });
 
       // Step 6: get the diff (D56 dispatch on base.mode). Both helpers
       // return DiffResult { diff, cleanupWarnings }; the cleanup
@@ -579,7 +672,8 @@ Exit codes:
       }
 
       // Step 13: exit code per D24. --threshold is NOT consulted here --
-      // the gate always uses resolved.riskBlockOn from mergeChecksConfig.
+      // the gate always uses resolved.riskBlockOn from the authoritative
+      // config source (snapshot or live config; see lock 1).
       return shouldExitWithBlocker(runResult.results, resolved.riskBlockOn) ? 2 : 0;
     } catch (err) {
       return handleKnownError(this.context.stderr, err);
