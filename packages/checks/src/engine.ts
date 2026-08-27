@@ -297,12 +297,11 @@ export function runChecks(
   // are sorted ASCII-asc + deduped to satisfy ChangedFile.risk_tags's
   // schema constraint (sortedUniqueStringArray).
   //
-  // The classifier receives the CANONICAL path. Every detector already
-  // canonicalizes before calling `classifyPath`; the engine previously passed
-  // the raw path, which on a Linux host makes picomatch treat a backslash as
-  // an escape and match no rules. Injected classifiers see the same
-  // representation as the default one, so the hook cannot diverge by
-  // separator style.
+  // Feed the canonical path to the classifier hook as well. The built-in
+  // classifyPath normalizes internally, but injected classifiers are only
+  // guaranteed the engine hook contract. Passing the same canonical identity
+  // to both keeps default and injected classifier behavior
+  // separator-independent.
   const riskTagsByPath = new Map<string, readonly string[]>();
   for (const { canonicalPath } of changedFiles) {
     const matchedRules = classify(canonicalPath, ctx.detectedFrameworks);
