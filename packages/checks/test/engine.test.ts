@@ -88,6 +88,7 @@ function buildChangedFile(opts: {
   path: string;
   status?: ChangedFileInput["status"];
   isBinary?: boolean;
+  previousPath?: string;
 }): ChangedFileInput {
   return {
     path: opts.path,
@@ -95,6 +96,7 @@ function buildChangedFile(opts: {
     addedLines: [],
     removedLines: [],
     isBinary: opts.isBinary ?? false,
+    ...(opts.previousPath !== undefined ? { previous_path: opts.previousPath } : {}),
   };
 }
 
@@ -1146,5 +1148,34 @@ describe("runChecks: identity modes", () => {
     const explicitUndefined = runChecks([check], ctx, { reportId: undefined });
     expect(explicitUndefined.results[0]).not.toHaveProperty("finding_id");
     expect(explicitUndefined.results).toEqual(omitted.results);
+  });
+});
+
+describe("runChecks: rename aliases (M 0.8.0 step 7)", () => {
+  it("a rename's origin contributes tags, and the map stays keyed by the current path", () => {
+    const result = runChecks(
+      [],
+      buildContext({
+        changedFiles: [
+          buildChangedFile({
+            path: "utils/webhook.ts",
+            previousPath: "payments/webhook.ts",
+            status: "renamed",
+          }),
+        ],
+      }),
+      {
+        // Injected classifier: only the ORIGIN matches. This also proves the
+        // hook receives alias candidates, not just the current path.
+        classifyPath: (p) =>
+          p === "payments/webhook.ts" ? [{ category: "payments", tags: ["stripe"] }] : [],
+      },
+    );
+    // Risk followed the rename...
+    expect(result.riskTagsByPath.get("utils/webhook.ts")).toEqual(["stripe"]);
+
+    // Alias affects classification, never identity.
+    expect([...result.riskTagsByPath.keys()]).toEqual(["utils/webhook.ts"]);
+    expect(result.riskTagsByPath.has("payments/webhook.ts")).toBe(false);
   });
 });

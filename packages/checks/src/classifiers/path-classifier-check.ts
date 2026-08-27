@@ -63,9 +63,8 @@
 // PURITY: this check performs no I/O, makes no Date / random / clock
 // calls, and contains no async code per D29.
 
-import { normalizePathSeparators } from "../path-normalization.js";
 import type { Check, CheckContext, DetectorResult } from "../types.js";
-import { classifyPath } from "./match.js";
+import { canonicalChangedFilePath, classifyChangedFile } from "./match.js";
 import { PATH_RULES } from "./path-rules.js";
 
 /**
@@ -204,24 +203,38 @@ export const pathClassifierCheck: Check = {
   run: (ctx: CheckContext): readonly DetectorResult[] => {
     const results: DetectorResult[] = [];
     for (const file of ctx.changedFiles) {
-      // POSIX-normalize ONCE at the top of the per-file loop so the
-      // matcher AND the emitted evidence.file + message strings all
-      // see the canonical form. Without this, a Windows-shaped input
-      // path (backslashes — from a Windows CLI, MCP adapter, or
-      // third-party caller) produces a DetectorResult whose evidence.file
-      // fails DetectorResultSchema's safeStoredRelativePath rule, and the
-      // engine's D28 layer-2 parse step throws a ZodError. Shared
-      // helper from ../path-normalization.ts so this discipline stays
-      // identical across all detectors (D17c single source of truth).
-      const normalizedPath = normalizePathSeparators(file.path);
-      const matchedRules = classifyPath(normalizedPath, ctx.detectedFrameworks);
-      for (const rule of matchedRules) {
+      // Canonicalize ONCE at the top of the per-file loop so the emitted
+      // evidence.file + message strings all see the changed-file identity.
+      // Without this, a Windows-shaped input path (backslashes — from a
+      // Windows CLI, MCP adapter, or third-party caller) produces a
+      // DetectorResult whose evidence.file fails DetectorResultSchema's
+      // safeStoredRelativePath rule, and the engine's D28 layer-2 parse step
+      // throws a ZodError. `canonicalChangedFilePath` is the shared identity
+      // helper, so this discipline stays identical across detectors and
+      // matches what the classifier itself canonicalizes (D17c single source
+      // of truth).
+      const normalizedPath = canonicalChangedFilePath(file);
+      for (const { rule, source, previousPath } of classifyChangedFile(
+        file,
+        ctx.detectedFrameworks,
+      )) {
         const isHighOrCritical = rule.defaultLevel === "high" || rule.defaultLevel === "critical";
         const recommendation = isHighOrCritical
           ? recommendationForCategory(rule.category)
           : undefined;
         const title = TITLES_BY_CATEGORY[rule.category] ?? FALLBACK_TITLE;
-        const message = `File '${normalizedPath}' matches path-classifier rule '${rule.id}' for category '${rule.category}'.`;
+
+        // Only a previous-ONLY match needs different copy. For "current" and
+        // "both" the current path genuinely matches the rule, so today's
+        // wording stays byte-for-byte and naming the origin would be noise.
+        const matchedViaPreviousOnly = source === "previous" && previousPath !== undefined;
+        const message = matchedViaPreviousOnly
+          ? `Previous path '${previousPath}' matches path-classifier rule '${rule.id}' for category '${rule.category}'; current path is '${normalizedPath}'.`
+          : `File '${normalizedPath}' matches path-classifier rule '${rule.id}' for category '${rule.category}'.`;
+        const detail = matchedViaPreviousOnly
+          ? `${rule.id} (matched previous path ${previousPath})`
+          : rule.id;
+
         const finding: DetectorResult = {
           id: `path-classifier.${rule.id}`,
           category: rule.category,
@@ -229,14 +242,15 @@ export const pathClassifierCheck: Check = {
           confidence: "high",
           title,
           message,
-          evidence: [{ file: normalizedPath, detail: rule.id }],
-          // The canonical changed-file identity, obtained by normalizing the
-          // input path — the same value used for evidence above.
-          // `ChangedFileInput.path` may be Windows-shaped at the
-          // detector/engine boundary; `affected_paths` always carries the
-          // canonical POSIX form. One rule matches one file, so exactly one
-          // path; multiple rules matching the same file emit multiple
-          // findings that each name it.
+          // evidence.file stays the canonical CURRENT path even for a
+          // previous-only match: it is the changed-file identity, it agrees
+          // with affected_paths, and it keeps D40's dedup key off a
+          // non-changed path. Provenance lives in `detail`, which also makes
+          // the dedup key distinguish a previous-only match from a
+          // current-path one — correctly, since those are different facts.
+          evidence: [{ file: normalizedPath, detail }],
+          // The canonical changed-file identity. Aliases influence
+          // CLASSIFICATION only; identity is always the current path.
           affected_paths: [normalizedPath],
           ...(recommendation !== undefined ? { recommendation } : {}),
         };

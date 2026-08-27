@@ -124,6 +124,27 @@ function withAddedLines(
 }
 
 /**
+ * A renamed file WITH added lines. `withAddedLines` hardcodes
+ * `status: "added"`, which a rename cannot use — and which also keeps the
+ * missing-down rule (status === "added" only) out of these fixtures, so they
+ * isolate the danger-term rule and the database scope gate.
+ */
+function renamedWithAddedLines(
+  path: string,
+  previousPath: string,
+  addedLines: readonly { line: number; text: string }[],
+): ChangedFileInput {
+  return {
+    path,
+    previous_path: previousPath,
+    status: "renamed",
+    addedLines,
+    removedLines: [],
+    isBinary: false,
+  };
+}
+
+/**
  * ChangedFileInput with added lines AND explicit status override.
  * Used for missing-down status-gate tests (status: "modified" must
  * SKIP missing-down even when destructive terms are present in
@@ -1211,6 +1232,31 @@ describe("migrationsCheck — edge cases", () => {
         ]),
       ]),
     );
+    expect(result.results).toEqual([]);
+  });
+});
+
+describe("migrationsCheck — rename aliases (M 0.8.0 step 7)", () => {
+  const CURRENT = "lib/legacy/drop_old_table.rb";
+  const ORIGIN = "db/migrate/20260101000000_drop_old_table.rb";
+  const DESTRUCTIVE = [{ line: 1, text: "DROP TABLE users;" }];
+
+  it("a migration moved OUT of db/migrate stays in scope via its origin", () => {
+    const result = runChecks(
+      [migrationsCheck],
+      railsCtx([renamedWithAddedLines(CURRENT, ORIGIN, DESTRUCTIVE)]),
+    );
+    const finding = result.results.find((r) => r.id.startsWith("migration.danger-term."));
+    expect(finding).toBeDefined();
+    // The GATE widened; identity did not.
+    expect(finding?.affected_paths).toEqual([CURRENT]);
+    expect(finding?.evidence[0]?.file).toBe(CURRENT);
+  });
+
+  it("control: the same file without the rename origin is out of scope", () => {
+    // Proves the finding above came from the ALIAS, not because
+    // lib/legacy/*.rb happens to match some database rule on its own.
+    const result = runChecks([migrationsCheck], railsCtx([withAddedLines(CURRENT, DESTRUCTIVE)]));
     expect(result.results).toEqual([]);
   });
 });

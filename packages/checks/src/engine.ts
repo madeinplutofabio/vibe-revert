@@ -30,7 +30,8 @@
 // =============================================================================
 //
 //   canonical changed-file identity
-//     = normalizePathSeparators(raw ChangedFileInput.path)
+//     = canonicalChangedFilePath(file), the POSIX form of
+//       ChangedFileInput.path
 //
 // `ChangedFileInput.path` is a TRANSPORT representation and may arrive
 // Windows-shaped. Detectors already canonicalize it before matching and
@@ -41,8 +42,17 @@
 //
 // Inside this file the rule is therefore:
 //   raw file.path   transport/input only
-//   canonicalPath   classifier input, affected_paths domain,
-//                   riskTagsByPath key, riskLevelByPath key
+//   canonicalPath   affected_paths domain, riskTagsByPath key,
+//                   riskLevelByPath key
+//   alias candidates classifier input only (M 0.8.0 step 7): the canonical
+//                    current path, plus the canonical previous path on a
+//                    rename
+//
+// M 0.8.0 step 7: risk CLASSIFICATION additionally considers the rename
+// origin, via `changedFilePathCandidates`. That widens what can contribute
+// tags; it does NOT widen identity. Both maps stay keyed by the canonical
+// CURRENT path, so a renamed file never acquires a second entry under its
+// old name.
 //
 // At the persisted boundary the two coincide: `ChangedFileSchema.path`
 // requires canonical POSIX form, so a report whose `changed_files[].path`
@@ -133,8 +143,11 @@ import {
   DetectorResultSchema,
   deriveFindingId,
 } from "@viberevert/session-format";
-import { classifyPath } from "./classifiers/match.js";
-import { normalizePathSeparators } from "./path-normalization.js";
+import {
+  canonicalChangedFilePath,
+  changedFilePathCandidates,
+  classifyPath,
+} from "./classifiers/match.js";
 import { deriveEnabledCategories } from "./registry.js";
 import { clusterFindings, compareLevel, sortFindings } from "./severity.js";
 import type {
@@ -258,7 +271,7 @@ export function runChecks(
   // file, and a wrong ChangedFile.risk_level rather than a throw.
   const changedFiles = ctx.changedFiles.map((file) => ({
     file,
-    canonicalPath: normalizePathSeparators(file.path),
+    canonicalPath: canonicalChangedFilePath(file),
   }));
   const changedPathSet = new Set(changedFiles.map(({ canonicalPath }) => canonicalPath));
 
@@ -297,18 +310,23 @@ export function runChecks(
   // are sorted ASCII-asc + deduped to satisfy ChangedFile.risk_tags's
   // schema constraint (sortedUniqueStringArray).
   //
-  // Feed the canonical path to the classifier hook as well. The built-in
+  // Feed each alias candidate to the classifier hook. The built-in
   // classifyPath normalizes internally, but injected classifiers are only
-  // guaranteed the engine hook contract. Passing the same canonical identity
-  // to both keeps default and injected classifier behavior
-  // separator-independent.
+  // guaranteed the engine hook contract, so they receive the same canonical
+  // paths the default one does.
+  //
+  // Tags are unioned into a Set, so a rule matching both aliases contributes
+  // once without needing rule identity — which is why this loop uses the
+  // shared alias candidates rather than the richer `classifyChangedFile`,
+  // whose PathRule provenance the minimal hook shape cannot supply.
   const riskTagsByPath = new Map<string, readonly string[]>();
-  for (const { canonicalPath } of changedFiles) {
-    const matchedRules = classify(canonicalPath, ctx.detectedFrameworks);
+  for (const { file, canonicalPath } of changedFiles) {
     const tags = new Set<string>();
-    for (const rule of matchedRules) {
-      if (!enabledCategories.has(rule.category)) continue;
-      for (const t of rule.tags) tags.add(t);
+    for (const candidate of changedFilePathCandidates(file)) {
+      for (const rule of classify(candidate.path, ctx.detectedFrameworks)) {
+        if (!enabledCategories.has(rule.category)) continue;
+        for (const t of rule.tags) tags.add(t);
+      }
     }
     riskTagsByPath.set(canonicalPath, [...tags].sort());
   }

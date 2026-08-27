@@ -106,6 +106,18 @@ function pathOnly(path: string): ChangedFileInput {
   };
 }
 
+/** A renamed file. `previous_path` is populated only for renames per types.ts. */
+function renamed(path: string, previousPath: string): ChangedFileInput {
+  return {
+    path,
+    previous_path: previousPath,
+    status: "renamed",
+    addedLines: [],
+    removedLines: [],
+    isBinary: false,
+  };
+}
+
 /**
  * Build a CheckContext with explicit `detectedFrameworks` and
  * optional `task`. Defaults `configChecks` to
@@ -505,5 +517,35 @@ describe("scopeExpansionCheck — boundary cases", () => {
       laravelCtx([pathOnly("app/Http/Middleware/AuthMiddleware.php")], "homepag"),
     );
     expect(result.results).toEqual([]);
+  });
+});
+
+describe("scopeExpansionCheck — rename aliases (M 0.8.0 step 7)", () => {
+  const CURRENT = "lib/handler.php";
+  const ORIGIN = "app/Http/Controllers/Webhooks/Stripe.php";
+
+  it("task relevance carried by the rename ORIGIN suppresses the finding", () => {
+    // The regression that forced max-overlap aggregation. Classification is
+    // alias-aware, so the origin makes this file payments-risky. If the
+    // overlap gate were NOT alias-aware, the destination's unrelated tokens
+    // would score ~0 and the file the task explicitly names would be reported
+    // as unannounced scope expansion.
+    const result = runChecks(
+      [scopeExpansionCheck],
+      laravelCtx([renamed(CURRENT, ORIGIN)], "fix stripe webhooks"),
+    );
+    expect(result.results).toEqual([]);
+  });
+
+  it("when NEITHER alias relates to the task, it still fires and names the current path", () => {
+    const result = runChecks(
+      [scopeExpansionCheck],
+      laravelCtx([renamed(CURRENT, ORIGIN)], "Update homepage styling"),
+    );
+    const finding = result.results.find((r) => r.id === "scope-expansion.payments");
+    expect(finding).toBeDefined();
+    // Risk came from the origin; identity is still the current path only.
+    expect(finding?.affected_paths).toEqual([CURRENT]);
+    expect(finding?.evidence[0]?.file).toBe(CURRENT);
   });
 });

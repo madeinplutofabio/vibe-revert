@@ -48,6 +48,18 @@ function pathOnly(path: string): ChangedFileInput {
   };
 }
 
+/** A renamed file. `previous_path` is populated only for renames per types.ts. */
+function renamed(path: string, previousPath: string): ChangedFileInput {
+  return {
+    path,
+    previous_path: previousPath,
+    status: "renamed",
+    addedLines: [],
+    removedLines: [],
+    isBinary: false,
+  };
+}
+
 /**
  * Enable ALL toggle categories so D28 layer 1 never short-circuits the
  * check based on configChecks. path-classifier is an umbrella check;
@@ -114,5 +126,73 @@ describe("pathClassifierCheck — emission path normalization", () => {
     expect(finding).toBeDefined();
     if (!finding) return;
     expect(finding.evidence[0]?.file).toBe(".github/workflows/deploy.yml");
+  });
+});
+
+describe("pathClassifierCheck — rename aliases (M 0.8.0 step 7)", () => {
+  const GH = "path-classifier.generic.gh-actions";
+
+  it("previous-only match: copy names BOTH paths, identity stays the current one", () => {
+    // .github/workflows/deploy.yml matches generic.gh-actions; docs/deploy.yml
+    // matches nothing (k8s needs k8s|kubernetes|helm|charts dirs, compose needs
+    // compose*/docker-compose* names, framework rules are gated off).
+    const result = runChecks(
+      [pathClassifierCheck],
+      ctxFor([renamed("docs/deploy.yml", ".github/workflows/deploy.yml")]),
+    );
+    const finding = result.results.find((r) => r.id === GH);
+    expect(finding).toBeDefined();
+
+    // The rule did NOT match the current path, and the copy says so rather
+    // than asserting that it did.
+    expect(finding?.message).toBe(
+      "Previous path '.github/workflows/deploy.yml' matches path-classifier rule " +
+        "'generic.gh-actions' for category 'deployment'; current path is 'docs/deploy.yml'.",
+    );
+    expect(finding?.evidence[0]?.detail).toBe(
+      "generic.gh-actions (matched previous path .github/workflows/deploy.yml)",
+    );
+
+    // Identity is the CURRENT path on both surfaces, never the alias.
+    expect(finding?.evidence[0]?.file).toBe("docs/deploy.yml");
+    expect(finding?.affected_paths).toEqual(["docs/deploy.yml"]);
+  });
+
+  it("both-match rename keeps today's copy byte-for-byte", () => {
+    // A real rename where BOTH names match the rule — not a non-rename, which
+    // would produce this copy trivially and prove nothing about alias source.
+    const result = runChecks(
+      [pathClassifierCheck],
+      ctxFor([renamed(".github/workflows/release.yml", ".github/workflows/deploy.yml")]),
+    );
+    const finding = result.results.find((r) => r.id === GH);
+    expect(finding?.message).toBe(
+      "File '.github/workflows/release.yml' matches path-classifier rule " +
+        "'generic.gh-actions' for category 'deployment'.",
+    );
+    expect(finding?.evidence[0]).toEqual({
+      file: ".github/workflows/release.yml",
+      detail: "generic.gh-actions",
+    });
+    expect(finding?.affected_paths).toEqual([".github/workflows/release.yml"]);
+  });
+
+  it("current-only match on a rename keeps today's copy byte-for-byte", () => {
+    // Moved INTO the rule's scope: only the new path matches, so source is
+    // "current" and a rename does not by itself change the wording.
+    const result = runChecks(
+      [pathClassifierCheck],
+      ctxFor([renamed(".github/workflows/deploy.yml", "docs/deploy.yml")]),
+    );
+    const finding = result.results.find((r) => r.id === GH);
+    expect(finding?.message).toBe(
+      "File '.github/workflows/deploy.yml' matches path-classifier rule " +
+        "'generic.gh-actions' for category 'deployment'.",
+    );
+    expect(finding?.evidence[0]).toEqual({
+      file: ".github/workflows/deploy.yml",
+      detail: "generic.gh-actions",
+    });
+    expect(finding?.affected_paths).toEqual([".github/workflows/deploy.yml"]);
   });
 });

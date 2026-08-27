@@ -92,10 +92,18 @@
 // yields 5 evidence entries and 40 affected paths.
 //
 // The paths recorded are canonical changed-file identities, obtained by
-// normalizing the input paths — the same `normalizedPath` values already used
-// for tokenizing, evidence, and the [overlap asc, path asc] ordering.
+// normalizing the input paths — the same `normalizedPath` values used for
+// evidence and the [overlap asc, path asc] ordering.
 // `ChangedFileInput.path` may be Windows-shaped at the detector/engine
 // boundary; `affected_paths` always carries the canonical POSIX form.
+//
+// M 0.8.0 step 7: a RENAME is alias-aware on BOTH halves of this detector.
+// Risk classification considers the previous path, and so does the
+// task-overlap gate, aggregated with max. Doing only the first would inherit
+// risk from an old name while refusing the task relevance that same name
+// carries, flagging a file the task explicitly asked for. Neither widens
+// identity: `affected_paths` and the evidence still name only the canonical
+// CURRENT path.
 //
 // =============================================================================
 // TOGGLE-OWNERSHIP NOTE
@@ -107,8 +115,11 @@
 // itself does NOT inspect ctx.configChecks (per D28 lock:
 // individual checks must not own toggle decisions).
 
-import { classifyPath } from "../classifiers/match.js";
-import { normalizePathSeparators } from "../path-normalization.js";
+import {
+  canonicalChangedFilePath,
+  changedFilePathCandidates,
+  classifyChangedFile,
+} from "../classifiers/match.js";
 import type { Check, CheckContext, DetectorResult } from "../types.js";
 
 // =============================================================================
@@ -290,36 +301,47 @@ export const scopeExpansionCheck: Check = {
     const filesByCategory = new Map<string, SuspiciousFile[]>();
 
     for (const file of ctx.changedFiles) {
-      const normalized = normalizePathSeparators(file.path);
-      const fileTokens = tokenizePath(normalized);
+      const canonicalPath = canonicalChangedFilePath(file);
 
-      // Gate (d): per-file zero-token guard. A path with no
-      // extractable tokens would yield NaN from the divide step.
-      // Skip silently — other checks may still emit findings for
-      // this file.
-      if (fileTokens.size === 0) {
+      // Overlap is computed per ALIAS and aggregated with max. A renamed file
+      // belongs to the task if ANY of its canonical names is aligned with it.
+      // Max is deliberately conservative: an irrelevant rename destination
+      // must not dilute a strongly aligned origin, which average or min would
+      // allow.
+      let overlap: number | undefined;
+      for (const candidate of changedFilePathCandidates(file)) {
+        const candidateTokens = tokenizePath(candidate.path);
+
+        // Gate (d), now PER CANDIDATE: a path with no extractable tokens
+        // would yield NaN from the divide step. Skip just this alias; another
+        // may still be usable.
+        if (candidateTokens.size === 0) {
+          continue;
+        }
+        let intersectionSize = 0;
+        for (const token of candidateTokens) {
+          if (taskTokens.has(token)) intersectionSize++;
+        }
+        const candidateOverlap = intersectionSize / candidateTokens.size;
+        overlap = overlap === undefined ? candidateOverlap : Math.max(overlap, candidateOverlap);
+      }
+
+      // EVERY alias was untokenizable. Skip silently — other checks may still
+      // emit findings for this file.
+      if (overlap === undefined) {
         continue;
       }
-
-      // Compute |fileTokens ∩ taskTokens| / |fileTokens|.
-      let intersectionSize = 0;
-      for (const token of fileTokens) {
-        if (taskTokens.has(token)) intersectionSize++;
-      }
-      const overlap = intersectionSize / fileTokens.size;
 
       // High overlap → file IS aligned with the task → skip.
       if (overlap >= OVERLAP_THRESHOLD) {
         continue;
       }
 
-      // Classify the file. Determine which RISKY_CATEGORIES it
-      // belongs to. A file matched only by non-risky path
-      // categories (e.g., secrets, dependencies) contributes
-      // NOTHING even at zero overlap.
-      const matchedRules = classifyPath(normalized, ctx.detectedFrameworks);
+      // Classify the file, aliases included. Determine which RISKY_CATEGORIES
+      // it belongs to. A file matched only by non-risky path categories (e.g.,
+      // secrets, dependencies) contributes NOTHING even at zero overlap.
       const fileRiskyCategories = new Set<string>();
-      for (const rule of matchedRules) {
+      for (const { rule } of classifyChangedFile(file, ctx.detectedFrameworks)) {
         if (RISKY_CATEGORIES.has(rule.category)) {
           fileRiskyCategories.add(rule.category);
         }
@@ -335,7 +357,7 @@ export const scopeExpansionCheck: Check = {
           arr = [];
           filesByCategory.set(category, arr);
         }
-        arr.push({ normalizedPath: normalized, overlap });
+        arr.push({ normalizedPath: canonicalPath, overlap });
       }
     }
 

@@ -30,7 +30,9 @@
 //
 // The detector runs ONLY on files matching a path-classifier rule
 // with category === "database" (per D35). Determination is via
-// classifyPath(file.path, ctx.detectedFrameworks):
+// classifyChangedFile(file, ctx.detectedFrameworks), which as of M 0.8.0
+// step 7 also considers a rename's previous path, so a moved migration stays
+// in scope:
 //   - laravel.migrations (database/migrations/**, framework: "laravel")
 //   - rails.migrations (db/migrate/**, framework: "rails")
 //   - (future) django, etc.
@@ -59,9 +61,8 @@
 
 import picomatch from "picomatch";
 
-import { classifyPath } from "../classifiers/match.js";
-import { normalizePathSeparators } from "../path-normalization.js";
-import type { Check, CheckContext, DetectorResult } from "../types.js";
+import { canonicalChangedFilePath, classifyChangedFile } from "../classifiers/match.js";
+import type { ChangedFileInput, Check, CheckContext, DetectorResult } from "../types.js";
 import {
   type DangerTerm,
   type DangerTermMatch,
@@ -113,8 +114,8 @@ const matchExcludedFromMissingDown = picomatch([...MISSING_DOWN_EXCLUDED_FILE_PA
  *   ".env"                → ""        (dot at basename position 0: dotfile, no extension)
  *   "apps/.env.local"     → ".local"  (multi-dot dotfile: segment after final dot)
  *
- * The path is assumed already normalized to POSIX (callers pass
- * `normalizePathSeparators(file.path)`).
+ * The path is assumed already normalized to POSIX (callers pass the
+ * canonical current path from `canonicalChangedFilePath(file)`).
  */
 function getExtension(path: string): string {
   const lastSlash = path.lastIndexOf("/");
@@ -146,21 +147,29 @@ function matchesTerm(text: string, match: DangerTermMatch): boolean {
 }
 
 /**
- * Test whether a path classifies as a database-category file via the
+ * Test whether a changed file classifies as a database-category file via the
  * path-classifier matcher. Returns true if ANY matched rule has
  * category === "database".
  *
- * The detector runs ONLY on such files per D35. Calling classifyPath
+ * The detector runs ONLY on such files per D35. Calling the classifier
  * here duplicates the engine's classifier invocation (the engine
  * also calls it for risk-tag computation), but the call is cheap
  * (pre-compiled rule matchers in classifiers/match.ts) and keeps
  * this detector standalone — it doesn't depend on engine internals
  * passing classifier output through ctx (matching the architectural
  * pattern from Step 5's dependencies.ts).
+ *
+ * M 0.8.0 step 7: takes the FILE, not a path, so a renamed migration keeps
+ * its database classification via `previous_path`. Only the GATE widens; the
+ * findings this detector emits still name the canonical current path.
  */
-function isDatabaseCategoryFile(path: string, detectedFrameworks: readonly string[]): boolean {
-  const matchedRules = classifyPath(path, detectedFrameworks);
-  return matchedRules.some((rule) => rule.category === "database");
+function isDatabaseCategoryFile(
+  file: Pick<ChangedFileInput, "path" | "previous_path">,
+  detectedFrameworks: readonly string[],
+): boolean {
+  return classifyChangedFile(file, detectedFrameworks).some(
+    ({ rule }) => rule.category === "database",
+  );
 }
 
 // =============================================================================
@@ -216,13 +225,14 @@ export const migrationsCheck: Check = {
       // diff or a status-change with no line additions).
       if (file.isBinary || file.addedLines.length === 0) continue;
 
-      const normalized = normalizePathSeparators(file.path);
+      const normalized = canonicalChangedFilePath(file);
 
       // SCOPE GATE: only database-category files. The framework
       // gating in path-classifier rules (laravel.migrations requires
       // framework: "laravel" in detectedFrameworks, etc.) is enforced
-      // by classifyPath itself.
-      if (!isDatabaseCategoryFile(normalized, ctx.detectedFrameworks)) continue;
+      // by the classifier itself. Alias-aware, so a renamed migration
+      // stays in scope.
+      if (!isDatabaseCategoryFile(file, ctx.detectedFrameworks)) continue;
 
       const ext = getExtension(normalized);
 
