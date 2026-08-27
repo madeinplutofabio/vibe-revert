@@ -9,6 +9,7 @@ import {
   ChangedFileSchema,
   CheckResultJsonSchema,
   CheckResultSchema,
+  DetectorResultSchema,
   EvidenceJsonSchema,
   EvidenceSchema,
   isSafeStoredRelativePath,
@@ -307,6 +308,100 @@ describe("CheckResultSchema", () => {
   it.each(["high", "critical"] as const)("accepts %s with recommendation", (level) => {
     const v = { ...baseLow, level, recommendation: "fix it" };
     expect(CheckResultSchema.parse(v)).toEqual(v);
+  });
+
+  // The coupling refinement lives on CheckResultSchema, but was exercised only
+  // TRANSITIVELY through SessionReportSchema (finding-identity.test.ts).
+  // Pinning it locally matters now that this schema is rebuilt from a shared
+  // structural base: dropping the second .refine() during that rebuild would
+  // otherwise be invisible here. A syntactically valid but underived id
+  // suffices, because verifying the DERIVATION is SessionReportSchema's job.
+  it("accepts a paired finding_id + affected_paths", () => {
+    const v = { ...baseLow, finding_id: `fnd_${"0".repeat(64)}`, affected_paths: ["src/a.ts"] };
+    expect(CheckResultSchema.parse(v)).toEqual(v);
+  });
+
+  it("rejects finding_id without affected_paths", () => {
+    expect(() =>
+      CheckResultSchema.parse({ ...baseLow, finding_id: `fnd_${"0".repeat(64)}` }),
+    ).toThrow();
+  });
+
+  it("rejects affected_paths without finding_id", () => {
+    expect(() => CheckResultSchema.parse({ ...baseLow, affected_paths: ["src/a.ts"] })).toThrow();
+  });
+});
+
+// =============================================================================
+// DetectorResultSchema — the pre-identity stage (M 0.8.0 step 6)
+// =============================================================================
+
+describe("DetectorResultSchema", () => {
+  const baseLow = {
+    id: "test-1",
+    title: "Title",
+    level: "low" as const,
+    confidence: "medium" as const,
+    category: "auth",
+    message: "msg",
+    evidence: [{ detail: "evidence detail" }],
+    affected_paths: ["src/a.ts"],
+  };
+
+  it("accepts a detector result carrying its path set", () => {
+    expect(DetectorResultSchema.parse(baseLow)).toEqual(baseLow);
+  });
+
+  // REQUIRED here, unlike on the persisted side. A detector with no path
+  // subject must say so explicitly rather than stay silent -- that is what
+  // makes "machine-complete" checkable.
+  it("rejects a detector result with no affected_paths", () => {
+    const { affected_paths: _omitted, ...withoutPaths } = baseLow;
+    expect(() => DetectorResultSchema.parse(withoutPaths)).toThrow();
+  });
+
+  // Empty is the legal way to say "real finding, no path subject" (an advisory
+  // finding). Distinct from omitting the field.
+  it("accepts an empty affected_paths", () => {
+    const v = { ...baseLow, affected_paths: [] };
+    expect(DetectorResultSchema.parse(v)).toEqual(v);
+  });
+
+  // The load-bearing case: .omit().extend() must PRESERVE strictObject
+  // behavior. Had it relaxed to passthrough, a detector could smuggle a
+  // finding_id past the engine and mint an identity from a pre-aggregation
+  // path set -- precisely what the two-stage split exists to prevent.
+  it("rejects a finding_id, proving strictness survived omit/extend", () => {
+    expect(() =>
+      DetectorResultSchema.parse({ ...baseLow, finding_id: `fnd_${"0".repeat(64)}` }),
+    ).toThrow();
+  });
+
+  // Control for the case above. Both fail together if strictness were lost, so
+  // this earns its place only in the narrower scenario: someone later rejecting
+  // finding_id explicitly (e.g. z.never()) while strictness quietly lapsed.
+  it("rejects any unknown key", () => {
+    expect(() => DetectorResultSchema.parse({ ...baseLow, nope: 1 })).toThrow();
+  });
+
+  // The severe-recommendation predicate is shared with CheckResultSchema;
+  // these exercise it through the OTHER schema so the rule cannot drift to
+  // applying on one side only.
+  it.each(["high", "critical"] as const)("rejects %s without recommendation", (level) => {
+    expect(() => DetectorResultSchema.parse({ ...baseLow, level })).toThrow();
+  });
+
+  it.each(["high", "critical"] as const)("accepts %s with recommendation", (level) => {
+    const v = { ...baseLow, level, recommendation: "fix it" };
+    expect(DetectorResultSchema.parse(v)).toEqual(v);
+  });
+
+  // affected_paths inherits sortedUniquePathArray, which VALIDATES canonical
+  // form rather than repairing it, so producers must normalize.
+  it("rejects unsorted affected_paths", () => {
+    expect(() =>
+      DetectorResultSchema.parse({ ...baseLow, affected_paths: ["src/b.ts", "src/a.ts"] }),
+    ).toThrow();
   });
 });
 

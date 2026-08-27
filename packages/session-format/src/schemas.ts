@@ -166,37 +166,102 @@ export type ChangedFile = z.infer<typeof ChangedFileSchema>;
 // derivation of `finding_id`, since only the report knows the changed-file set
 // and the report identity.
 //
-// Both fields are optional so pre-0.8.0 reports stay valid, but they are
-// COUPLED: a half-populated finding cannot exist. An empty `affected_paths`
-// still counts as present.
+// `CheckResultSchema` keeps both fields optional so pre-0.8.0 reports stay
+// valid, but they are COUPLED: a half-populated persisted finding cannot
+// exist. An empty `affected_paths` still counts as present.
+//
+// =============================================================================
+// Two lifecycle stages, one structural definition (M 0.8.0 step 6)
+// =============================================================================
+//
+// A finding exists in two stages, and they validate differently:
+//
+//   DetectorResultSchema   what a detector emits, and what the severity
+//                          pipeline operates on. `affected_paths` REQUIRED
+//                          (possibly empty); `finding_id` structurally absent,
+//                          so a detector cannot mint one.
+//   CheckResultSchema      the persisted report finding. Both fields optional
+//                          and coupled, exactly as before.
+//
+// The order is forced rather than stylistic: `affected_paths` participates in
+// the normative `finding_id` derivation, so an id minted before dedup and
+// clustering have finished would identify a path set that no longer exists.
+// Identity is therefore assigned only after every operation capable of
+// combining or synthesizing findings has run.
+//
+// `CheckResultBaseSchema` is a plain `strictObject` for the same reason
+// `SessionStateBaseSchema` is: `.omit()` and `.extend()` are unavailable on the
+// `ZodEffects` that `.refine()` produces.
+//
+// **CheckResultSchema's accepted data is UNCHANGED by this split.** It is the
+// same fields with the same two refinements; pre-0.8.0 reports that validated
+// before still validate. The new strictness lives only in the sibling.
 // =============================================================================
 
-export const CheckResultSchema = z
-  .strictObject({
-    id: nonBlankString,
-    finding_id: FindingIdSchema.optional(),
-    title: nonBlankString,
-    level: RiskLevelSchema,
-    confidence: ConfidenceSchema,
-    category: nonBlankString,
-    message: nonBlankString,
-    evidence: z.array(EvidenceSchema).min(1),
-    affected_paths: sortedUniquePathArray.optional(),
-    recommendation: nonBlankString.optional(),
-  })
-  .refine(
-    (r) => (r.level !== "high" && r.level !== "critical") || typeof r.recommendation === "string",
-    {
-      message: "recommendation is required when level is 'high' or 'critical'",
-      path: ["recommendation"],
-    },
-  )
-  .refine((r) => (r.finding_id === undefined) === (r.affected_paths === undefined), {
-    message:
-      "finding_id and affected_paths must both be present (0.8.0+ finding) or both absent (legacy finding)",
-    path: ["finding_id"],
-  });
+/**
+ * Structural base for both lifecycle stages. NOT exported: on its own it
+ * validates neither stage correctly, since it would accept a half-populated
+ * 0.8.0 finding that both real schemas reject.
+ */
+const CheckResultBaseSchema = z.strictObject({
+  id: nonBlankString,
+  finding_id: FindingIdSchema.optional(),
+  title: nonBlankString,
+  level: RiskLevelSchema,
+  confidence: ConfidenceSchema,
+  category: nonBlankString,
+  message: nonBlankString,
+  evidence: z.array(EvidenceSchema).min(1),
+  affected_paths: sortedUniquePathArray.optional(),
+  recommendation: nonBlankString.optional(),
+});
+
+/**
+ * Shared by both stages so the high/critical recommendation requirement
+ * cannot drift between detector output and persisted findings. Typed
+ * structurally (`level: string`) so it needs no import of the RiskLevel union
+ * and applies to either inferred shape.
+ */
+function severeFindingHasRecommendation(r: {
+  readonly level: string;
+  readonly recommendation?: string | undefined;
+}): boolean {
+  return (r.level !== "high" && r.level !== "critical") || typeof r.recommendation === "string";
+}
+
+export const CheckResultSchema = CheckResultBaseSchema.refine(severeFindingHasRecommendation, {
+  message: "recommendation is required when level is 'high' or 'critical'",
+  path: ["recommendation"],
+}).refine((r) => (r.finding_id === undefined) === (r.affected_paths === undefined), {
+  message:
+    "finding_id and affected_paths must both be present (0.8.0+ finding) or both absent (legacy finding)",
+  path: ["finding_id"],
+});
 export type CheckResult = z.infer<typeof CheckResultSchema>;
+
+/**
+ * A finding BEFORE report identity exists: what detectors emit and what the
+ * severity pipeline dedups, caps, and clusters.
+ *
+ * `finding_id` is omitted from a `strictObject`, so supplying one is rejected
+ * as an unknown key rather than merely ignored. That is the point: detectors
+ * must not mint identities, and the engine assigns them only once the final
+ * path set is settled.
+ *
+ * `affected_paths` is REQUIRED here while optional on the persisted side. A
+ * detector that has no path subject says so with `[]`; it cannot stay silent.
+ * That is what makes "machine-complete" checkable rather than aspirational.
+ *
+ * The coupling refinement is deliberately NOT applied: with `finding_id`
+ * structurally absent and `affected_paths` required, it would be vacuous.
+ */
+export const DetectorResultSchema = CheckResultBaseSchema.omit({ finding_id: true })
+  .extend({ affected_paths: sortedUniquePathArray })
+  .refine(severeFindingHasRecommendation, {
+    message: "recommendation is required when level is 'high' or 'critical'",
+    path: ["recommendation"],
+  });
+export type DetectorResult = z.infer<typeof DetectorResultSchema>;
 
 // =============================================================================
 // Manifest (strict; rollback contract)
