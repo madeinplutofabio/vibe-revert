@@ -3,7 +3,7 @@
 
 // M H8.1: docs/config.md coverage invariant. ConfigSchema is the authority. A
 // fail-loud structural walk of ConfigSchema (Zod 4.4.1) derives the canonical
-// user-settable surface: 22 assignable leaf keys + 6 parent containers. The node
+// user-settable surface: 23 assignable leaf keys + 7 parent containers. The node
 // shapes were inspected before writing this walker; it supports only the shapes
 // ConfigSchema actually uses and throws (with the dotted path + encountered
 // constructor name) on anything else, so a later schema change to an unhandled
@@ -41,8 +41,8 @@ const OPTIONAL = "ZodOptional";
 const OBJECT = "ZodObject";
 // The leaf node shapes actually present in ConfigSchema (verified by inspection):
 // ZodLiteral (version, llm.enabled), ZodString (profile, project.*), ZodEnum
-// (risk.*), ZodArray (frameworks, policies, rollback.exclude, commands.*),
-// ZodBoolean (checks.*, rollback.enabled/include_untracked).
+// (risk.*), ZodArray (frameworks, policies, rollback.exclude, commands.*,
+// verify.commands), ZodBoolean (checks.*, rollback.enabled/include_untracked).
 const LEAF_CTORS = new Set(["ZodString", "ZodBoolean", "ZodLiteral", "ZodEnum", "ZodArray"]);
 
 // Defensive: an unexpected/malformed node still yields our own fail-loud

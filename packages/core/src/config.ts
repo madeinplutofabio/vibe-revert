@@ -12,7 +12,7 @@
 
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { RiskLevelSchema } from "@viberevert/session-format";
+import { RiskLevelSchema, VerifyCommandSchema } from "@viberevert/session-format";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 
@@ -48,6 +48,32 @@ const nonBlankString = z.string().refine((s) => s.trim().length > 0, {
 //     Agents fix." principle is enforced at the schema level for v0.7.0-beta.
 //     A config with `llm: { enabled: true }` fails validation with a clear
 //     message rather than being silently accepted-and-ignored.
+//
+// One intentional structural separation (M 0.8.0 step 5):
+//   - `verify` is its own top-level domain, NOT a member of `commands`.
+//     `commands.guard` and `commands.require_confirm` govern what an agent
+//     invocation is allowed to execute. `verify.commands` describes project
+//     verification work VibeRevert runs itself after a recovery operation.
+//     Those are different policy domains with different threat models, and
+//     folding them together would make `commands` mean two things.
+//
+// One intentional cross-package reuse (M 0.8.0 step 5):
+//   - `verify.commands[]` reuses VerifyCommandSchema from
+//     @viberevert/session-format, which is the exact shape persisted in
+//     SessionState.evaluation_snapshot.verify_commands. Reusing it rather than
+//     redeclaring the same fields keeps the config surface and the persisted
+//     snapshot from drifting, and lets the session-start capture be a copy
+//     rather than a translation.
+//
+//     Two consequences worth stating, because both are easy to get wrong when
+//     reinventing this shape locally:
+//       - `args` is REQUIRED, though it may be empty. This is the one place
+//         the file departs from "almost every field is optional", and it is
+//         deliberate: an optional `args` silently resolving to `[]` is exactly
+//         the obscured default the paragraph above warns against.
+//       - `args` entries are plain strings, NOT nonBlankString. An empty
+//         string can be a legitimate argv element, so rejecting it would
+//         make a valid command unrepresentable.
 // =============================================================================
 
 export const ConfigSchema = z.strictObject({
@@ -90,6 +116,11 @@ export const ConfigSchema = z.strictObject({
     .strictObject({
       guard: z.array(nonBlankString).optional(),
       require_confirm: z.array(nonBlankString).optional(),
+    })
+    .optional(),
+  verify: z
+    .strictObject({
+      commands: z.array(VerifyCommandSchema).optional(),
     })
     .optional(),
   llm: z

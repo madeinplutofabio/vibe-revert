@@ -76,6 +76,12 @@ describe("ConfigSchema (parse-only, no I/O)", () => {
         guard: ["rm -rf /"],
         require_confirm: ["php artisan migrate"],
       },
+      verify: {
+        commands: [
+          { command: "pnpm", args: ["typecheck"] },
+          { command: "pnpm", args: ["test"] },
+        ],
+      },
       llm: { enabled: false },
     };
     expect(ConfigSchema.parse(v)).toEqual(v);
@@ -143,6 +149,105 @@ describe("ConfigSchema (parse-only, no I/O)", () => {
   });
 });
 
+// =============================================================================
+// verify.commands (M 0.8.0 step 5)
+//
+// The entry shape is VerifyCommandSchema from @viberevert/session-format, the
+// exact object persisted in SessionState.evaluation_snapshot.verify_commands.
+// Reuse is justified by the shapes being identical TODAY, not by a rule that
+// they must stay identical forever, so these tests pin the decisions a
+// config-side reimplementation would most plausibly get wrong. If a
+// translation boundary is ever introduced here, they should still pass.
+// =============================================================================
+
+describe("ConfigSchema: verify.commands", () => {
+  it("omitting verify entirely stays valid (backward compatibility)", () => {
+    // Existing configs with no `verify` block remain valid.
+    expect(ConfigSchema.parse({ version: 1 }).verify).toBeUndefined();
+  });
+
+  it("accepts an empty verify block", () => {
+    const v = { version: 1, verify: {} };
+    expect(ConfigSchema.parse(v)).toEqual(v);
+  });
+
+  it("accepts an explicit empty command list", () => {
+    // Meaningful rather than erroneous: it states "no verification".
+    const v = { version: 1, verify: { commands: [] } };
+    expect(ConfigSchema.parse(v)).toEqual(v);
+  });
+
+  it("accepts a well-formed command", () => {
+    const v = { version: 1, verify: { commands: [{ command: "pnpm", args: ["test"] }] } };
+    expect(ConfigSchema.parse(v)).toEqual(v);
+  });
+
+  it("accepts args: [] (required, but may be empty)", () => {
+    const v = { version: 1, verify: { commands: [{ command: "make", args: [] }] } };
+    expect(ConfigSchema.parse(v)).toEqual(v);
+  });
+
+  it("accepts an empty string as an individual argv element", () => {
+    // args entries are plain strings, NOT nonBlankString. An empty argv
+    // element is legitimate, and a nonBlankString reimplementation would make
+    // this otherwise valid command unrepresentable.
+    const v = { version: 1, verify: { commands: [{ command: "sh", args: ["-c", ""] }] } };
+    expect(ConfigSchema.parse(v)).toEqual(v);
+  });
+
+  it("rejects a command entry with no args key", () => {
+    // args is required precisely so absence cannot silently resolve to [].
+    expect(() =>
+      ConfigSchema.parse({ version: 1, verify: { commands: [{ command: "pnpm" }] } }),
+    ).toThrow();
+  });
+
+  it("rejects a blank command", () => {
+    expect(() =>
+      ConfigSchema.parse({ version: 1, verify: { commands: [{ command: "   ", args: [] }] } }),
+    ).toThrow();
+  });
+
+  it("rejects a non-string argv element", () => {
+    // A real YAML trap rather than a hypothetical: `args: [--jobs, 4]` parses
+    // 4 as a number, so this must fail loudly at load rather than reach a
+    // spawn call as a non-string.
+    expect(() =>
+      ConfigSchema.parse({ version: 1, verify: { commands: [{ command: "make", args: [4] }] } }),
+    ).toThrow();
+  });
+
+  it("rejects speculative fields on a command entry (strict)", () => {
+    // name / cwd / timeout are deliberately NOT part of the shape yet. This
+    // fails until one is added on purpose, in session-format, with a test.
+    expect(() =>
+      ConfigSchema.parse({
+        version: 1,
+        verify: { commands: [{ command: "pnpm", args: ["test"], timeout: 30 }] },
+      }),
+    ).toThrow();
+  });
+
+  it("rejects unknown fields inside verify (strict)", () => {
+    expect(() =>
+      ConfigSchema.parse({ version: 1, verify: { commands: [], parallel: true } }),
+    ).toThrow();
+  });
+
+  it("preserves order and permits duplicates (a sequence, not a set)", () => {
+    // Order and duplicates are meaningful here. Sorting would change the
+    // configured sequence, and deduping would remove an intentional repeat.
+    const commands = [
+      { command: "pnpm", args: ["typecheck"] },
+      { command: "pnpm", args: ["test"] },
+      { command: "pnpm", args: ["typecheck"] },
+    ];
+    expect(ConfigSchema.parse({ version: 1, verify: { commands } }).verify?.commands).toEqual(
+      commands,
+    );
+  });
+});
+
 describe("loadConfig (with real I/O)", () => {
   it("loads a minimal valid config", async () => {
     await writeConfig("version: 1\n");
@@ -184,6 +289,30 @@ llm:
     expect(config.frameworks).toEqual(["laravel", "node"]);
     expect(config.commands?.guard).toEqual(["rm -rf /"]);
     expect(config.llm?.enabled).toBe(false);
+  });
+
+  it("loads the verify block shown in docs/config.md", async () => {
+    // The YAML below mirrors the "Project verification" example from
+    // docs/config.md, with the required `version` key added because the doc
+    // prints a fragment. This pins the intended documented form as valid
+    // config; the schema/docs parity test separately guards the documented
+    // key surface.
+    await writeConfig(`
+version: 1
+verify:
+  commands:
+    - command: pnpm
+      args:
+        - typecheck
+    - command: pnpm
+      args:
+        - test
+`);
+    const config = await loadConfig(tmpRoot);
+    expect(config.verify?.commands).toEqual([
+      { command: "pnpm", args: ["typecheck"] },
+      { command: "pnpm", args: ["test"] },
+    ]);
   });
 
   it("throws ConfigNotFoundError when .viberevert.yml is missing", async () => {

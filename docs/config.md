@@ -73,6 +73,36 @@ prefix of the invocation (`rm -rf /` matches `rm -rf / --no-preserve-root` but n
 | `rollback.enabled` | boolean | — | Reserved: parsed and validated but does not currently alter command behavior. |
 | `rollback.include_untracked` | boolean | — | Reserved: parsed and validated but does not currently alter command behavior. |
 
+### Project verification
+
+Verification commands are a separate policy domain from `commands.guard` and
+`commands.require_confirm`. Those govern what an *agent* invocation is allowed
+to execute; `verify.commands` describes project checks reserved for recovery
+verification.
+
+Each entry uses an argv-structured command object rather than a single shell
+command string: `command` identifies the executable and `args` contains its
+arguments. This keeps tokenization and shell interpretation out of the config:
+
+```yaml
+verify:
+  commands:
+    - command: pnpm
+      args:
+        - typecheck
+    - command: pnpm
+      args:
+        - test
+```
+
+`command` must be non-blank. `args` is required and may be empty (`args: []`),
+and an individual argument may be an empty string. Entries are preserved in
+the order written, and duplicates are permitted.
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `verify.commands` | list of command objects | `[]` (no verification commands) | Ordered verification commands. Each entry is an object with a non-blank `command` and a required `args` list of strings. Reserved in this beta: parsed and validated, but not executed yet. |
+
 ### Project metadata
 
 Parsed and validated, but not consumed at runtime in this beta.
