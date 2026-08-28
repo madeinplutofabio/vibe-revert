@@ -21,7 +21,15 @@ import { join } from "node:path";
 
 import type { CheckContext, RunChecksResult } from "@viberevert/checks";
 import type { RawDiff, RawDiffEntry, RawDiffHunk } from "@viberevert/git";
-import { type CheckResult, type RiskLevel, SCHEMA_VERSION } from "@viberevert/session-format";
+import {
+  type CheckResult,
+  CONTRIBUTION_FILE_SCHEMA_VERSION,
+  type PathState,
+  type RiskLevel,
+  SCHEMA_VERSION,
+  type SessionContributionEntry,
+  type SessionContributionFile,
+} from "@viberevert/session-format";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -31,6 +39,7 @@ import {
   computeRiskLevel,
   computeRollbackAvailable,
   computeSummary,
+  contributionToRawDiff,
   parseRawDiffToInputs,
 } from "../src/check-orchestration.js";
 import { VIBEREVERT_TEST_FIXED_NOW, VIBEREVERT_TEST_FIXED_SHA } from "../src/runtime-env.js";
@@ -812,5 +821,160 @@ describe("computeRollbackAvailable -- M D Step 4b D72", () => {
         "/irrelevant/path",
       ),
     ).rejects.toThrow(/not a valid session id/);
+  });
+});
+
+// =============================================================================
+// contributionToRawDiff -- M 0.8.0 step 8 B3 projection
+// =============================================================================
+
+const ABSENT_STATE: PathState = { worktree: { kind: "absent" }, index: { kind: "absent" } };
+const VALID_CHECKPOINT_ID = "cp_01JV8Y7W2M7AABCDEFGHJKMNPQ";
+
+/**
+ * A contribution entry as a TYPED LITERAL, not a parsed artifact.
+ *
+ * `contributionToRawDiff` is pure and reads only `path`, `previous_path`,
+ * `operation`, and `content_delta`. It never inspects `facets`,
+ * `change_group_id`, `before`, or `after`, so those carry minimal shape-valid
+ * placeholders. A real `change_group_id` is a SHA-256 the producer derives
+ * from the group's members; deriving one here would suggest the projection
+ * consumes it, which it does not.
+ */
+function makeContributionEntry(
+  overrides: Partial<SessionContributionEntry> = {},
+): SessionContributionEntry {
+  return {
+    path: "src/foo.ts",
+    operation: "modified",
+    facets: [],
+    change_group_id: `cg_${"0".repeat(64)}`,
+    before: ABSENT_STATE,
+    after: ABSENT_STATE,
+    content_delta: { kind: "none" },
+    ...overrides,
+  };
+}
+
+function makeContribution(entries: readonly SessionContributionEntry[]): SessionContributionFile {
+  return {
+    schema_version: CONTRIBUTION_FILE_SCHEMA_VERSION,
+    session_id: VALID_SESSION_ID,
+    checkpoint_id: VALID_CHECKPOINT_ID,
+    before_head_sha: VALID_SHA,
+    after_head_sha: ANOTHER_VALID_SHA,
+    captured_at: "2026-05-04T10:30:11Z",
+    ended_at: "2026-05-04T11:00:00Z",
+    // Copied, not passed through: the schema infers `entries` as a MUTABLE
+    // array, so a readonly parameter cannot be assigned directly. The
+    // parameter stays readonly because callers should not have to surrender
+    // one.
+    entries: [...entries],
+  };
+}
+
+describe("contributionToRawDiff -- M 0.8.0 step 8 B3", () => {
+  it("passes every operation through as the identical ChangedFileStatus", () => {
+    // All five in one contribution, so a projection that handled only some
+    // of the vocabulary fails here rather than in whichever detector first
+    // met the unmapped one.
+    const operations = ["added", "deleted", "modified", "renamed", "type_changed"] as const;
+    const contribution = makeContribution(
+      operations.map((operation, i) => makeContributionEntry({ path: `src/${i}.ts`, operation })),
+    );
+
+    expect(contributionToRawDiff(contribution).entries.map((e) => e.status)).toEqual([
+      ...operations,
+    ]);
+  });
+
+  it("maps a text delta to isBinary false with camelCase hunk coordinates", () => {
+    const contribution = makeContribution([
+      makeContributionEntry({
+        content_delta: {
+          kind: "text",
+          hunks: [
+            {
+              // Four DISTINCT values: a projection that swapped old/new, or
+              // start/lines, would still satisfy equal-value fixtures.
+              old_start: 10,
+              old_lines: 3,
+              new_start: 12,
+              new_lines: 4,
+              lines: [
+                { kind: "context", text: "unchanged" },
+                { kind: "remove", text: "gone" },
+                { kind: "add", text: "new" },
+              ],
+            },
+          ],
+        },
+      }),
+    ]);
+
+    const result = contributionToRawDiff(contribution);
+    expect(result.entries[0]?.isBinary).toBe(false);
+    // The WHOLE hunk, lines included: the envelope changes casing while
+    // DiffLine passes through structurally intact.
+    expect(result.entries[0]?.hunks).toEqual([
+      {
+        oldStart: 10,
+        oldLines: 3,
+        newStart: 12,
+        newLines: 4,
+        lines: [
+          { kind: "context", text: "unchanged" },
+          { kind: "remove", text: "gone" },
+          { kind: "add", text: "new" },
+        ],
+      },
+    ]);
+  });
+
+  it("maps a binary delta to isBinary true with no hunks", () => {
+    const contribution = makeContribution([
+      makeContributionEntry({ content_delta: { kind: "binary" } }),
+    ]);
+
+    const result = contributionToRawDiff(contribution);
+    expect(result.entries[0]?.isBinary).toBe(true);
+    expect(result.entries[0]?.hunks).toEqual([]);
+  });
+
+  it("maps a none delta to isBinary FALSE with no hunks", () => {
+    // Pinned separately from `binary` because both produce zero hunks, so a
+    // projection that collapsed the two arms would still pass a hunks-only
+    // assertion. `none` is a change with no TEXTUAL delta -- a mode-only
+    // change, say -- not a binary one, and calling it binary would suppress
+    // content scanning for a file that has readable content.
+    const contribution = makeContribution([
+      makeContributionEntry({ content_delta: { kind: "none" } }),
+    ]);
+
+    const result = contributionToRawDiff(contribution);
+    expect(result.entries[0]?.isBinary).toBe(false);
+    expect(result.entries[0]?.hunks).toEqual([]);
+  });
+
+  it("carries previous_path for a rename and omits the key otherwise", () => {
+    const contribution = makeContribution([
+      makeContributionEntry({
+        path: "utils/webhook.ts",
+        previous_path: "payments/webhook.ts",
+        operation: "renamed",
+      }),
+      makeContributionEntry({ path: "zz/plain.ts" }),
+    ]);
+
+    const entries = contributionToRawDiff(contribution).entries;
+    expect(entries[0]?.previous_path).toBe("payments/webhook.ts");
+    // Structural ABSENCE, not an explicit `undefined`. Under
+    // exactOptionalPropertyTypes those differ, and a spread that always set
+    // the key would break any downstream `"previous_path" in entry` check.
+    expect("previous_path" in (entries[1] as object)).toBe(false);
+  });
+
+  it("projects an empty contribution to an empty RawDiff", () => {
+    expect(contributionToRawDiff(makeContribution([]))).toEqual({ entries: [] });
   });
 });

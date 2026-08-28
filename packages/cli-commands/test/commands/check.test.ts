@@ -11,7 +11,7 @@
 // schema validity. Resolver-internal branches are NOT re-tested here
 // (covered exhaustively in check-since-resolution.test.ts).
 //
-// Seven sections, 21 tests total:
+// Eight sections, 27 tests total:
 //   1. Exit codes (D24): no-changes / non-blocker / blocker             3 tests
 //   2. --threshold semantics (D38)                                       3 tests
 //   3. Output modes (--json shape + render-vs-persist parity)            2 tests
@@ -19,6 +19,7 @@
 //   5. Input flag validation (--threshold, --task)                       2 tests
 //   6. Config error surfacing                                            2 tests
 //   7. Config-source authority (M 0.8.0 step 8)                          7 tests
+//   8. Contribution-backed ended sessions (M 0.8.0 step 8 B3)            6 tests
 //
 // Fixtures (locked):
 //   - Non-blocker: stage `.github/workflows/test.yml` → triggers
@@ -36,19 +37,24 @@
 //     dependency, no second-commit setup).
 
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import { promisify } from "node:util";
 
-import { ensureViberevertDirs, generateSessionId } from "@viberevert/core";
+import { ensureViberevertDirs, generateSessionId, putObject } from "@viberevert/core";
 import { createCheckpoint } from "@viberevert/git";
 import {
   type ActiveSessionLock,
+  CONTRIBUTION_FILE_SCHEMA_VERSION,
+  deriveChangeGroupId,
   type EvaluationSnapshot,
   ReportFileSchema,
   SESSION_STATE_SCHEMA_VERSION,
+  type SessionContributionEntry,
+  type SessionContributionFile,
   type SessionState,
 } from "@viberevert/session-format";
 import { Cli } from "clipanion";
@@ -205,6 +211,24 @@ async function makeSession(
     task?: string;
     markAsActive?: boolean;
     evaluationSnapshot?: EvaluationSnapshot;
+    /**
+     * Terminal state (M 0.8.0 step 8 B3). `ended_at` and `after_status_path`
+     * are both-or-neither by schema refine, so `after-status.txt` is written
+     * whenever this is supplied. `after_status_z_path` stays absent: it is
+     * optional and nothing here reads it.
+     *
+     * `entries` is a FACTORY because `change_group_id` derives from the
+     * session id and the contribution header must carry the session's real
+     * ids -- only makeSession knows those. The caller supplies the interesting
+     * payload; makeSession owns artifact identity and the digest binding.
+     */
+    ended?: {
+      endedAt: string;
+      contribution?: {
+        entries: (sessionId: string) => Promise<readonly SessionContributionEntry[]>;
+        detectedFrameworksAtEnd?: readonly string[];
+      };
+    };
   } = {},
 ): Promise<{ sessionId: string; checkpointId: string }> {
   const sessionId = generateSessionId();
@@ -218,6 +242,50 @@ async function makeSession(
   });
   const checkpointId = ckptResult.checkpointId;
   const startedAt = "2026-01-01T00:00:00Z";
+
+  // Terminal fields, built BEFORE the session state so the contribution's
+  // bytes exist and its digest is known when session.json is written. That
+  // mirrors the shipped publication order: the artifact lands before the
+  // session.json that names it.
+  let endedFields: Partial<SessionState> = {};
+  if (opts.ended !== undefined) {
+    await writeFile(join(sessionDir, "after-status.txt"), "");
+    endedFields = {
+      ended_at: opts.ended.endedAt,
+      after_status_path: `.viberevert/sessions/${sessionId}/after-status.txt`,
+    };
+    if (opts.ended.contribution !== undefined) {
+      const entries = await opts.ended.contribution.entries(sessionId);
+      const contribution: SessionContributionFile = {
+        schema_version: CONTRIBUTION_FILE_SCHEMA_VERSION,
+        session_id: sessionId,
+        checkpoint_id: checkpointId,
+        before_head_sha: "0".repeat(40),
+        after_head_sha: "1".repeat(40),
+        captured_at: startedAt,
+        ended_at: opts.ended.endedAt,
+        ...(opts.ended.contribution.detectedFrameworksAtEnd !== undefined
+          ? {
+              detected_frameworks_at_end: [
+                ...opts.ended.contribution.detectedFrameworksAtEnd,
+              ].sort(),
+            }
+          : {}),
+        entries: [...entries],
+      };
+      // Serialize ONCE and hash THOSE bytes. The binding is to the exact
+      // persisted bytes, never a re-serialization (architectural lock #8), so
+      // the digest must come from the very buffer that gets written.
+      const bytes = Buffer.from(JSON.stringify(contribution, null, 2), "utf8");
+      await writeFile(join(sessionDir, "contribution.json"), bytes);
+      endedFields = {
+        ...endedFields,
+        contribution_path: `.viberevert/sessions/${sessionId}/contribution.json`,
+        contribution_sha256: createHash("sha256").update(bytes).digest("hex"),
+      };
+    }
+  }
+
   const sessionState: SessionState = {
     schema_version: SESSION_STATE_SCHEMA_VERSION,
     session_id: sessionId,
@@ -234,6 +302,7 @@ async function makeSession(
     ...(opts.evaluationSnapshot !== undefined
       ? { evaluation_snapshot: opts.evaluationSnapshot }
       : {}),
+    ...endedFields,
   };
   await writeFile(join(sessionDir, "session.json"), JSON.stringify(sessionState, null, 2));
   await writeFile(join(sessionDir, "before-status.txt"), "");
@@ -277,6 +346,41 @@ async function findAdHocReportPath(repoRoot: string): Promise<string> {
 // =============================================================================
 // Tests
 // =============================================================================
+
+/**
+ * The only path-classifier rule matching `app/Http/Middleware/**`, and it is
+ * framework-gated on `laravel`. Shared by sections 7 and 8, which both use its
+ * presence or absence to observe which framework set the engine received.
+ */
+const LARAVEL_MIDDLEWARE_ID = "path-classifier.laravel.middleware";
+
+/**
+ * A resolved snapshot with every check ENABLED, parameterized on the one field
+ * that is not a straight copy in resolveChecksConfigForBase.
+ *
+ * Module-scoped rather than per-section: duplicating the complete
+ * checks-toggle map would mean a future ChecksToggleKey addition had to be
+ * fixed in two places, and one of them would be missed.
+ */
+function makeSnapshot(frameworks: EvaluationSnapshot["frameworks"]): EvaluationSnapshot {
+  return {
+    risk_block_on: "critical",
+    risk_warn_on: "medium",
+    checks: {
+      secrets: true,
+      dependencies: true,
+      migrations: true,
+      auth: true,
+      payments: true,
+      infra: true,
+      tests: true,
+      scope_expansion: true,
+    },
+    frameworks,
+    rollback_exclude: [],
+    verify_commands: [],
+  };
+}
 
 describe("viberevert check", () => {
   // ---------------------------------------------------------------------------
@@ -499,33 +603,9 @@ describe("viberevert check", () => {
   // falling through to defaults.
 
   describe("Section 7 -- config-source authority (M 0.8.0 step 8)", () => {
-    const LARAVEL_MIDDLEWARE_ID = "path-classifier.laravel.middleware";
-
     /** Live config disabling the secrets check. */
     async function writeSecretsDisabledConfig(): Promise<void> {
       await writeFile(join(tmpRoot, ".viberevert.yml"), "version: 1\nchecks:\n  secrets: false\n");
-    }
-
-    /** A resolved snapshot with every check ENABLED, parameterized on the
-     *  one field that is not a straight copy in resolveChecksConfigForBase. */
-    function makeSnapshot(frameworks: EvaluationSnapshot["frameworks"]): EvaluationSnapshot {
-      return {
-        risk_block_on: "critical",
-        risk_warn_on: "medium",
-        checks: {
-          secrets: true,
-          dependencies: true,
-          migrations: true,
-          auth: true,
-          payments: true,
-          infra: true,
-          tests: true,
-          scope_expansion: true,
-        },
-        frameworks,
-        rollback_exclude: [],
-        verify_commands: [],
-      };
     }
 
     /** Laravel detection is existence-only: composer.json AND artisan. */
@@ -646,6 +726,215 @@ describe("viberevert check", () => {
       // exclusions to hide them would couple this test to rollback-exclude
       // behavior.
       expect(ids).toContain(LARAVEL_MIDDLEWARE_ID);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Section 8 -- Contribution-backed ended sessions (M 0.8.0 step 8 B3)
+  // ---------------------------------------------------------------------------
+  //
+  // An ended session with BOTH an evaluation snapshot and a contribution stops
+  // diffing checkpoint-vs-live and reads its frozen contribution instead. Each
+  // test is built so the two branches give OPPOSITE answers, which is what
+  // makes "which branch ran" observable rather than inferred.
+  //
+  // Tests 1, 2, 4 and 6 keep the live tree clean so contribution-sourced
+  // evidence is the only possible source. Tests 3 and 5 deliberately do the
+  // reverse -- they LOAD the tree -- because they prove the contribution-backed
+  // path does NOT consult it, and that the legacy path still does.
+
+  describe("Section 8 -- contribution-backed ended sessions (M 0.8.0 step 8 B3)", () => {
+    const ENDED_AT = "2026-02-01T00:00:00Z";
+    const SECRET_LINE = `sk${"_live_"}TESTFIXTUREONLY1234567890ABCDEF`;
+
+    /**
+     * A contribution entry for a newly added file whose single hunk ADDS
+     * `lines`. Those lines become `addedLines` through parseRawDiffToInputs,
+     * which is what the content detectors scan.
+     *
+     * The after-state's bytes are seeded into the object store so the fixture
+     * carries a coherent recovery graph: an `added` entry should not claim the
+     * file is absent afterwards. B3 never dereferences `content_ref`, so this
+     * is fixture hygiene rather than something Section 8 asserts on.
+     */
+    async function addedFileEntry(
+      sessionId: string,
+      path: string,
+      lines: readonly string[],
+    ): Promise<SessionContributionEntry> {
+      const contentRef = await putObject(tmpRoot, Buffer.from(`${lines.join("\n")}\n`, "utf8"));
+      return {
+        path,
+        operation: "added",
+        facets: ["content_changed"],
+        change_group_id: deriveChangeGroupId(sessionId, [path]),
+        before: { worktree: { kind: "absent" }, index: { kind: "absent" } },
+        after: {
+          worktree: { kind: "regular", content_ref: contentRef, executable: false },
+          index: { kind: "absent" },
+        },
+        content_delta: {
+          kind: "text",
+          hunks: [
+            {
+              old_start: 0,
+              old_lines: 0,
+              new_start: 1,
+              new_lines: lines.length,
+              lines: lines.map((text) => ({ kind: "add" as const, text })),
+            },
+          ],
+        },
+      };
+    }
+
+    async function reportFor(sessionId: string): Promise<{
+      exitCode: number;
+      stderr: string;
+      ids: readonly string[];
+    }> {
+      const result = await runCheck(["--since", sessionId, "--json"]);
+      if (result.exitCode === 1) {
+        return { exitCode: 1, stderr: result.stderr, ids: [] };
+      }
+      const file = ReportFileSchema.parse(JSON.parse(result.stdout));
+      return {
+        exitCode: result.exitCode,
+        stderr: result.stderr,
+        ids: file.report.results.map((r) => r.id),
+      };
+    }
+
+    it("snapshot + contribution: the FROZEN contribution drives the diff", async () => {
+      const { sessionId } = await makeSession(tmpRoot, {
+        evaluationSnapshot: makeSnapshot({ mode: "auto", detected_at_start: [] }),
+        ended: {
+          endedAt: ENDED_AT,
+          contribution: {
+            entries: async (sid) => [await addedFileEntry(sid, "notes.txt", [SECRET_LINE])],
+          },
+        },
+      });
+      // The live tree has NO secret. A checkpoint-vs-live diff would find
+      // nothing, so exit 2 can only come from the contribution's own hunk.
+      const { exitCode, ids } = await reportFor(sessionId);
+      expect(exitCode).toBe(2);
+      // Asserting the finding ID, not just the exit code: that proves the
+      // blocker is the contribution's secret rather than some unrelated
+      // critical finding the fixture happened to introduce.
+      expect(ids).toContain("secrets.regex");
+    });
+
+    it("snapshot + contribution: detected_frameworks_at_end drives auto frameworks", async () => {
+      // No composer.json / artisan anywhere: current-tree detection sees NO
+      // Laravel. Only the persisted end observation can activate its rules.
+      const { sessionId } = await makeSession(tmpRoot, {
+        evaluationSnapshot: makeSnapshot({ mode: "auto", detected_at_start: [] }),
+        ended: {
+          endedAt: ENDED_AT,
+          contribution: {
+            detectedFrameworksAtEnd: ["laravel"],
+            entries: async (sid) => [
+              await addedFileEntry(sid, "app/Http/Middleware/Foo.php", ["<?php"]),
+            ],
+          },
+        },
+      });
+
+      const { ids } = await reportFor(sessionId);
+      expect(ids).toContain(LARAVEL_MIDDLEWARE_ID);
+    });
+
+    it("snapshot + contribution with NO end observation: start-only, no current-tree fallback", async () => {
+      // INVERSE of the previous test: Laravel IS detectable on disk right now.
+      // If the contribution-backed branch ever fell back to
+      // detectFrameworks(repoRoot), the middleware rule would fire.
+      await writeFile(join(tmpRoot, "composer.json"), '{"name":"test/app"}\n');
+      await writeFile(join(tmpRoot, "artisan"), "#!/usr/bin/env php\n");
+      const { sessionId } = await makeSession(tmpRoot, {
+        evaluationSnapshot: makeSnapshot({ mode: "auto", detected_at_start: [] }),
+        ended: {
+          endedAt: ENDED_AT,
+          contribution: {
+            // detectedFrameworksAtEnd omitted: this session ended before the
+            // observation was captured. Absent means "never observed", and the
+            // union degrades to detected_at_start alone.
+            entries: async (sid) => [
+              await addedFileEntry(sid, "app/Http/Middleware/Foo.php", ["<?php"]),
+            ],
+          },
+        },
+      });
+
+      const { ids } = await reportFor(sessionId);
+      expect(ids).not.toContain(LARAVEL_MIDDLEWARE_ID);
+    });
+
+    it("NO snapshot + contribution: the contribution is ignored, evaluation stays legacy", async () => {
+      // Contribution capture (step 4) shipped BEFORE the evaluation snapshot
+      // (step 5), so this state is real history, not a contrivance. Consuming
+      // the frozen diff without the frozen policy would pair evidence from two
+      // different evaluation universes.
+      const { sessionId } = await makeSession(tmpRoot, {
+        // No evaluationSnapshot, by omission rather than post-hoc stripping.
+        ended: {
+          endedAt: ENDED_AT,
+          contribution: {
+            entries: async (sid) => [await addedFileEntry(sid, "notes.txt", [SECRET_LINE])],
+          },
+        },
+      });
+
+      // Live tree is clean, so the legacy checkpoint-vs-live path finds
+      // nothing. Exit 2 here would mean the contribution had been consumed.
+      const { exitCode } = await reportFor(sessionId);
+      expect(exitCode).toBe(0);
+    });
+
+    it("ended snapshot with NO contribution stays on checkpoint-vs-live", async () => {
+      const { sessionId } = await makeSession(tmpRoot, {
+        evaluationSnapshot: makeSnapshot({ mode: "auto", detected_at_start: [] }),
+        ended: { endedAt: ENDED_AT },
+      });
+      // Blocker introduced in the LIVE tree after the checkpoint. Only a
+      // checkpoint-vs-live diff can see it, so this pins that an ended
+      // lifecycle alone does not switch the diff source.
+      await stageBlockerFixture(tmpRoot);
+
+      const { exitCode, ids } = await reportFor(sessionId);
+      expect(exitCode).toBe(2);
+      expect(ids).toContain("secrets.regex");
+    });
+
+    it("tampered contribution bytes refuse cleanly with the digest-mismatch error", async () => {
+      const { sessionId } = await makeSession(tmpRoot, {
+        evaluationSnapshot: makeSnapshot({ mode: "auto", detected_at_start: [] }),
+        ended: {
+          endedAt: ENDED_AT,
+          contribution: {
+            entries: async (sid) => [await addedFileEntry(sid, "notes.txt", [SECRET_LINE])],
+          },
+        },
+      });
+
+      // Append harmless whitespace AFTER the digest was recorded. The artifact
+      // stays valid JSON and schema-valid, so the ONLY failing layer is the
+      // raw-byte SHA binding -- malformed JSON cannot become an alternate
+      // reason for the refusal.
+      const contributionPath = join(
+        tmpRoot,
+        ".viberevert",
+        "sessions",
+        sessionId,
+        "contribution.json",
+      );
+      await writeFile(contributionPath, `${await readFile(contributionPath, "utf8")}\n`);
+
+      const result = await runCheck(["--since", sessionId]);
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("Contribution digest mismatch");
+      // Surfaced through handleKnownError's verbatim arm, not as a crash.
+      expect(result.stdout).toBe("");
     });
   });
 });

@@ -326,6 +326,11 @@ describe("resolveCheckBase", () => {
         expect(cb.sinceKind).toBe("session_id");
         expect(cb.sinceRef).toBe(sessionId);
         expect(cb.reportId).toBe(sessionId); // D31 identity
+        // Explicit session identity (M 0.8.0 step 8 B3). Equal to sinceRef and
+        // reportId here by construction, but asserted on its own because the
+        // contribution evidence chain binds against THIS field, while the
+        // other two are resolution provenance and reporting identity.
+        expect(asSessionBoundBase(base).sessionId).toBe(sessionId);
         expect(cb.checkpointId).toBe(checkpointId);
         expect(cb.startedAt).toBe(SESSION_STARTED_AT);
         expect(cb.task).toBe("fix the bug");
@@ -447,6 +452,8 @@ describe("resolveCheckBase", () => {
         expect(cb.sinceKind).toBe("active_session"); // NOT session_id
         expect(cb.sinceRef).toBe(sessionId); // derived from active lock
         expect(cb.reportId).toBe(sessionId);
+        // Present on the active-session arm too, not only explicit --since.
+        expect(asSessionBoundBase(base).sessionId).toBe(sessionId);
         expect(cb.checkpointId).toBe(checkpointId);
         expect(cb.task).toBe("active task");
       } finally {

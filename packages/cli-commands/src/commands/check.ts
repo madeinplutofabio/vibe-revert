@@ -127,8 +127,12 @@ import {
   ConfigNotFoundError,
   ConfigParseError,
   ConfigValidationError,
+  ContributionBindingError,
+  ContributionDigestMismatchError,
+  ContributionNotFoundError,
   detectFrameworks,
   loadConfig,
+  loadVerifiedSessionContribution,
   mergeChecksConfig,
   RepoRootNotFoundError,
   type ResolvedChecksConfig,
@@ -146,7 +150,12 @@ import {
   type RawDiff,
 } from "@viberevert/git";
 import { type RenderInput, renderJson, renderTerminal } from "@viberevert/reporters";
-import { normalizeStringArray, type ReportFile, type RiskLevel } from "@viberevert/session-format";
+import {
+  normalizeStringArray,
+  type ReportFile,
+  type RiskLevel,
+  type SessionContributionFile,
+} from "@viberevert/session-format";
 import { Command, Option } from "clipanion";
 
 import { renameDirAtomic, writeFileAtomic } from "../atomic.js";
@@ -154,6 +163,7 @@ import {
   applyDiffPathExcludes,
   buildReportFile,
   computeRollbackAvailable,
+  contributionToRawDiff,
   parseRawDiffToInputs,
 } from "../check-orchestration.js";
 import {
@@ -201,6 +211,63 @@ function shouldExitWithBlocker(results: readonly CheckResult[], blockOn: RiskLev
 // =============================================================================
 
 /**
+ * Load this base's persisted contribution, ONCE, or `undefined` if the check
+ * should not be contribution-backed.
+ *
+ * Called before config resolution so a single verified object drives BOTH the
+ * framework observation and the diff. Loading it lazily in two places would
+ * mean two reads of the same evidence with a window in which they could
+ * disagree; deriving frameworks from the live tree while diffing the
+ * contribution would reintroduce exactly the hybrid step 8 exists to remove.
+ *
+ * A contribution becomes the frozen changed-file universe ONLY when the same
+ * session also carries its frozen evaluation policy. Contribution capture
+ * (step 4) shipped BEFORE the evaluation snapshot (step 5), so a real session
+ * can hold a contribution and no snapshot. Consuming it would pair a frozen
+ * diff with live config and live framework detection -- the same hybrid
+ * pointed a different way. Those sessions stay wholly on the legacy path.
+ *
+ * `undefined` therefore covers four legitimate states:
+ *   - the base is not session-bound;
+ *   - the session is still active;
+ *   - the session has no evaluation snapshot, even if a contribution exists;
+ *   - the session ended snapshot-backed but wrote no contribution.
+ *
+ * It NEVER means the evidence was unreadable. Once a snapshot-backed binding
+ * exists, every B2 verification failure throws and reaches handleKnownError;
+ * nothing is downgraded to `undefined`.
+ */
+async function loadContributionForBase(
+  base: ResolvedCheckBase,
+  repoRoot: string,
+): Promise<SessionContributionFile | undefined> {
+  if (base.mode !== "checkpoint" || base.kind !== "session_bound") {
+    return undefined;
+  }
+  if (base.sessionContext.evaluationSnapshot === undefined) {
+    return undefined;
+  }
+
+  const lifecycle = base.sessionContext.lifecycle;
+  if (lifecycle.state !== "ended" || lifecycle.contribution === undefined) {
+    return undefined;
+  }
+
+  return loadVerifiedSessionContribution(repoRoot, {
+    path: lifecycle.contribution.path,
+    sha256: lifecycle.contribution.sha256,
+    expected: {
+      // base.sessionId, never reportId or sinceRef: those equal it today by
+      // D31 and by resolution provenance, but only this field MEANS the
+      // owning session, and the evidence chain binds against meaning.
+      sessionId: base.sessionId,
+      checkpointId: base.checkpointId,
+      endedAt: lifecycle.endedAt,
+    },
+  });
+}
+
+/**
  * Choose the authoritative check configuration FROM the resolved base.
  *
  *   session-bound + evaluation snapshot -> the session-start snapshot
@@ -239,17 +306,32 @@ function shouldExitWithBlocker(results: readonly CheckResult[], blockOn: RiskLev
  * framework introduced mid-session activates its rules, and deleting a
  * framework signature cannot make its rules disappear.
  *
- * TRANSITIONAL (step 8 slice A): an ended session is still checked as
- * checkpoint-vs-live-tree, so observing the current tree is coherent with the
- * file universe being evaluated -- it is not an approximation of the ended
- * contract. Slice B moves the changed-file universe AND the framework
- * observation to the persisted contribution together, at which point
- * `detected_frameworks_at_end` becomes the correct source and no ended-session
- * current-tree detection should remain.
+ * The `auto` observation always describes the file universe ACTUALLY being
+ * evaluated, which is what keeps the two halves coherent:
+ *
+ *   ended + contribution -> detected_at_start UNION
+ *                           contribution.detected_frameworks_at_end
+ *   ended + contribution, field absent -> detected_at_start ALONE. That
+ *                           session ended before the observation was captured.
+ *                           Falling back to the current tree would make a
+ *                           frozen evaluation depend on whatever happened
+ *                           afterwards.
+ *   otherwise (active, or any session on the legacy path)
+ *                        -> detected_at_start UNION detectFrameworks(repoRoot),
+ *                           because those bases still diff against the LIVE
+ *                           tree, so a live observation matches their universe.
+ *
+ * `detectFrameworks` is never called on the contribution-backed branch.
+ *
+ * `verifiedContribution` is non-undefined only for a SNAPSHOT-BACKED session,
+ * enforced by loadContributionForBase, so the contribution-backed branch can
+ * never pair a frozen observation with live config. The two frozen halves
+ * arrive together or not at all.
  */
 async function resolveChecksConfigForBase(
   base: ResolvedCheckBase,
   repoRoot: string,
+  verifiedContribution: SessionContributionFile | undefined,
 ): Promise<ResolvedChecksConfig> {
   const snapshot =
     base.mode === "checkpoint" && base.kind === "session_bound"
@@ -262,7 +344,9 @@ async function resolveChecksConfigForBase(
         ? [...snapshot.frameworks.values]
         : normalizeStringArray([
             ...snapshot.frameworks.detected_at_start,
-            ...(await detectFrameworks(repoRoot)),
+            ...(verifiedContribution !== undefined
+              ? (verifiedContribution.detected_frameworks_at_end ?? [])
+              : await detectFrameworks(repoRoot)),
           ]);
     return {
       riskBlockOn: snapshot.risk_block_on,
@@ -406,7 +490,15 @@ function handleKnownError(stderr: { write(s: string): unknown }, err: unknown): 
     err instanceof CheckpointCorruptError ||
     err instanceof DiffRefNotFoundError ||
     err instanceof CommitRefNotFoundError ||
-    err instanceof RuntimeEnvInvalidError
+    err instanceof RuntimeEnvInvalidError ||
+    // M 0.8.0 step 8 B3: the contribution evidence chain, alongside
+    // CheckpointCorruptError which is the same class of failure on the other
+    // persisted artifact. Malformed contribution JSON and schema-invalid
+    // contributions are deliberately NOT here: they stay unhandled and crash,
+    // exactly as a corrupt session.json already does.
+    err instanceof ContributionNotFoundError ||
+    err instanceof ContributionDigestMismatchError ||
+    err instanceof ContributionBindingError
   ) {
     // These error classes carry their own user-friendly, already-formatted
     // messages (with JSON.stringify hardening, shallow-clone hints,
@@ -517,11 +609,16 @@ Exit codes:
         staged: this.staged,
       });
 
+      // Step 3b: load the verified contribution ONCE. The SAME object feeds
+      // the framework observation in step 4 and the diff in step 6, so the
+      // two halves can never describe different evaluation universes.
+      const verifiedContribution = await loadContributionForBase(base, repoRoot);
+
       // Step 4 (was steps 3-4): choose the authoritative check config FROM
       // the base, merging M C defaults (D57) on the live-config path. Returns
       // a ResolvedChecksConfig with every field non-undefined (block_on,
       // warn_on, checks toggles, frameworks, rollback.exclude).
-      const resolved = await resolveChecksConfigForBase(base, repoRoot);
+      const resolved = await resolveChecksConfigForBase(base, repoRoot, verifiedContribution);
 
       // Compute the OUTPUT threshold per D38 -- distinct from the gate
       // threshold (resolved.riskBlockOn) which we use in step 13.
@@ -543,7 +640,13 @@ Exit codes:
       // warnings are non-fatal and get surfaced to stderr per D29.
       let diff: RawDiff;
       let cleanupWarnings: readonly string[];
-      if (base.mode === "git-ref") {
+      if (verifiedContribution !== undefined) {
+        // Snapshot-backed contribution: the changed-file universe is frozen
+        // evidence, so getDiffSinceCheckpoint is NOT called and no oracle
+        // worktree is built -- hence no cleanup warnings are possible.
+        diff = contributionToRawDiff(verifiedContribution);
+        cleanupWarnings = [];
+      } else if (base.mode === "git-ref") {
         const result = await getDiffSinceRef(repoRoot, base.sinceRef, {
           staged: base.stagedOnly,
         });

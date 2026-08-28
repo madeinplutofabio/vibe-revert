@@ -252,6 +252,19 @@ export type ResolvedCheckBase =
       readonly sinceKind: "session_id" | "active_session";
       readonly sinceRef: string;
       readonly sinceResolvedSha: string;
+      /**
+       * The session's own identity, carried explicitly rather than reused from
+       * `reportId` or `sinceRef`.
+       *
+       * Both currently equal the session id -- `reportId` by D31, and
+       * `sinceRef` because a session base resolves from the session id -- but
+       * neither MEANS "this session's identity". `reportId` is a reporting
+       * identity; `sinceRef` is resolution provenance. The contribution
+       * evidence chain binds against this field, and an integrity contract
+       * must not rest on an incidental equality that a future resolution form
+       * could break.
+       */
+      readonly sessionId: string;
       readonly checkpointDir: string;
       readonly checkpointId: string;
       readonly startedAt: string;
@@ -463,6 +476,7 @@ async function resolveFromSessionId(
     sinceKind,
     sinceRef: sessionId,
     sinceResolvedSha,
+    sessionId,
     checkpointDir,
     checkpointId: session.checkpoint_id,
     startedAt: session.started_at,

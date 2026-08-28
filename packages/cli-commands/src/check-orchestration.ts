@@ -58,6 +58,7 @@ import {
   loadCheckpoint,
   type RawDiff,
   type RawDiffEntry,
+  type RawDiffHunk,
 } from "@viberevert/git";
 import {
   type ChangedFile,
@@ -69,6 +70,7 @@ import {
   ReportFileSchema,
   type RiskLevel,
   SCHEMA_VERSION,
+  type SessionContributionFile,
   type SessionReport,
   type SinceKind,
 } from "@viberevert/session-format";
@@ -169,6 +171,77 @@ export function applyDiffPathExcludes(raw: RawDiff, excludePatterns: readonly st
     return true;
   });
   return { entries: filtered };
+}
+
+/**
+ * Project a verified `SessionContributionFile` into the in-memory `RawDiff`
+ * the checks pipeline already consumes (M 0.8.0 step 8 B3).
+ *
+ * This is what makes an ENDED session's check read its frozen contribution
+ * instead of diffing the checkpoint against a live tree that has moved on
+ * since the session ended.
+ *
+ * Pure and total. Reads no objects: `content_delta` carries hunks INLINE, and
+ * a PathState's `content_ref` blobs matter for restoring state, not for
+ * describing a change. Nothing here touches the object store.
+ *
+ * Three correspondences make this cast-free:
+ *
+ *   1. `operation` and `ChangedFileStatus` are the same five-member vocabulary
+ *      ("added" | "modified" | "deleted" | "renamed" | "type_changed"), which
+ *      the contribution schema states is deliberate rather than parallel. They
+ *      infer to the same union, so `status: entry.operation` needs no cast --
+ *      and if either enum ever gains a member alone, this line becomes a type
+ *      error rather than silently narrowing.
+ *
+ *   2. `content_delta`'s three arms map exactly, per the schema's own table:
+ *        text   -> isBinary false, the hunks
+ *        binary -> isBinary true,  no hunks
+ *        none   -> isBinary false, no hunks
+ *      `none` is a change with no TEXTUAL delta (a mode-only change, say), not
+ *      an absent change. `text` requires at least one hunk precisely so that
+ *      `none` and "text with zero hunks" cannot both encode one fact in a
+ *      digest-bearing artifact.
+ *
+ *   3. Hunks need an explicit field conversion, NOT structural reuse:
+ *      persisted hunks are snake_case (`old_start`) like every other persisted
+ *      field, while git's in-memory `RawDiffHunk` is camelCase (`oldStart`).
+ *      The contribution schema documents this boundary and expects producers
+ *      to convert at it; this is the read-side counterpart. Line elements need
+ *      no conversion: `DiffLine` and `LineChunk` are both
+ *      `{ kind: "add" | "remove" | "context"; text: string }`.
+ *
+ * ORDER IS PRESERVED, never recomputed. Contribution entries are sorted by
+ * path ascending and duplicate-free by schema refine, and `RawDiff` entries
+ * carry the same invariant, so a plain `map` already satisfies it. Re-sorting
+ * would be churn against report ordering for no gain.
+ */
+export function contributionToRawDiff(contribution: SessionContributionFile): RawDiff {
+  return {
+    entries: contribution.entries.map((entry): RawDiffEntry => {
+      const delta = entry.content_delta;
+      const hunks: readonly RawDiffHunk[] =
+        delta.kind === "text"
+          ? delta.hunks.map((h) => ({
+              oldStart: h.old_start,
+              oldLines: h.old_lines,
+              newStart: h.new_start,
+              newLines: h.new_lines,
+              lines: h.lines,
+            }))
+          : [];
+      return {
+        path: entry.path,
+        // Conditional spread: `previous_path` is optional on RawDiffEntry and
+        // exactOptionalPropertyTypes makes an explicit `undefined` a different
+        // thing from absence.
+        ...(entry.previous_path !== undefined ? { previous_path: entry.previous_path } : {}),
+        status: entry.operation,
+        isBinary: delta.kind === "binary",
+        hunks,
+      };
+    }),
+  };
 }
 
 // =============================================================================

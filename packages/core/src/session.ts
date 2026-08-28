@@ -876,17 +876,17 @@ export async function loadVerifiedSessionContribution(
   // artifact from a different terminal event.
   if (contribution.session_id !== binding.expected.sessionId) {
     throw new ContributionBindingError(
-      `contribution at ${binding.path} belongs to session ${contribution.session_id}, not ${binding.expected.sessionId}`,
+      `Contribution at ${binding.path} belongs to session ${contribution.session_id}, not ${binding.expected.sessionId}`,
     );
   }
   if (contribution.checkpoint_id !== binding.expected.checkpointId) {
     throw new ContributionBindingError(
-      `contribution at ${binding.path} names checkpoint ${contribution.checkpoint_id}, not ${binding.expected.checkpointId}`,
+      `Contribution at ${binding.path} names checkpoint ${contribution.checkpoint_id}, not ${binding.expected.checkpointId}`,
     );
   }
   if (contribution.ended_at !== binding.expected.endedAt) {
     throw new ContributionBindingError(
-      `contribution at ${binding.path} records ended_at ${contribution.ended_at}, not ${binding.expected.endedAt}`,
+      `Contribution at ${binding.path} records ended_at ${contribution.ended_at}, not ${binding.expected.endedAt}`,
     );
   }
 
