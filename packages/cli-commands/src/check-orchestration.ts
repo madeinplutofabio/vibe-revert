@@ -81,8 +81,12 @@ import { resolveNowForCliTimestamp, resolveSinceResolvedShaForReport } from "./r
 // =============================================================================
 // Picomatch options (LOCKED -- identical across git/checks/cli)
 // =============================================================================
-
-const PICOMATCH_OPTIONS = {
+//
+// Exported so selection-resolver.ts shares this exact object rather than
+// declaring a fourth copy. A selector deciding which change groups get
+// restored and applyDiffPathExcludes deciding which paths get checked must not
+// silently disagree about what a glob means.
+export const PICOMATCH_OPTIONS = {
   dot: true,
   nocase: false,
   posixSlashes: true,
