@@ -608,6 +608,79 @@ export async function observePathState(
 }
 
 // ============================================================================
+// Structural equality (explicit, never JSON.stringify)
+// ============================================================================
+//
+// Key order in a Zod-parsed object follows its input, so stringify-based
+// comparison would be order-sensitive on values this code compares for
+// EQUALITY to decide whether the world moved. These are written out.
+//
+// Moved here from contribution.ts (M 0.8.0 step 10A) as a literal move: same
+// bodies, same semantics, no renaming. They were private to a CAPTURE module,
+// but selective restore needs the identical notion of equality for plan
+// stabilization, oracle evidence validation, the protected-domain fence, and
+// post-operation verification. Two independent definitions of "the same
+// PathState" is exactly the drift that would let the contribution fence and the
+// restore fence disagree about whether the world moved.
+//
+// Package-internal: NOT barrel-exported. Siblings import relatively.
+
+export function worktreeStateEqual(a: WorktreeState, b: WorktreeState): boolean {
+  if (a.kind !== b.kind) return false;
+  if (a.kind === "regular" && b.kind === "regular") {
+    return a.content_ref === b.content_ref && a.executable === b.executable;
+  }
+  if (a.kind === "symlink" && b.kind === "symlink") return a.target_ref === b.target_ref;
+  if (a.kind === "unsupported" && b.kind === "unsupported") return a.fs_kind === b.fs_kind;
+  return true; // absent | directory carry no further fields
+}
+
+export function indexStateEqual(a: IndexState, b: IndexState): boolean {
+  if (a.kind !== b.kind) return false;
+  if (a.kind === "entry" && b.kind === "entry") return a.mode === b.mode && a.oid === b.oid;
+  if (a.kind === "unmerged" && b.kind === "unmerged") {
+    if (a.entries.length !== b.entries.length) return false;
+    return a.entries.every((e, i) => {
+      const other = b.entries[i];
+      return (
+        other !== undefined &&
+        e.stage === other.stage &&
+        e.mode === other.mode &&
+        e.oid === other.oid
+      );
+    });
+  }
+  return true; // absent
+}
+
+export function pathStateEqual(a: PathState, b: PathState): boolean {
+  return worktreeStateEqual(a.worktree, b.worktree) && indexStateEqual(a.index, b.index);
+}
+
+/**
+ * Membership AND value equality in one pass: the size check plus the
+ * `b.get(key)` miss together prove the key sets are identical, so a path
+ * appearing or vanishing is caught, not only a path changing.
+ *
+ * Generic rather than PathState-specific, which sits a little loosely under
+ * this filename. Its only callers compare PathState / IndexState maps, and a
+ * separate module for a four-line comparator would be worse than the mild
+ * mismatch.
+ */
+export function mapsEqual<V>(
+  a: ReadonlyMap<string, V>,
+  b: ReadonlyMap<string, V>,
+  equal: (x: V, y: V) => boolean,
+): boolean {
+  if (a.size !== b.size) return false;
+  for (const [key, value] of a) {
+    const other = b.get(key);
+    if (other === undefined || !equal(value, other)) return false;
+  }
+  return true;
+}
+
+// ============================================================================
 // Test-only exports (NOT in barrel; _*ForTests convention)
 // ============================================================================
 

@@ -158,7 +158,14 @@ import {
   splitNulList,
 } from "./git-cli.js";
 import { isViberevertStorePath, repoRelativePathSafetyError } from "./path-safety.js";
-import { type IndexSnapshot, observePathState, readIndexSnapshot } from "./path-state.js";
+import {
+  type IndexSnapshot,
+  indexStateEqual,
+  mapsEqual,
+  observePathState,
+  pathStateEqual,
+  readIndexSnapshot,
+} from "./path-state.js";
 
 // ============================================================================
 // Constants
@@ -374,44 +381,13 @@ function normalizeObservationPaths(paths: readonly string[]): readonly string[] 
 }
 
 // ============================================================================
-// Structural equality (explicit, never JSON.stringify)
+// Structural equality
 // ============================================================================
 //
-// Key order in a Zod-parsed object follows its input, so stringify-based
-// comparison would be order-sensitive on values this code compares for
-// EQUALITY to decide whether the world moved. These are written out.
-
-function worktreeStateEqual(a: WorktreeState, b: WorktreeState): boolean {
-  if (a.kind !== b.kind) return false;
-  if (a.kind === "regular" && b.kind === "regular") {
-    return a.content_ref === b.content_ref && a.executable === b.executable;
-  }
-  if (a.kind === "symlink" && b.kind === "symlink") return a.target_ref === b.target_ref;
-  if (a.kind === "unsupported" && b.kind === "unsupported") return a.fs_kind === b.fs_kind;
-  return true; // absent | directory carry no further fields
-}
-
-function indexStateEqual(a: IndexState, b: IndexState): boolean {
-  if (a.kind !== b.kind) return false;
-  if (a.kind === "entry" && b.kind === "entry") return a.mode === b.mode && a.oid === b.oid;
-  if (a.kind === "unmerged" && b.kind === "unmerged") {
-    if (a.entries.length !== b.entries.length) return false;
-    return a.entries.every((e, i) => {
-      const other = b.entries[i];
-      return (
-        other !== undefined &&
-        e.stage === other.stage &&
-        e.mode === other.mode &&
-        e.oid === other.oid
-      );
-    });
-  }
-  return true; // absent
-}
-
-function pathStateEqual(a: PathState, b: PathState): boolean {
-  return worktreeStateEqual(a.worktree, b.worktree) && indexStateEqual(a.index, b.index);
-}
+// `worktreeStateEqual` / `indexStateEqual` / `pathStateEqual` / `mapsEqual`
+// moved to path-state.ts in M 0.8.0 step 10A, unchanged, so selective restore
+// shares one definition of "the same PathState" with the capture fence rather
+// than growing a second. The capture-specific comparators below stay here.
 
 function statusEntriesEqual(a: readonly StatusEntry[], b: readonly StatusEntry[]): boolean {
   if (a.length !== b.length) return false;
@@ -428,19 +404,6 @@ function statusEntriesEqual(a: readonly StatusEntry[], b: readonly StatusEntry[]
 
 function stringArraysEqual(a: readonly string[], b: readonly string[]): boolean {
   return a.length === b.length && a.every((v, i) => v === b[i]);
-}
-
-function mapsEqual<V>(
-  a: ReadonlyMap<string, V>,
-  b: ReadonlyMap<string, V>,
-  equal: (x: V, y: V) => boolean,
-): boolean {
-  if (a.size !== b.size) return false;
-  for (const [key, value] of a) {
-    const other = b.get(key);
-    if (other === undefined || !equal(value, other)) return false;
-  }
-  return true;
 }
 
 function indexSnapshotEqual(a: IndexSnapshot, b: IndexSnapshot): boolean {

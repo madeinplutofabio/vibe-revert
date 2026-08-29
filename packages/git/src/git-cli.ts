@@ -372,6 +372,28 @@ export async function getHeadSha(repoRoot: string): Promise<string> {
 }
 
 /**
+ * Whether this repository checks out symlinks as symlinks.
+ *
+ * `git config --get --bool core.symlinks` exits 1 with empty stdout when the
+ * key is unset, and git's effective default there is symlink checkout ENABLED
+ * -- so an unset key reads as `true`, and only an explicit `false` disables.
+ *
+ * Read ONCE per selective-restore plan and frozen into the plan's capability
+ * metadata, so eligibility records the precondition it was decided under.
+ *
+ * `core.symlinks=true` is NOT proof the OS will permit symlink creation; the
+ * materializer can still fail at write time. What this answers is the known
+ * PREFLIGHT refusal condition, which is the product limitation already
+ * recognized. It is deliberately not an OS capability probe.
+ */
+export async function gitCheckoutSymlinksEnabled(repoRoot: string): Promise<boolean> {
+  const text = await runGitText(repoRoot, ["config", "--get", "--bool", "core.symlinks"], {
+    allowedExitCodes: [1],
+  });
+  return text.trim() !== "false";
+}
+
+/**
  * Returns the current branch name, or `null` if HEAD is detached.
  *
  * Uses `git symbolic-ref --quiet --short HEAD`: exits 0 with the short branch
