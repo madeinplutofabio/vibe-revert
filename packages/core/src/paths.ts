@@ -110,6 +110,30 @@ export function viberevertObjectsDir(repoRoot: string): string {
 }
 
 /**
+ * Absolute path to `.viberevert/sessions/`.
+ *
+ * ABSOLUTE ONLY, and deliberately not a companion to the repo-relative strings
+ * `session.ts` persists into artifact fields. Those use forward slashes on every
+ * platform because they are validated by `isSafeStoredRelativePath` and written
+ * into `session.json`; `join` emits backslashes on Windows. The two forms answer
+ * different questions and must not be unified.
+ */
+export function sessionsDir(repoRoot: string): string {
+  return join(viberevertDir(repoRoot), "sessions");
+}
+
+/**
+ * Absolute path to one session's directory. Pure path-join; existence unchecked.
+ *
+ * Package-internal: deliberately NOT re-exported from the core barrel. Only
+ * `core` builds this convention today, and the selective rollback artifacts in
+ * step 10E build on it from inside the same package.
+ */
+export function sessionDir(repoRoot: string, sessionId: string): string {
+  return join(sessionsDir(repoRoot), sessionId);
+}
+
+/**
  * Creates the standard .viberevert/ subdirectories under `repoRoot`:
  * sessions/, checkpoints/, reports/. Idempotent (uses `recursive: true`).
  *

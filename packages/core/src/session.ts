@@ -114,6 +114,7 @@ import {
   SessionStateSchema,
 } from "@viberevert/session-format";
 import { renameDirAtomic, writeFileAtomic } from "./atomic.js";
+import { sessionDir, sessionsDir } from "./paths.js";
 
 // =============================================================================
 // Constants
@@ -469,8 +470,8 @@ export async function startSession(opts: StartSessionOpts): Promise<void> {
     throw new SessionAlreadyActiveError(existing);
   }
 
-  const sessionsDirAbs = join(opts.repoRoot, VIBEREVERT_DIR, SESSIONS_SUBDIR);
-  const finalSessionDirAbs = join(sessionsDirAbs, opts.sessionId);
+  const sessionsDirAbs = sessionsDir(opts.repoRoot);
+  const finalSessionDirAbs = sessionDir(opts.repoRoot, opts.sessionId);
   const activeLockPathAbs = join(opts.repoRoot, VIBEREVERT_DIR, ACTIVE_SESSION_LOCK_FILENAME);
 
   const sessionDirRel = `${SESSIONS_DIR_REL}/${opts.sessionId}`;
@@ -672,7 +673,7 @@ export async function endSession(opts: EndSessionOpts): Promise<void> {
   // re-serialization of `contribution` (architectural lock #8).
   const contributionSha256 = createHash("sha256").update(opts.contributionBytes).digest("hex");
 
-  const sessionDirAbs = join(opts.repoRoot, VIBEREVERT_DIR, SESSIONS_SUBDIR, lock.session_id);
+  const sessionDirAbs = sessionDir(opts.repoRoot, lock.session_id);
   const sessionJsonAbs = join(sessionDirAbs, SESSION_JSON_FILENAME);
   const afterStatusAbs = join(sessionDirAbs, AFTER_STATUS_FILENAME);
   const afterStatusZAbs = join(sessionDirAbs, AFTER_STATUS_Z_FILENAME);
@@ -741,13 +742,7 @@ export async function loadSession(sessionId: string, repoRoot: string): Promise<
     );
   }
 
-  const sessionJsonAbs = join(
-    repoRoot,
-    VIBEREVERT_DIR,
-    SESSIONS_SUBDIR,
-    sessionId,
-    SESSION_JSON_FILENAME,
-  );
+  const sessionJsonAbs = join(sessionDir(repoRoot, sessionId), SESSION_JSON_FILENAME);
 
   let raw: string;
   try {
@@ -927,7 +922,7 @@ export async function loadVerifiedSessionContribution(
  * (active-marker rendering, warnings rendering).
  */
 export async function listSessions(repoRoot: string): Promise<ListSessionsResult> {
-  const sessionsDirAbs = join(repoRoot, VIBEREVERT_DIR, SESSIONS_SUBDIR);
+  const sessionsDirAbs = sessionsDir(repoRoot);
 
   let entries: string[];
   try {
