@@ -141,7 +141,8 @@ const CONTRIBUTION_FILENAME = "contribution.json";
 const COMMANDS_LOG_FILENAME = "commands.log";
 
 /** Matches `sess_<26-char Crockford base32 ULID>`. */
-const SESSION_DIR_NAME_RE = /^sess_[0-9A-HJKMNP-TV-Z]{26}$/;
+/** Package-internal: also guards path construction in `rollback-attempt.ts`. */
+export const SESSION_DIR_NAME_RE = /^sess_[0-9A-HJKMNP-TV-Z]{26}$/;
 
 // =============================================================================
 // Public types
