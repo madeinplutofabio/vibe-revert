@@ -57,7 +57,9 @@ import { observePathState, readIndexSnapshot } from "../src/path-state.js";
 import {
   ABSENT_PATH_STATE,
   derivePhysicalCandidates,
+  deriveSelectiveTopology,
   planSelectiveRestore,
+  type SelectiveRestoreClassification,
   type SelectiveRestorePlan,
 } from "../src/restore-selective.js";
 
@@ -1144,5 +1146,112 @@ describe("planSelectiveRestore -- projected index D/F topology (C2)", () => {
     } finally {
       await repo.cleanup();
     }
+  });
+});
+
+// =============================================================================
+// Section C: the shared derivation seam (10B)
+// =============================================================================
+//
+// `deriveSelectiveTopology` is the algebra plan stabilization reuses, so its
+// LOOKUP CONTRACT is load-bearing, not an implementation detail. The callbacks
+// are lookup-only and complete: a path the caller never gathered is an internal
+// construction error.
+//
+// The helper cannot detect a callback that silently returns `[]` or invents an
+// absent state -- from inside, that is indistinguishable from a genuinely empty
+// directory. So what these cases prove is narrower and exactly right: a
+// callback that DOES raise is propagated rather than swallowed or converted
+// into absence. The planner's own callbacks raise, and stabilization's must too.
+
+describe("deriveSelectiveTopology lookup contract", () => {
+  const DIRECTORY_STATE: PathState = {
+    worktree: { kind: "directory" },
+    index: { kind: "absent" },
+  };
+  const regularState = (content: string): PathState => ({
+    worktree: { kind: "regular", content_ref: sha256(content), executable: false },
+    index: { kind: "absent" },
+  });
+
+  const planned = (
+    path: string,
+    observed: PathState,
+    expectedBefore: PathState,
+  ): SelectiveRestoreClassification => ({
+    path,
+    changeGroupId: "cg_seam",
+    expectedBefore,
+    expectedAfter: observed,
+    observed,
+    outcome: { kind: "planned", disposition: "restore_required" },
+  });
+
+  /** Map-backed and throwing on miss, exactly as the planner builds them. */
+  const lookups = (
+    descendants: ReadonlyMap<string, readonly { path: string; kind: "directory" | "leaf" }[]>,
+    ancestors: ReadonlyMap<string, PathState>,
+  ) => ({
+    descendantsOf: (path: string) => {
+      const found = descendants.get(path);
+      if (found === undefined) throw new Error(`descendants of "${path}" were never gathered`);
+      return found;
+    },
+    ancestorStateOf: (path: string) => {
+      const found = ancestors.get(path);
+      if (found === undefined) throw new Error(`ancestor state for "${path}" was never gathered`);
+      return found;
+    },
+  });
+
+  // A destructive root: currently a directory, restoring to a regular file, so
+  // C1a must ask for its descendants.
+  const destructiveInputs = [planned("d", DIRECTORY_STATE, regularState("was a file\n"))];
+
+  // A write whose BEFORE worktree is present under a non-classification
+  // ancestor, so C1b must ask for `a`'s state.
+  const ancestorInputs = [planned("a/b.txt", ABSENT_PATH_STATE, regularState("restored\n"))];
+
+  it("28: an ungathered descendant root propagates out of the derivation", () => {
+    expect(() =>
+      deriveSelectiveTopology({
+        classifications: destructiveInputs,
+        ...lookups(new Map(), new Map()),
+        indexPopulation: new Set(),
+      }),
+    ).toThrow(/descendants of "d" were never gathered/);
+  });
+
+  it("29: an ungathered ancestor state propagates out of the derivation", () => {
+    expect(() =>
+      deriveSelectiveTopology({
+        classifications: ancestorInputs,
+        ...lookups(new Map(), new Map()),
+        indexPopulation: new Set(),
+      }),
+    ).toThrow(/ancestor state for "a" was never gathered/);
+  });
+
+  it("30: the SAME inputs derive cleanly once the lookups are complete", () => {
+    // The positive control. Without it, cases 28 and 29 could pass because the
+    // fixtures are malformed rather than because a lookup was missing.
+    const destructive = deriveSelectiveTopology({
+      classifications: destructiveInputs,
+      ...lookups(new Map([["d", []]]), new Map()),
+      indexPopulation: new Set(),
+    });
+    expect(destructive.conflicts).toEqual([]);
+    expect(destructive.operations.map((o) => o.path)).toEqual(["d"]);
+
+    const withAncestor = deriveSelectiveTopology({
+      classifications: ancestorInputs,
+      ...lookups(new Map(), new Map([["a", ABSENT_PATH_STATE]])),
+      indexPopulation: new Set(),
+    });
+    expect(withAncestor.conflicts).toEqual([]);
+    expect(withAncestor.operations.map((o) => o.path)).toEqual(["a", "a/b.txt"]);
+    expect(withAncestor.operations.find((o) => o.path === "a")?.kind).toBe(
+      "create_parent_directory",
+    );
   });
 });

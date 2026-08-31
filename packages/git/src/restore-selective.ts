@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Fabio Marcello Salvadori
 
-// Selective restore, phase 1: eligibility planning (M 0.8.0 step 10A).
+// Selective restore, phase 1: eligibility planning (M 0.8.0 step 10A/10B).
 //
 // READ-ONLY and NON-MUTATING, not mathematically pure: it observes path states,
 // reads the index, queries one git capability, and enumerates filesystem
@@ -11,6 +11,34 @@
 // Deliberately absent per the locked design: transplant, oracle construction,
 // evidence validation, the protected-domain snapshot, the fence, and the
 // attempt marker. Those are 10B/10E/10F. Nothing here is command-reachable.
+//
+// =============================================================================
+// Gather, then derive (10B)
+// =============================================================================
+//
+// The topology algebra of stages B through D is PURE given fixed observations,
+// so it lives in `deriveSelectiveTopology` and the I/O that feeds it lives in
+// `planSelectiveRestore`:
+//
+//     planSelectiveRestore   stage A, then gathers descendants and ancestor
+//                            states, then calls the derivation
+//     deriveSelectiveTopology  stages B/C1a/C1b/C2/D over lookup callbacks
+//
+// Plan stabilization (10B) runs the SAME derivation against the protected-domain
+// snapshot `S`, which is why it exists as a shared function rather than being
+// reimplemented there. Two definitions of selective topology would be exactly
+// the drift the extraction exists to prevent.
+//
+// This changes WHEN observations happen, not what planning means. C1b used to
+// read an ancestor lazily on reaching it; the gather phase now reads the same
+// set up front, sequentially and in deterministic order. The planner never had
+// an atomic-observation guarantee, and it does not gain or lose one here.
+// Movement around observation windows is stabilization's problem, not this
+// function's.
+//
+// The lookup callbacks are LOOKUP-ONLY AND COMPLETE. A path the caller did not
+// gather is an internal construction error and throws. Real absence is
+// `PathState.worktree.kind === "absent"`, never a missing entry.
 //
 // =============================================================================
 // The physical transition model (design §4)
@@ -51,7 +79,7 @@ import type {
   SessionContributionFile,
 } from "@viberevert/session-format";
 
-import { enumerateDescendants } from "./fs-topology.js";
+import { type CurrentDescendant, enumerateDescendants } from "./fs-topology.js";
 import { gitCheckoutSymlinksEnabled } from "./git-cli.js";
 import {
   type IndexSnapshot,
@@ -178,12 +206,37 @@ export type SelectiveRestorePlan =
       readonly conflicts: readonly SelectiveRestoreConflict[];
     };
 
+/**
+ * Fixed observations the topology algebra runs over.
+ *
+ * Both callbacks are LOOKUP-ONLY AND COMPLETE: they answer from data the caller
+ * already gathered and throw for anything else. `deriveSelectiveTopology` cannot
+ * tell a silently-empty callback from a genuinely empty directory, so that
+ * contract lives with the caller who builds them.
+ */
+export interface SelectiveTopologyInputs {
+  readonly classifications: readonly SelectiveRestoreClassification[];
+  /** Every CURRENT descendant of a destructive-directory root. */
+  readonly descendantsOf: (path: string) => readonly CurrentDescendant[];
+  /** Observed state of an ancestor that is NOT itself a classification. */
+  readonly ancestorStateOf: (path: string) => PathState;
+  /** Every path the index currently holds an entry for. */
+  readonly indexPopulation: ReadonlySet<string>;
+}
+
+export interface SelectiveTopologyDerivation {
+  readonly topologyDependencyPaths: readonly string[];
+  /** Empty when `conflicts` is non-empty, mirroring the plan's refusal shape. */
+  readonly operations: readonly SelectiveRestoreOperation[];
+  readonly conflicts: readonly SelectiveRestoreConflict[];
+}
+
 // =============================================================================
 // Invariant accessors
 // =============================================================================
 //
 // An impossible lookup is a planner bug, never a reason to shrink the
-// executable footprint or fabricate evidence. Both throw rather than falling
+// executable footprint or fabricate evidence. It throws rather than falling
 // back, so a broken invariant cannot become a synthetic operation built on
 // invented state.
 
@@ -194,14 +247,6 @@ function requireClassification(
   const value = byPath.get(path);
   if (value === undefined) {
     throw new Error(`missing selective-restore classification for ${JSON.stringify(path)}`);
-  }
-  return value;
-}
-
-function requireObservation(observations: ReadonlyMap<string, PathState>, path: string): PathState {
-  const value = observations.get(path);
-  if (value === undefined) {
-    throw new Error(`missing ancestor observation for ${JSON.stringify(path)}`);
   }
   return value;
 }
@@ -300,6 +345,16 @@ function destroysDescendants(observed: PathState, target: PathState): boolean {
   return observed.worktree.kind === "directory" && target.worktree.kind !== "directory";
 }
 
+/** The write footprint: candidates that actually require a write, sorted. */
+function writePathsOf(
+  classifications: readonly SelectiveRestoreClassification[],
+): readonly string[] {
+  return classifications
+    .filter((c) => c.outcome.kind === "planned" && c.outcome.disposition === "restore_required")
+    .map((c) => c.path)
+    .sort();
+}
+
 // =============================================================================
 // Stage A
 // =============================================================================
@@ -336,67 +391,29 @@ function classify(
 }
 
 // =============================================================================
-// The planner
+// Stages B through D: the topology algebra
 // =============================================================================
 
-export async function planSelectiveRestore(opts: {
-  readonly repoRoot: string;
-  readonly contribution: SessionContributionFile;
-  readonly selectedChangeGroupIds: readonly string[];
-}): Promise<SelectiveRestorePlan> {
-  const { repoRoot, contribution } = opts;
-  const selected = new Set(opts.selectedChangeGroupIds);
-  // Metadata matches the Set actually used, so duplicated input cannot yield two
-  // interpretations of one selection.
-  const selectedChangeGroupIds = [...selected].sort();
-
-  // ONE capability read per plan, frozen into the result.
-  const symlinkCheckout = await gitCheckoutSymlinksEnabled(repoRoot);
-  const capabilities: SelectiveRestoreCapabilities = { symlinkCheckout };
-
-  const candidates: PhysicalRestoreCandidate[] = [];
-  for (const entry of contribution.entries) {
-    if (!selected.has(entry.change_group_id)) continue;
-    candidates.push(...derivePhysicalCandidates(entry));
-  }
-  candidates.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
-
-  const index: IndexSnapshot = await readIndexSnapshot(repoRoot);
+/**
+ * Derive the executable footprint from FIXED observations.
+ *
+ * Pure and synchronous. Shared verbatim between phase-1 planning, which feeds it
+ * live observations, and plan stabilization, which feeds it the protected-domain
+ * snapshot `S`. Neither owns a private copy of these rules.
+ *
+ * Stage-A conflicts are NOT re-reported here: the caller already holds them on
+ * the classifications. What this returns are the conflicts topology itself
+ * discovers.
+ */
+export function deriveSelectiveTopology(
+  inputs: SelectiveTopologyInputs,
+): SelectiveTopologyDerivation {
+  const { classifications, descendantsOf, ancestorStateOf, indexPopulation } = inputs;
+  const byPath = new Map(classifications.map((c) => [c.path, c] as const));
   const conflicts: SelectiveRestoreConflict[] = [];
 
-  // ---- Stage A -------------------------------------------------------------
-  const classifications: SelectiveRestoreClassification[] = [];
-  const byPath = new Map<string, SelectiveRestoreClassification>();
-  for (const candidate of candidates) {
-    // `worktreeObject` carries { digest, data }. Only `state` is retained:
-    // holding the bytes would rebuild a whole-selection memory problem on the
-    // CURRENT side for a broad selection such as --only '**'.
-    const { state: observed } = await observePathState(repoRoot, candidate.path, index);
-    const classification: SelectiveRestoreClassification = {
-      path: candidate.path,
-      changeGroupId: candidate.changeGroupId,
-      expectedBefore: candidate.expectedBefore,
-      expectedAfter: candidate.expectedAfter,
-      observed,
-      outcome: classify(observed, candidate, symlinkCheckout),
-    };
-    classifications.push(classification);
-    byPath.set(candidate.path, classification);
-    if (classification.outcome.kind === "conflict") {
-      conflicts.push({
-        changeGroupId: classification.changeGroupId,
-        path: classification.path,
-        reason: classification.outcome.reason,
-      });
-    }
-  }
-
   // ---- Stage B -------------------------------------------------------------
-  const writePaths = new Set(
-    classifications
-      .filter((c) => c.outcome.kind === "planned" && c.outcome.disposition === "restore_required")
-      .map((c) => c.path),
-  );
+  const writePaths = writePathsOf(classifications);
 
   // ---- Stage C1a: destructive-directory descendants ------------------------
   //
@@ -409,7 +426,7 @@ export async function planSelectiveRestore(opts: {
   for (const path of writePaths) {
     const c = requireClassification(byPath, path);
     if (!destroysDescendants(c.observed, c.expectedBefore)) continue;
-    const descendants = await enumerateDescendants(repoRoot, path);
+    const descendants = descendantsOf(path);
 
     // Pass 1: leaves, and directories that ARE selected candidates. "Covered"
     // means the transition legitimately accounts for this path's removal.
@@ -477,7 +494,6 @@ export async function planSelectiveRestore(opts: {
   // index-only target needs none.
   const dependencyPaths = new Set<string>();
   const parentRequiredBy = new Map<string, string[]>();
-  const ancestorObservations = new Map<string, PathState>();
   for (const path of writePaths) {
     const c = requireClassification(byPath, path);
     if (!worktreePresent(c.expectedBefore)) continue;
@@ -496,11 +512,7 @@ export async function planSelectiveRestore(opts: {
         }
         continue;
       }
-      let observed = ancestorObservations.get(ancestor);
-      if (observed === undefined) {
-        observed = (await observePathState(repoRoot, ancestor, index)).state;
-        ancestorObservations.set(ancestor, observed);
-      }
+      const observed = ancestorStateOf(ancestor);
       if (observed.worktree.kind === "directory") {
         // No write, but LOAD-BEARING: if an external process replaces it with a
         // file after planning, the child transplant fails. It joins the
@@ -531,7 +543,7 @@ export async function planSelectiveRestore(opts: {
   // direction, and runs after the worktree phase -- so it must never be the
   // first component to notice.
   const projectedIndex = new Set<string>();
-  for (const indexPath of index.byPath.keys()) {
+  for (const indexPath of indexPopulation) {
     if (!byPath.has(indexPath)) projectedIndex.add(indexPath);
   }
   for (const c of classifications) {
@@ -565,15 +577,7 @@ export async function planSelectiveRestore(opts: {
 
   if (conflicts.length > 0) {
     conflicts.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
-    return {
-      outcome: "conflicted",
-      capabilities,
-      selectedChangeGroupIds,
-      classifications,
-      topologyDependencyPaths,
-      operations: [],
-      conflicts,
-    };
+    return { topologyDependencyPaths, operations: [], conflicts };
   }
 
   // ---- Stage D -------------------------------------------------------------
@@ -593,7 +597,7 @@ export async function planSelectiveRestore(opts: {
     });
   }
   for (const [ancestor, requiredBy] of parentRequiredBy) {
-    const observed = requireObservation(ancestorObservations, ancestor);
+    const observed = ancestorStateOf(ancestor);
     operations.push({
       kind: "create_parent_directory",
       path: ancestor,
@@ -606,7 +610,127 @@ export async function planSelectiveRestore(opts: {
   }
   operations.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 
-  if (operations.length === 0) {
+  return { topologyDependencyPaths, operations, conflicts: [] };
+}
+
+// =============================================================================
+// The planner
+// =============================================================================
+
+export async function planSelectiveRestore(opts: {
+  readonly repoRoot: string;
+  readonly contribution: SessionContributionFile;
+  readonly selectedChangeGroupIds: readonly string[];
+}): Promise<SelectiveRestorePlan> {
+  const { repoRoot, contribution } = opts;
+  const selected = new Set(opts.selectedChangeGroupIds);
+  // Metadata matches the Set actually used, so duplicated input cannot yield two
+  // interpretations of one selection.
+  const selectedChangeGroupIds = [...selected].sort();
+
+  // ONE capability read per plan, frozen into the result.
+  const symlinkCheckout = await gitCheckoutSymlinksEnabled(repoRoot);
+  const capabilities: SelectiveRestoreCapabilities = { symlinkCheckout };
+
+  const candidates: PhysicalRestoreCandidate[] = [];
+  for (const entry of contribution.entries) {
+    if (!selected.has(entry.change_group_id)) continue;
+    candidates.push(...derivePhysicalCandidates(entry));
+  }
+  candidates.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+
+  const index: IndexSnapshot = await readIndexSnapshot(repoRoot);
+  const conflicts: SelectiveRestoreConflict[] = [];
+
+  // ---- Stage A -------------------------------------------------------------
+  const classifications: SelectiveRestoreClassification[] = [];
+  const byPath = new Map<string, SelectiveRestoreClassification>();
+  for (const candidate of candidates) {
+    // `worktreeObject` carries { digest, data }. Only `state` is retained:
+    // holding the bytes would rebuild a whole-selection memory problem on the
+    // CURRENT side for a broad selection such as --only '**'.
+    const { state: observed } = await observePathState(repoRoot, candidate.path, index);
+    const classification: SelectiveRestoreClassification = {
+      path: candidate.path,
+      changeGroupId: candidate.changeGroupId,
+      expectedBefore: candidate.expectedBefore,
+      expectedAfter: candidate.expectedAfter,
+      observed,
+      outcome: classify(observed, candidate, symlinkCheckout),
+    };
+    classifications.push(classification);
+    byPath.set(candidate.path, classification);
+    if (classification.outcome.kind === "conflict") {
+      conflicts.push({
+        changeGroupId: classification.changeGroupId,
+        path: classification.path,
+        reason: classification.outcome.reason,
+      });
+    }
+  }
+
+  // ---- Gather ---------------------------------------------------------------
+  //
+  // EXACTLY the observations the derivation can request, no convenience set.
+  // Sequential and in sorted order, so a fail-closed enumeration error surfaces
+  // from the same subtree run to run.
+  const writePaths = writePathsOf(classifications);
+
+  const descendantsByRoot = new Map<string, readonly CurrentDescendant[]>();
+  for (const path of writePaths) {
+    const c = requireClassification(byPath, path);
+    if (!destroysDescendants(c.observed, c.expectedBefore)) continue;
+    descendantsByRoot.set(path, await enumerateDescendants(repoRoot, path));
+  }
+
+  const ancestorStates = new Map<string, PathState>();
+  for (const path of writePaths) {
+    const c = requireClassification(byPath, path);
+    if (!worktreePresent(c.expectedBefore)) continue;
+    for (const ancestor of ancestorsOf(path)) {
+      if (byPath.has(ancestor)) continue; // C1b answers these from the classifications
+      if (ancestorStates.has(ancestor)) continue;
+      ancestorStates.set(ancestor, (await observePathState(repoRoot, ancestor, index)).state);
+    }
+  }
+
+  // ---- Derive ---------------------------------------------------------------
+  const derived = deriveSelectiveTopology({
+    classifications,
+    descendantsOf: (path) => {
+      const found = descendantsByRoot.get(path);
+      if (found === undefined) {
+        throw new Error(`descendants of ${JSON.stringify(path)} were never gathered`);
+      }
+      return found;
+    },
+    ancestorStateOf: (path) => {
+      const found = ancestorStates.get(path);
+      if (found === undefined) {
+        throw new Error(`ancestor state for ${JSON.stringify(path)} was never gathered`);
+      }
+      return found;
+    },
+    indexPopulation: new Set(index.byPath.keys()),
+  });
+
+  conflicts.push(...derived.conflicts);
+  const { topologyDependencyPaths } = derived;
+
+  if (conflicts.length > 0) {
+    conflicts.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+    return {
+      outcome: "conflicted",
+      capabilities,
+      selectedChangeGroupIds,
+      classifications,
+      topologyDependencyPaths,
+      operations: [],
+      conflicts,
+    };
+  }
+
+  if (derived.operations.length === 0) {
     return {
       outcome: "noop",
       capabilities,
@@ -623,7 +747,7 @@ export async function planSelectiveRestore(opts: {
     selectedChangeGroupIds,
     classifications,
     topologyDependencyPaths,
-    operations,
+    operations: derived.operations,
     conflicts: [],
   };
 }
