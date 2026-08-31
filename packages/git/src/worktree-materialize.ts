@@ -48,27 +48,12 @@
 // =============================================================================
 //
 // Every entry point validates its repo-relative path LEXICALLY through
-// `repoRelativePathSafetyError`, which also rejects `.viberevert/**`, plus one
-// MUTATION-SPECIFIC rule this module adds: this repository root's `.git`.
-//
-// A mutation primitive is therefore structurally incapable of touching
-// VibeRevert's own store, this repository root's Git control metadata, or
-// anything reached by `..`, an absolute path, or a backslash path.
-//
-// The `.git` rule lives HERE rather than in the shared authority because that
-// authority is also consumed by OBSERVATION, where refusing to look at a path is
-// a different question from refusing to write it. Widening it would change
-// unrelated observation semantics.
-//
-// Root-anchored on purpose. A nested `src/.git/**` is not this repository root's
-// control directory. Exact-name matching matters too: `.gitignore`,
-// `src/.gitkeep`, and `src/.git-data/file` are ordinary restorable content.
-//
-// Nothing the planner can produce today names `.git/**`, because capture never
-// records Git's own metadata. That is precisely why the rule belongs here: these
-// primitives do not depend on upstream callers behaving perfectly, which is the
-// same reason they validate oracle kinds, check ancestry, and refuse
-// incompatible destinations.
+// `mutationPathSafetyError`: the generic repository-path rules and the
+// `.viberevert/**` store, plus this repository root's `.git`. A mutation
+// primitive is therefore structurally incapable of touching VibeRevert's own
+// store, this repository root's Git control metadata, or anything reached by
+// `..`, an absolute path, or a backslash path. See `mutation-path-safety.ts`
+// for why the `.git` rule is mutation-only and root-anchored.
 //
 // It then validates PHYSICAL ancestry through `ancestorsTraversable`. Final-
 // component protection alone is insufficient: if `repo/src` is a symlink out of
@@ -157,7 +142,7 @@ import { join } from "node:path";
 import type { PathState } from "@viberevert/session-format";
 
 import { ancestorsTraversable } from "./fs-ancestry.js";
-import { repoRelativePathSafetyError } from "./path-safety.js";
+import { mutationPathSafetyError } from "./mutation-path-safety.js";
 import { type IndexSnapshot, type ObservedObject, observePathState } from "./path-state.js";
 
 /** `O_NOFOLLOW` is absent on win32, so it is applied opportunistically. */
@@ -197,15 +182,10 @@ async function currentKind(absPath: string): Promise<NodeKind> {
   }
 }
 
-function assertSafePath(path: string, context: string): void {
-  const message = repoRelativePathSafetyError(path, context);
+/** This module's error contract over the shared mutation policy. */
+function assertSafeMutationPath(path: string, context: string): void {
+  const message = mutationPathSafetyError(path, context);
   if (message !== null) throw new Error(message);
-
-  // Mutation-specific, root-anchored. See the header: writing here could alter
-  // repository control state directly.
-  if (path === ".git" || path.startsWith(".git/")) {
-    throw new Error(`${context}: path under Git control metadata ${JSON.stringify(path)}`);
-  }
 }
 
 /**
@@ -221,7 +201,7 @@ async function assertAncestry(repoRoot: string, path: string, context: string): 
 }
 
 async function assertReachable(repoRoot: string, path: string, context: string): Promise<void> {
-  assertSafePath(path, context);
+  assertSafeMutationPath(path, context);
   await assertAncestry(repoRoot, path, context);
 }
 
@@ -513,7 +493,7 @@ export async function materializeWorktreeLeaf(
     );
   }
 
-  assertSafePath(path, "materializeWorktreeLeaf");
+  assertSafeMutationPath(path, "materializeWorktreeLeaf");
 
   // Source evidence first, so a malformed oracle is discovered while the real
   // checkout is still untouched.
