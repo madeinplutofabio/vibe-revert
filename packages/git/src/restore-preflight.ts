@@ -178,7 +178,6 @@ import {
   normalizePathArray,
   normalizeStringArray,
 } from "@viberevert/session-format";
-import picomatch from "picomatch";
 import * as tar from "tar";
 import { loadCheckpoint } from "./checkpoint.js";
 import { CheckpointCorruptError } from "./errors.js";
@@ -187,6 +186,7 @@ import {
   isVibeRevertInternalPath,
   patchHeaderTargetsVibeRevertInternalPath,
 } from "./restore-internal-path-policy.js";
+import { compileExcludeMatcher } from "./rollback-exclude.js";
 
 // =============================================================================
 // Public types
@@ -496,25 +496,6 @@ export async function loadRestorePreflight(
 // =============================================================================
 // Internal helpers
 // =============================================================================
-
-/**
- * Compile an excluder function from `rollback.exclude` patterns. Identical
- * shape to snapshots.ts's helper (intentional duplication per the file
- * header invariant #4 of restore.ts — both files own their independent
- * capture/restore policy enforcement; sharing a helper would couple them
- * in a way that obscures the symmetry).
- *
- * Empty list → matcher that excludes nothing. `nonegate: true` disables
- * `!` re-include semantics, matching the M B `rollback.exclude` contract.
- *
- * Used ONLY on the untracked surface (D3 narrowed — see restore.ts file
- * header invariant #4).
- */
-function compileExcludeMatcher(patterns: readonly string[]): (path: string) => boolean {
-  if (patterns.length === 0) return () => false;
-  const matcher = picomatch(patterns as string[], { nonegate: true });
-  return (path: string) => matcher(path);
-}
 
 /**
  * Bidirectional exclude-drift detection. Returns `null` when no drift,

@@ -45,15 +45,13 @@
 // `change_group_id` is selection provenance, not an ownership model for
 // physical writes -- hence one flat `operations` list.
 
-import { readdir } from "node:fs/promises";
-import { join } from "node:path";
-
 import type {
   PathState,
   SessionContributionEntry,
   SessionContributionFile,
 } from "@viberevert/session-format";
 
+import { enumerateDescendants } from "./fs-topology.js";
 import { gitCheckoutSymlinksEnabled } from "./git-cli.js";
 import {
   type IndexSnapshot,
@@ -335,61 +333,6 @@ function classify(
   }
   // Fallback, so an unrecognized shape is never silently treated as safe.
   return { kind: "conflict", reason: { code: "MODIFIED_SINCE" } };
-}
-
-// =============================================================================
-// Stage C1 support: descendant enumeration
-// =============================================================================
-
-interface CurrentDescendant {
-  readonly path: string;
-  /** `directory` may be a structural container; `leaf` bears user content. */
-  readonly kind: "directory" | "leaf";
-}
-
-/**
- * Every CURRENT filesystem descendant of `dirPath`, repo-relative POSIX.
- *
- * Raw filesystem, not git-aware: an ignored or untracked child is physically
- * destroyed by a directory removal just the same.
- *
- * FAILS CLOSED on every enumeration error, INCLUDING ENOENT. A path vanishing
- * mid-plan means this plan was not built against a coherent topology; later
- * stabilization is not a licence to plan from knowingly incomplete observation.
- *
- * `withFileTypes` carries lstat semantics, so a symlink reports
- * `isSymbolicLink()` and never `isDirectory()`. A symlinked directory is a LEAF
- * and is never traversed -- its target lives elsewhere.
- *
- * Traversal itself is deterministic, not just the output: entries are sorted and
- * child directories pushed in REVERSE order so `pop()` visits lexical-first.
- * Otherwise a fail-closed throw could surface from a different subtree run to
- * run.
- */
-async function enumerateDescendants(
-  repoRoot: string,
-  dirPath: string,
-): Promise<readonly CurrentDescendant[]> {
-  const found: CurrentDescendant[] = [];
-  const stack: string[] = [dirPath];
-  while (stack.length > 0) {
-    const current = stack.pop();
-    if (current === undefined) continue;
-    const dirents = await readdir(join(repoRoot, ...current.split("/")), { withFileTypes: true });
-    dirents.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-    const childDirs: string[] = [];
-    for (const dirent of dirents) {
-      const child = `${current}/${dirent.name}`;
-      const isDir = dirent.isDirectory();
-      found.push({ path: child, kind: isDir ? "directory" : "leaf" });
-      if (isDir) childDirs.push(child);
-    }
-    for (let i = childDirs.length - 1; i >= 0; i -= 1) {
-      const dir = childDirs[i];
-      if (dir !== undefined) stack.push(dir);
-    }
-  }
-  return found;
 }
 
 // =============================================================================

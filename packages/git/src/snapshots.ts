@@ -60,10 +60,10 @@
 import { lstat, mkdir, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { gzip as gzipCallback } from "node:zlib";
-import picomatch from "picomatch";
 import * as tar from "tar";
 import { gitListTracked, gitListTrackedDirty, gitListUntracked } from "./git-cli.js";
 import { sha256File } from "./hashes.js";
+import { compileExcludeMatcher } from "./rollback-exclude.js";
 
 /**
  * Promisified zlib.gzip — used to write empty tar.gz archives without going
@@ -243,24 +243,6 @@ async function filterRegularFiles(
     }
   }
   return out;
-}
-
-/**
- * Compile an excluder function from `rollback.exclude` patterns. Empty list
- * → matcher that excludes nothing (every path passes). Patterns use
- * picomatch with `{ nonegate: true }` — the leading `!` re-include
- * semantics are disabled. For a field named `rollback.exclude`, implicit
- * re-include via `!pattern` is more dangerous than helpful; users who need
- * conditional inclusion should write tighter positive patterns. (M B does
- * NOT support `!pattern` syntax in `rollback.exclude`; doc it in the
- * config schema's notes when it lands.)
- *
- * Patterns are matched against repo-relative POSIX paths.
- */
-function compileExcludeMatcher(patterns: readonly string[]): (path: string) => boolean {
-  if (patterns.length === 0) return () => false;
-  const matcher = picomatch(patterns as string[], { nonegate: true });
-  return (path: string) => matcher(path);
 }
 
 /**
