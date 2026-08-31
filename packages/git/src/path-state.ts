@@ -61,6 +61,11 @@
 // legitimate, common on macOS, and is the caller's declared root rather than
 // something this module gets to second-guess.
 //
+// The mechanism now lives in `./fs-ancestry.js`, because step 10C's worktree
+// materializers need the identical guarantee before MUTATING a path. The
+// reasoning stays here: it is part of this module's observation fence, not
+// something the shared helper can explain on its own.
+//
 // ============================================================================
 // The identity sandwich, and why bigint
 // ============================================================================
@@ -124,6 +129,7 @@ import type {
 } from "@viberevert/session-format";
 import { IndexStateSchema, PathStateSchema } from "@viberevert/session-format";
 
+import { ancestorsTraversable } from "./fs-ancestry.js";
 import { runGit, splitNulList } from "./git-cli.js";
 import { repoRelativePathSafetyError } from "./path-safety.js";
 
@@ -186,39 +192,6 @@ function assertSafeRepoRelativePath(path: string, context: string): void {
 
 function isEnoent(err: unknown): boolean {
   return (err as NodeJS.ErrnoException | undefined)?.code === "ENOENT";
-}
-
-/**
- * Whether every component beneath repoRoot leading to `segments` is a real
- * directory.
- *
- * Walks outward from repoRoot one component at a time, `lstat`ing each. `lstat`
- * does not follow the component it is asked about, so a symlinked ancestor is
- * seen AS a symlink and rejected rather than silently traversed.
- *
- * `false` covers both "an ancestor does not exist" and "an ancestor is not a
- * directory". Callers translate that into `absent` on a first check and into a
- * refusal on a recheck, because the two mean different things.
- */
-async function ancestorsTraversable(
-  repoRoot: string,
-  segments: readonly string[],
-): Promise<boolean> {
-  let current = repoRoot;
-  for (let i = 0; i < segments.length - 1; i += 1) {
-    const segment = segments[i];
-    if (segment === undefined) return false;
-    current = join(current, segment);
-    let st: BigIntStats;
-    try {
-      st = await lstat(current, { bigint: true });
-    } catch (err) {
-      if (isEnoent(err)) return false;
-      throw err;
-    }
-    if (!st.isDirectory()) return false;
-  }
-  return true;
 }
 
 // ============================================================================
