@@ -18,5 +18,15 @@ export default defineProject({
     include: ["test/**/*.test.ts"],
     testTimeout: 10000,
     passWithNoTests: true,
+    // These tests contend on process spawn and filesystem I/O rather than CPU,
+    // so the default worker count oversubscribes badly and inflates every
+    // filesystem-heavy case toward the timeout. Capping improved BOTH axes when
+    // measured over 27 files: package wall time fell from ~73s to ~63s while the
+    // slowest test fell from ~10.8s to ~3.0s.
+    //
+    // It does not replace the local suite timeout in
+    // restore-selective-capture.test.ts, which was necessary under the
+    // configuration that produced it.
+    maxWorkers: 4,
   },
 });
