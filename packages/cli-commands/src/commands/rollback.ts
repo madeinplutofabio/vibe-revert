@@ -64,14 +64,16 @@
 //     identity), calls `createCheckpoint` which generates
 //     `cp_<ULID>` internally, then atomically renames to the final
 //     `cp_<ID>/` via the CLI's private `renameDirAtomic`. All of
-//     this is encapsulated in `createEmergencyCheckpoint(...)`.
-//     The temp+rename logic appears EXACTLY ONCE in this file
-//     (inside that helper). It is NEVER inlined inside `execute()`.
+//     this is encapsulated in `createEmergencyCheckpoint(...)`
+//     from `../emergency-checkpoint.ts`. The temp+rename logic
+//     appears EXACTLY ONCE (inside that helper). It is NEVER
+//     inlined inside `execute()`.
 //
 //  7. **D5b name-collision protection for the D65 emergency
 //     checkpoint name.** Emergency checkpoints are named
 //     `pre-rollback-<truncated-target-sess>` using the
-//     CLI-LOCAL `truncateSessionIdForCheckpointName` helper (NOT
+//     package-internal `truncateSessionIdForCheckpointName` helper
+//     in `../emergency-checkpoint.ts` (NOT
 //     a display-formatting helper — the name is persisted in
 //     manifest.name and surfaced by `viberevert checkpoints`, so
 //     the truncation rule must be ASCII-stable and version-stable).
@@ -85,8 +87,10 @@
 //     createCheckpoint call.
 //
 //  8. **Nested-lock ordering invariant (deadlock prevention).**
-//     Outer: `.viberevert/.locks/rollback.lock`. Inner (around
-//     D65 only): `.viberevert/.locks/checkpoint-name.lock`. The
+//     Outer: `.viberevert/.locks/rollback.lock`, acquired through
+//     `withRollbackLock` from `../rollback-lock.ts`. Inner (around
+//     D65 only): `.viberevert/.locks/checkpoint-name.lock`, nested
+//     inside it by `createEmergencyCheckpoint`. The
 //     order is rollback → checkpoint-name, NEVER the reverse.
 //     The only other code path that touches `checkpoint-name.lock`
 //     is `CheckpointCommand`, which does NOT acquire
@@ -209,8 +213,7 @@
 //     recovery via the emergency checkpoint surfaced in the error
 //     message.
 
-import { randomBytes } from "node:crypto";
-import { readFile, rm } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import {
@@ -225,7 +228,6 @@ import {
   SessionNotFoundError,
 } from "@viberevert/core";
 import {
-  createCheckpoint,
   type EndOfSessionSnapshot,
   GitNotAvailableError,
   getHeadSha,
@@ -243,13 +245,14 @@ import {
 } from "@viberevert/session-format";
 import { Command, Option } from "clipanion";
 
-import { renameDirAtomic, writeFileAtomic } from "../atomic.js";
+import { writeFileAtomic } from "../atomic.js";
+import { CheckpointListLoadError, CollisionExitSentinel } from "../checkpoint-helpers.js";
 import {
-  CheckpointListLoadError,
-  CollisionExitSentinel,
-  safeListCheckpoints,
-} from "../checkpoint-helpers.js";
-import { ConcurrentOperationError, type LockInfo, withExclusiveLock } from "../locks.js";
+  createEmergencyCheckpoint,
+  RollbackEmergencyCheckpointError,
+} from "../emergency-checkpoint.js";
+import { ConcurrentOperationError, type LockInfo } from "../locks.js";
+import { withRollbackLock } from "../rollback-lock.js";
 import {
   buildReceiptForApply,
   buildReceiptForDryRun,
@@ -273,23 +276,10 @@ import {
 // Constants
 // =============================================================================
 
-const ROLLBACK_LOCK_REL = ".viberevert/.locks/rollback.lock";
-const CHECKPOINT_NAME_LOCK_REL = ".viberevert/.locks/checkpoint-name.lock";
-
-/**
- * Length of the ULID-prefix kept when truncating a session id for
- * the D65 emergency checkpoint name. 14 chars matches the D5
- * visible-identification convention. Combined with the "sess_"
- * prefix (5 chars), the truncated id is 19 chars; combined with
- * "pre-rollback-" (13 chars), the full checkpoint name is 32 chars
- * — comfortably under any reasonable listing-width budget.
- *
- * **PERSISTED METADATA, NOT A DISPLAY HELPER.** This constant and
- * the helper that uses it MUST stay ASCII-stable and
- * version-stable. Changing the length here renames any existing
- * `pre-rollback-...` checkpoints in user repos on next list.
- */
-const CHECKPOINT_NAME_SESSION_ID_PREFIX_LEN = 14;
+// The D65 emergency checkpoint's lock path, name-length constant, and
+// truncation helper now live in `../emergency-checkpoint.ts` alongside the
+// creation sequence they serve. `rollback.lock` is owned by
+// `../rollback-lock.ts`.
 
 // =============================================================================
 // Internal error classes (file-local — not exported)
@@ -374,34 +364,6 @@ class RollbackReceiptWriteError extends Error {
   }
 }
 
-/**
- * Thrown by `createEmergencyCheckpoint` when the D65 emergency
- * pre-rollback checkpoint fails to create OR rename. Per lock #16
- * case (g), this PREVENTS an apply receipt from being written
- * (no apply receipt = no D70 lock; the user can retry cleanly
- * after fixing the underlying fs/git/config issue). The `stage`
- * field distinguishes the two failure points for diagnostics:
- *   - "create": `createCheckpoint` itself failed (e.g., git error,
- *     disk full during snapshot capture). Temp dir is cleaned up.
- *   - "rename": `renameDirAtomic` failed AFTER `createCheckpoint`
- *     succeeded. The temp dir is left in place (its contents are
- *     valid; D13 tolerates leftover `.tmp-*` entries).
- */
-class RollbackEmergencyCheckpointError extends Error {
-  override readonly name = "RollbackEmergencyCheckpointError";
-  constructor(
-    readonly stage: "create" | "rename",
-    cause: unknown,
-  ) {
-    super(
-      `Failed to create the pre-rollback emergency checkpoint (${stage} stage): ${
-        cause instanceof Error ? cause.message : String(cause)
-      }. The rollback was NOT applied; the working tree is unchanged.`,
-      { cause },
-    );
-  }
-}
-
 // =============================================================================
 // D68 receipt path helpers (lock #4 — no inline path joins)
 // =============================================================================
@@ -436,22 +398,6 @@ function existingApplyReceiptPath(repoRoot: string, sessionId: string): string {
 // =============================================================================
 // Pure helpers
 // =============================================================================
-
-/**
- * Truncate a validated session id for use in the D65 emergency
- * checkpoint name. **PERSISTED METADATA helper, NOT a display
- * formatter** — the result is stored verbatim in `manifest.name`
- * and surfaced by `viberevert checkpoints`, so the truncation
- * rule MUST be stable across CLI versions. ASCII-only, no
- * ellipsis, no Unicode. Length is `5 + CHECKPOINT_NAME_SESSION_ID_PREFIX_LEN`
- * (e.g., `sess_01JV8Z0N6E7ABC` = 19 chars).
- *
- * Precondition: `sessionId` matches `/^sess_[26 chars]$/`
- * (validated upstream in execute()). The slice is always safe.
- */
-function truncateSessionIdForCheckpointName(sessionId: string): string {
-  return sessionId.slice(0, "sess_".length + CHECKPOINT_NAME_SESSION_ID_PREFIX_LEN);
-}
 
 /**
  * Build the human-readable invocation command string for D22
@@ -575,122 +521,6 @@ async function writeReceiptAtomically(
       recovery?.recoveryCheckpointName,
     );
   }
-}
-
-// =============================================================================
-// D65 emergency checkpoint creation
-// =============================================================================
-
-/**
- * Create the D65 emergency pre-rollback checkpoint. Acquires
- * the nested `checkpoint-name.lock` (inside the already-held
- * outer `rollback.lock`) per lock #8 so the D5b name-collision
- * scan + createCheckpoint call run atomically against concurrent
- * `CheckpointCommand --name` invocations.
- *
- * Returns the generated `checkpointId` (with `cp_` prefix per
- * D5 / lock #6) and the final unique `name` actually used (base
- * name OR suffixed `-2`/`-3`/... per D5b). The returned pair is
- * threaded into `writeReceiptAtomically`'s `recovery` arg so
- * receipt-write failures (lock #16 case (h)) can surface the
- * recovery handle in their error message.
- *
- * Throws:
- *   - `CollisionExitSentinel` if `safeListCheckpoints` surfaced
- *     a corruption error (already written to stderr).
- *   - `ConcurrentOperationError` if the inner lock is contended.
- *   - `RollbackEmergencyCheckpointError("create", ...)` if
- *     `createCheckpoint` itself fails (temp dir cleaned up).
- *   - `RollbackEmergencyCheckpointError("rename", ...)` if
- *     `renameDirAtomic` fails after a successful createCheckpoint
- *     (temp dir left in place per D13 tolerance).
- *
- * The temp-dir + `renameDirAtomic` pattern is encapsulated here
- * (per lock #6 — never inlined into `execute()`). Mirrors
- * checkpoint.ts:210-251.
- */
-async function createEmergencyCheckpoint(args: {
-  readonly repoRoot: string;
-  readonly rollbackExcludePatterns: readonly string[];
-  readonly targetSessionId: string;
-  readonly now: string;
-  readonly invocationCommand: string;
-  readonly cmd: { context: { stderr: { write(s: string): unknown } } };
-}): Promise<{ checkpointId: string; name: string }> {
-  const baseName = `pre-rollback-${truncateSessionIdForCheckpointName(args.targetSessionId)}`;
-
-  const lockDir = join(args.repoRoot, CHECKPOINT_NAME_LOCK_REL);
-  const lockInfo: LockInfo = {
-    pid: process.pid,
-    command: args.invocationCommand,
-    started_at: args.now,
-    host: hostname(),
-  };
-
-  return await withExclusiveLock(lockDir, lockInfo, async () => {
-    // D5b name-collision scan + suffix-counter to find unique name.
-    // Post M G1a Step 1: safeListCheckpoints now throws
-    // CheckpointListLoadError instead of writing stderr + returning null.
-    // We catch it, write the same stderr the helper used to write, and
-    // throw CollisionExitSentinel — preserves the pre-refactor exit-1
-    // flow byte-identically.
-    let existing: Awaited<ReturnType<typeof safeListCheckpoints>>;
-    try {
-      existing = await safeListCheckpoints(args.repoRoot);
-    } catch (err) {
-      if (err instanceof CheckpointListLoadError) {
-        args.cmd.context.stderr.write(`Error reading existing checkpoints: ${err.message}\n`);
-        throw new CollisionExitSentinel();
-      }
-      throw err;
-    }
-    const existingNames = new Set(
-      existing.map((c) => c.name).filter((n): n is string => n != null),
-    );
-    let name = baseName;
-    let suffix = 2;
-    while (existingNames.has(name)) {
-      name = `${baseName}-${suffix}`;
-      suffix += 1;
-    }
-
-    // D17b: CLI creates a generic random temp dir name; git
-    // generates the cp_<ULID> internally; CLI does its own
-    // renameDirAtomic to the final ID-based path.
-    const tmpName = `.tmp-checkpoint-${randomBytes(8).toString("hex")}`;
-    const tmpDirAbs = join(args.repoRoot, ".viberevert", "checkpoints", tmpName);
-
-    let result: { checkpointId: string };
-    try {
-      result = await createCheckpoint({
-        repoRoot: args.repoRoot,
-        checkpointDir: tmpDirAbs,
-        rollbackExcludePatterns: args.rollbackExcludePatterns,
-        name,
-        capturedAt: args.now,
-      });
-    } catch (err) {
-      // Cleanup the temp dir on failure to avoid leaking stale
-      // `.tmp-checkpoint-<hex>/` siblings. Cleanup errors swallowed.
-      // The original createCheckpoint error is wrapped as a typed
-      // RollbackEmergencyCheckpointError so handleKnownError can
-      // surface a clean stderr message (vs Clipanion's crash).
-      await rm(tmpDirAbs, { recursive: true, force: true }).catch(() => {});
-      throw new RollbackEmergencyCheckpointError("create", err);
-    }
-
-    const finalDirAbs = join(args.repoRoot, ".viberevert", "checkpoints", result.checkpointId);
-    try {
-      await renameDirAtomic(tmpDirAbs, finalDirAbs);
-    } catch (err) {
-      // Rename failure leaves the temp dir in place per D13
-      // tolerance (its contents are valid; loaders skip .tmp-*).
-      // Wrap as RollbackEmergencyCheckpointError for clean stderr.
-      throw new RollbackEmergencyCheckpointError("rename", err);
-    }
-
-    return { checkpointId: result.checkpointId, name };
-  });
 }
 
 // =============================================================================
@@ -928,7 +758,6 @@ ${ROLLBACK_OUT_OF_SCOPE_NOTICE}
       format,
     });
 
-    const lockDir = join(repoRoot, ROLLBACK_LOCK_REL);
     const lockInfo: LockInfo = {
       pid: process.pid,
       command: invocationCommand,
@@ -944,7 +773,7 @@ ${ROLLBACK_OUT_OF_SCOPE_NOTICE}
 
     let protectedResult: { readonly receipt: ReceiptFile };
     try {
-      protectedResult = await withExclusiveLock(lockDir, lockInfo, async () => {
+      protectedResult = await withRollbackLock(repoRoot, lockInfo, async () => {
         // 1. loadConfig — INSIDE the lock so rollback uses the config
         //    snapshot in effect at lock-acquisition time (lock #1).
         const config = await loadConfig(repoRoot);
@@ -1016,14 +845,25 @@ ${ROLLBACK_OUT_OF_SCOPE_NOTICE}
           //      PREVENTS the apply receipt from being written
           //      (per lock #16 case (g) — no apply receipt = no
           //      D70 lock; clean retry).
-          const emergency = await createEmergencyCheckpoint({
-            repoRoot,
-            rollbackExcludePatterns,
-            targetSessionId: sessionId,
-            now,
-            invocationCommand,
-            cmd: this,
-          });
+          let emergency: { checkpointId: string; name: string };
+          try {
+            emergency = await createEmergencyCheckpoint({
+              repoRoot,
+              rollbackExcludePatterns,
+              targetSessionId: sessionId,
+              now,
+              invocationCommand,
+            });
+          } catch (err) {
+            // Presentation stays here: the command-neutral helper propagates
+            // the typed error, and this preserves the pre-extraction stderr
+            // text and the CollisionExitSentinel exit-1 flow byte-for-byte.
+            if (err instanceof CheckpointListLoadError) {
+              this.context.stderr.write(`Error reading existing checkpoints: ${err.message}\n`);
+              throw new CollisionExitSentinel();
+            }
+            throw err;
+          }
 
           // 11a. Build the apply receipt. buildReceiptForApply
           //      calls restoreCheckpoint internally; on throw it
