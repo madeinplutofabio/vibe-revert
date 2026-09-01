@@ -869,21 +869,42 @@ describe("oracle evidence", () => {
 // import is a reachability violation.
 
 describe("internal-only reachability", () => {
-  it("36: no barrel export and no production caller", async () => {
+  it("36: no barrel export, and exactly one approved production caller", async () => {
     const srcDir = new URL("../src/", import.meta.url);
+
+    // 10F evolved this invariant from "no production caller" to "exactly one".
+    // The materializers stay unreachable from any command; what may reach them
+    // is the mutation schedule, and only from its post-marker execution path.
+    const APPROVED_CALLER = "transplant-schedule.ts";
 
     const barrel = await readFile(new URL("index.ts", srcDir), "utf8");
     expect(barrel).not.toContain("worktree-materialize");
 
+    const approved = await readFile(new URL(APPROVED_CALLER, srcDir), "utf8");
+
+    // The exemption must be LIVE, and specific to the three primitives that
+    // collectively implement the worktree schedule. Asserting only that the
+    // module is imported would let the exemption decay into a permanent hole
+    // the moment a call is removed while some other import remains.
+    expect(approved).toMatch(
+      /import\s*\{[^}]*\bcreateWorktreeDirectory\b[^}]*\bmaterializeWorktreeLeaf\b[^}]*\bremoveWorktreePath\b[^}]*\}\s*from\s*["']\.\/worktree-materialize\.js["']/s,
+    );
+    expect(approved).toMatch(/\bremoveWorktreePath\s*\(/);
+    expect(approved).toMatch(/\bcreateWorktreeDirectory\s*\(/);
+    expect(approved).toMatch(/\bmaterializeWorktreeLeaf\s*\(/);
+
     const names = (await readdir(srcDir)).filter(
-      (name) => name.endsWith(".ts") && name !== "worktree-materialize.ts",
+      (name) =>
+        name.endsWith(".ts") && name !== "worktree-materialize.ts" && name !== APPROVED_CALLER,
     );
     expect(names.length).toBeGreaterThan(0);
 
+    // Matched as an IMPORT, not as text, so prose naming the module cannot trip
+    // it -- the mistake this suite's sibling made against its own header.
     for (const name of names) {
       const source = await readFile(new URL(name, srcDir), "utf8");
-      expect(source, `${name} imports the internal-only materializer`).not.toContain(
-        './worktree-materialize.js"',
+      expect(source, `${name} imports the internal-only materializer`).not.toMatch(
+        /from\s*["']\.\/worktree-materialize\.js["']/,
       );
     }
   });

@@ -3,11 +3,12 @@
 
 // Index transplant (M 0.8.0 step 10D, §15).
 //
-// INTERNAL ONLY. No command, no public entrypoint, no production caller until
-// 10F, and no export from the package barrel. Enforced by a test rather than
-// asserted here, on the same reasoning as the worktree materializers: mutation-
-// capable code may land before the attempt marker and fence exist ONLY because
-// nothing in a shipped build can reach it.
+// INTERNAL ONLY. No command, no public entrypoint, and no export from the
+// package barrel. Its single approved production caller is
+// `transplant-schedule.ts`; that module may prepare the schedule before the
+// final fence, but reaches `transplantIndexPath` only from its post-marker
+// execution path. Enforced by case 20 rather than asserted here, on the same
+// reasoning as the worktree materializers.
 //
 // =============================================================================
 // The oracle's index is the source. The contribution's is evidence.
@@ -95,7 +96,7 @@ import { runGit } from "./git-cli.js";
 import { mutationPathSafetyError } from "./mutation-path-safety.js";
 import { type IndexSnapshot, indexStateEqual } from "./path-state.js";
 
-type IndexEntryState = Extract<IndexState, { kind: "entry" }>;
+export type IndexEntryState = Extract<IndexState, { kind: "entry" }>;
 
 /**
  * An index state this slice can actually transplant.
@@ -104,7 +105,7 @@ type IndexEntryState = Extract<IndexState, { kind: "entry" }>;
  * gitlink mode rather than only `unmerged`. That is what lets the validator's
  * return type catch a deleted refusal.
  */
-type TransplantableIndexState =
+export type TransplantableIndexState =
   | Extract<IndexState, { kind: "absent" }>
   | (Omit<IndexEntryState, "mode"> & {
       readonly mode: Exclude<IndexEntryState["mode"], "160000">;
@@ -129,9 +130,9 @@ function assertSafeMutationPath(path: string, context: string): void {
  * in the flow below, rather than depending on it splitting a negated compound
  * condition across a nested property.
  */
-function requireTransplantable(
+export function requireTransplantable(
   state: IndexState,
-  side: "target" | "oracle",
+  side: "target" | "oracle" | "observed",
   path: string,
 ): TransplantableIndexState {
   if (state.kind === "unmerged") {

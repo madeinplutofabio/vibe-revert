@@ -540,21 +540,40 @@ describe("structural invariants", () => {
     expect(calls[0]?.[1]).toBe("oracleState");
   });
 
-  it("20: no barrel export and no production caller", async () => {
+  it("20: no barrel export, and exactly one approved production caller", async () => {
     const srcDir = new URL("../src/", import.meta.url);
+
+    // 10F evolved this invariant from "no production caller" to "exactly one".
+    // The scheduler imports this module during PREPARATION for
+    // `requireTransplantable`, but reaches the mutation primitive only from its
+    // post-marker execution path.
+    const APPROVED_CALLER = "transplant-schedule.ts";
 
     const barrel = await readFile(new URL("index.ts", srcDir), "utf8");
     expect(barrel).not.toContain("index-transplant");
 
+    const approved = await readFile(new URL(APPROVED_CALLER, srcDir), "utf8");
+
+    // Specific to `transplantIndexPath`, NOT to the module. A module-level
+    // assertion would stay green if the mutation call were removed while the
+    // pre-marker `requireTransplantable` import remained, which is exactly the
+    // shape this scheduler has.
+    expect(approved).toMatch(
+      /import\s*\{[^}]*\btransplantIndexPath\b[^}]*\}\s*from\s*["']\.\/index-transplant\.js["']/s,
+    );
+    expect(approved).toMatch(/\btransplantIndexPath\s*\(/);
+
     const names = (await readdir(srcDir)).filter(
-      (name) => name.endsWith(".ts") && name !== "index-transplant.ts",
+      (name) => name.endsWith(".ts") && name !== "index-transplant.ts" && name !== APPROVED_CALLER,
     );
     expect(names.length).toBeGreaterThan(0);
 
+    // Matched as an IMPORT, not as text, so prose naming the module cannot trip
+    // it.
     for (const name of names) {
       const source = await readFile(new URL(name, srcDir), "utf8");
-      expect(source, `${name} imports the internal-only index transplant`).not.toContain(
-        './index-transplant.js"',
+      expect(source, `${name} imports the internal-only index transplant`).not.toMatch(
+        /from\s*["']\.\/index-transplant\.js["']/,
       );
     }
   });
