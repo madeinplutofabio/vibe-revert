@@ -249,6 +249,7 @@ import { writeFileAtomic } from "../atomic.js";
 import { CheckpointListLoadError, CollisionExitSentinel } from "../checkpoint-helpers.js";
 import {
   createEmergencyCheckpoint,
+  type EmergencyCheckpointResult,
   RollbackEmergencyCheckpointError,
 } from "../emergency-checkpoint.js";
 import { ConcurrentOperationError, type LockInfo } from "../locks.js";
@@ -845,7 +846,7 @@ ${ROLLBACK_OUT_OF_SCOPE_NOTICE}
           //      PREVENTS the apply receipt from being written
           //      (per lock #16 case (g) — no apply receipt = no
           //      D70 lock; clean retry).
-          let emergency: { checkpointId: string; name: string };
+          let emergency: EmergencyCheckpointResult;
           try {
             emergency = await createEmergencyCheckpoint({
               repoRoot,

@@ -111,6 +111,20 @@ export class RollbackEmergencyCheckpointError extends Error {
   }
 }
 
+export interface EmergencyCheckpointResult {
+  readonly checkpointId: string;
+  readonly name: string;
+  /**
+   * The final `cp_<ULID>` directory, as established by the rename below.
+   *
+   * Carried so a caller needing the recovery handle as a PATH (10F's
+   * `validateRecoveryHandle`) and one needing it as an IDENTITY (the attempt
+   * marker's `pre_rollback_checkpoint_id`) both read from the place that
+   * actually created the correspondence.
+   */
+  readonly checkpointDir: string;
+}
+
 /**
  * Create the D65 emergency pre-rollback checkpoint. Acquires
  * the nested `checkpoint-name.lock` (inside the already-held
@@ -122,9 +136,11 @@ export class RollbackEmergencyCheckpointError extends Error {
  * D5 / lock #6) and the final unique `name` actually used (base
  * name OR suffixed `-2`/`-3`/... per D5b).
  *
- * The returned id names a checkpoint directory at
- * `.viberevert/checkpoints/<checkpointId>`; this function deliberately returns
- * the identity rather than the path, matching what the legacy receipt records.
+ * Returns the final `checkpointDir` alongside the identity. This function is
+ * where `cp_<ULID>` and its renamed directory become the same thing, so it is
+ * the only place that correspondence is known first-hand; a caller
+ * reconstructing `.viberevert/checkpoints/<checkpointId>` would be re-deriving
+ * what the rename already established.
  *
  * Throws:
  *   - `CheckpointListLoadError` if the name-collision scan could not read
@@ -146,7 +162,7 @@ export async function createEmergencyCheckpoint(args: {
   readonly targetSessionId: string;
   readonly now: string;
   readonly invocationCommand: string;
-}): Promise<{ checkpointId: string; name: string }> {
+}): Promise<EmergencyCheckpointResult> {
   const baseName = `pre-rollback-${truncateSessionIdForCheckpointName(args.targetSessionId)}`;
 
   const lockDir = join(args.repoRoot, CHECKPOINT_NAME_LOCK_REL);
@@ -207,6 +223,6 @@ export async function createEmergencyCheckpoint(args: {
       throw new RollbackEmergencyCheckpointError("rename", err);
     }
 
-    return { checkpointId: result.checkpointId, name };
+    return { checkpointId: result.checkpointId, name, checkpointDir: finalDirAbs };
   });
 }

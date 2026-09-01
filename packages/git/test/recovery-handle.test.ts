@@ -22,8 +22,12 @@ import type { PathState } from "@viberevert/session-format";
 import { describe, expect, it } from "vitest";
 import { createCheckpoint } from "../src/checkpoint.js";
 import { CheckpointNotFoundError } from "../src/errors.js";
-import { captureProtectedStateMap } from "../src/protected-domain.js";
-import { validateRecoveryHandle } from "../src/recovery-handle.js";
+import { getHeadSha } from "../src/git-cli.js";
+import {
+  captureProtectedStateMap,
+  type ProtectedStateDifference,
+} from "../src/protected-domain.js";
+import { type RecoveryHandleDifference, validateRecoveryHandle } from "../src/recovery-handle.js";
 import {
   ABSENT_PATH_STATE,
   type SelectiveRestoreClassification,
@@ -150,11 +154,20 @@ const captureS = (repo: TestRepo, plan: SelectiveRestorePlan) =>
     rollbackExcludePatterns: [],
   });
 
-const validate = (
+/**
+ * `expectedHeadSha` defaults to the repository's CURRENT HEAD.
+ *
+ * The fixtures below do not move HEAD between creating the checkpoint and
+ * validating it, so live HEAD is the checkpoint's HEAD there and the default
+ * asserts the identity axis also agrees. The two cases that deliberately move
+ * HEAD pass it explicitly.
+ */
+const validate = async (
   repo: TestRepo,
   checkpointDir: string,
   plan: SelectiveRestorePlan,
   protectedStates: ReadonlyMap<string, PathState>,
+  expectedHeadSha?: string,
 ) =>
   validateRecoveryHandle({
     repoRoot: repo.repoRoot,
@@ -162,13 +175,33 @@ const validate = (
     plan,
     rollbackExcludePatterns: [],
     protectedStates,
+    expectedHeadSha: expectedHeadSha ?? (await getHeadSha(repo.repoRoot)),
   });
 
-function expectMismatch(result: Awaited<ReturnType<typeof validate>>) {
+function expectDifferences(
+  result: Awaited<ReturnType<typeof validate>>,
+): readonly RecoveryHandleDifference[] {
   if (result.outcome !== "mismatch") {
     throw new Error(`expected a mismatch, got ${result.outcome}`);
   }
-  return result.difference;
+  return result.differences;
+}
+
+/**
+ * The sole `protected_states` difference.
+ *
+ * Asserts no HEAD mismatch accompanied it: these fixtures never move HEAD
+ * between the checkpoint and validation, so a `head_mismatch` here would be a
+ * real defect rather than expected noise.
+ */
+function expectMismatch(result: Awaited<ReturnType<typeof validate>>): ProtectedStateDifference {
+  const differences = expectDifferences(result);
+  expect(differences.map((d) => d.kind)).toEqual(["protected_states"]);
+  const first = differences[0];
+  if (first === undefined || first.kind !== "protected_states") {
+    throw new Error("unreachable: the assertion above pins the shape");
+  }
+  return first.difference;
 }
 
 // =============================================================================
@@ -360,6 +393,69 @@ describe("validateRecoveryHandle", () => {
       await expect(validate(repo, missing, plan, protectedStates)).rejects.toBeInstanceOf(
         CheckpointNotFoundError,
       );
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it("9: E captured at a DIFFERENT HEAD is refused though every state agrees", async () => {
+    const repo = await setupRepo();
+    try {
+      await write(repo, "a.txt", "current\n");
+      await git(repo.repoRoot, ["add", "-A"]);
+
+      const plan = planOver("a.txt");
+      const protectedStates = await captureS(repo, plan);
+      const headS = await getHeadSha(repo.repoRoot);
+
+      // Committing moves HEAD while leaving the index entry's mode and oid and
+      // the worktree bytes untouched, so every PathState in S still holds. E is
+      // therefore captured at a HEAD the transaction never froze.
+      await git(repo.repoRoot, ["commit", "-m", "moves HEAD only"]);
+      const checkpointDir = await makeCheckpoint(repo, "captured-at-b");
+
+      // And back, so a later fence comparing LIVE HEAD to HEAD_S would pass.
+      await git(repo.repoRoot, ["reset", "--soft", "HEAD~1"]);
+      expect(await getHeadSha(repo.repoRoot)).toBe(headS);
+
+      const differences = expectDifferences(
+        await validate(repo, checkpointDir, plan, protectedStates, headS),
+      );
+      // States agree completely. Only checkpoint identity disagrees.
+      expect(differences).toHaveLength(1);
+      const only = differences[0];
+      expect(only?.kind).toBe("head_mismatch");
+      if (only?.kind !== "head_mismatch") throw new Error("unreachable");
+      expect(only.expectedHeadSha).toBe(headS);
+      expect(only.observedHeadSha).not.toBe(headS);
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it("10: both axes wrong are reported together, states first", async () => {
+    const repo = await setupRepo();
+    try {
+      await write(repo, "a.txt", "current\n");
+      await git(repo.repoRoot, ["add", "-A"]);
+
+      const plan = planOver("a.txt");
+      const protectedStates = await captureS(repo, plan);
+      const headS = await getHeadSha(repo.repoRoot);
+
+      // Drift the state AND move HEAD before capturing E.
+      await write(repo, "a.txt", "drifted\n");
+      await git(repo.repoRoot, ["add", "-A"]);
+      await git(repo.repoRoot, ["commit", "-m", "moves HEAD and state"]);
+      const checkpointDir = await makeCheckpoint(repo, "wrong-on-both-axes");
+      await git(repo.repoRoot, ["reset", "--soft", "HEAD~1"]);
+
+      const differences = expectDifferences(
+        await validate(repo, checkpointDir, plan, protectedStates, headS),
+      );
+      // The array shape exists for exactly this: two independent facts, in the
+      // locked order, neither hiding the other.
+      expect(differences.map((d) => d.kind)).toEqual(["protected_states", "head_mismatch"]);
     } finally {
       await repo.cleanup();
     }
