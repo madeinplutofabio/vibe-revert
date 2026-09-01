@@ -116,7 +116,18 @@ const allGroups = (contribution: SessionContributionFile): readonly string[] => 
 
 // =============================================================================
 
-describe("captureContribution -> planSelectiveRestore contract", () => {
+/**
+ * Per-test budget for genuinely heavy integration work.
+ *
+ * Each case below performs real repository setup, a commit, a full checkpoint,
+ * oracle worktree materialization, and a complete contribution capture. These
+ * operations legitimately run close to the package-wide timeout and can cross
+ * it under parallel workspace contention.
+ *
+ * Keep the exception local to these integration cases rather than increasing
+ * the package-wide timeout for ordinary tests.
+ */
+describe("captureContribution -> planSelectiveRestore contract", { timeout: 20_000 }, () => {
   it("1: a real captured rename feeds the OLD/NEW physical model", async () => {
     const repo = await setupRepo();
     try {
