@@ -50,6 +50,52 @@
 // guarantee visible at the call site instead of hiding it in an argument.
 //
 // =============================================================================
+// Two capture layers, and why post-mutation gets its own (F4)
+// =============================================================================
+//
+// Membership DERIVATION reads the live repository. Bucket 5 of
+// `captureProtectedStateMap` takes tracked paths from a live index and
+// untracked paths from `gitListUntracked`, filtered by `--exclude-standard` and
+// the session-start exclude matcher.
+//
+// Before mutation that is exactly right, and it is why the fence re-captures:
+// nothing has changed yet, so the current ignore, index, and exclude state ARE
+// the pre-operation rules.
+//
+// After mutation it is unsound. Not because the comparison stops looking:
+// `compareProtectedStateMaps` is bidirectional, so a path frozen in `S` that a
+// re-derived capture no longer lists surfaces as `removedPaths`.
+//
+// The defect is that the MEANING of membership changes. Bucket 5 reads the live
+// index and live ignore rules through `--exclude-standard`, including
+// `.gitignore`, so after mutation the protected key set is a function of state
+// the transaction may itself have rewritten:
+//
+//     restoring `.gitignore` moves still-existing untracked files into and out
+//         of the domain, so a file nothing touched is reported as added or
+//         removed
+//     `removedPaths` conflates "this path was destroyed" with "this
+//         still-existing path no longer satisfies the live membership rules"
+//
+// Step 11 would then adjudicate that churn against a yardstick the operation
+// under test may have moved, which is circular. The reassuring-direction
+// failure lives one level up: a destroyed path reported as `removedPaths` is
+// easy to wave through as "no longer in the domain".
+//
+// So post-mutation observation takes `S` as the membership authority:
+//
+//     S decides WHAT TO LOOK AT
+//     the live repository decides WHAT IS THERE NOW
+//
+// With the key set fixed, no bucket-5 path can appear or disappear, every real
+// difference lands in `changedPaths` with an observable before and after, and
+// the isolation question stays decidable.
+//
+// Enumerating the current children of a FROZEN watch root is observation, not
+// re-derivation. The roots are frozen authority; their current membership is
+// precisely the live fact being compared.
+//
+// =============================================================================
 // What this module does NOT do
 // =============================================================================
 //
@@ -461,6 +507,92 @@ function assertNotStorePath(path: string, bucket: string): void {
 
 function sortMembers(members: readonly CurrentDescendant[]): readonly CurrentDescendant[] {
   return [...members].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+}
+
+// =============================================================================
+// Post-mutation observation, from frozen membership (F4)
+// =============================================================================
+
+/**
+ * Current members of one FROZEN watch root.
+ *
+ * Mirrors `immediateMembership`'s rules exactly, extended to the recursive kind,
+ * and reads the kind from the frozen watch rather than re-deciding it. A root
+ * that is no longer a directory has no filesystem children, so empty membership
+ * is the truthful answer; the state comparison is what reports the kind change.
+ */
+async function observeWatchMembers(
+  repoRoot: string,
+  root: string,
+  kind: TopologyWatchKind,
+  states: ReadonlyMap<string, PathState>,
+): Promise<readonly CurrentDescendant[]> {
+  if (root === "" && kind === "immediate") {
+    const members = await enumerateImmediateMembers(repoRoot, "");
+    return members.filter((m) => !ROOT_CONTROL_PLANE_ENTRIES.has(m.path));
+  }
+  // A recursive watch on the repository root is a shape capture cannot produce,
+  // and `isObservedDirectory` refuses it here exactly as it would there.
+  if (!isObservedDirectory(states, root)) return [];
+  return kind === "recursive"
+    ? enumerateDescendants(repoRoot, root)
+    : enumerateImmediateMembers(repoRoot, root);
+}
+
+/**
+ * Re-observe the protected domain AFTER mutation, taking every membership
+ * decision from the frozen `S`.
+ *
+ * This is the post-op counterpart of `captureProtectedDomain`, and the ONLY
+ * capture-shaped function that is sound once the repository has been mutated.
+ * It derives nothing:
+ *
+ *     state paths   exactly `S.states`' keys, freshly observed
+ *     watch roots   exactly `S.topologyWatches`' keys, with their frozen kinds,
+ *                   freshly enumerated
+ *
+ * It takes no `SelectiveRestorePlan` ON PURPOSE. Post-operation verification
+ * must not need the plan to decide WHAT is protected. Step 11 needs the plan
+ * separately to decide which observed differences are PERMITTED, which is a
+ * later and different question.
+ *
+ * The index read is observation input, never a membership source: it supplies
+ * each frozen path's current index axis, and its key set is deliberately unused.
+ * That distinction is the whole of F4, so it is worth stating plainly rather
+ * than banning index reads outright.
+ *
+ * Returns a `ProtectedDomainSnapshot` so `compareProtectedDomainSnapshots(S,
+ * observed)` consumes it directly. A distinct result type would buy nothing
+ * under structural typing and would force Step 11 to adapt or cast.
+ */
+export async function observeProtectedDomainFromFrozenMembership(
+  repoRoot: string,
+  frozen: ProtectedDomainSnapshot,
+): Promise<ProtectedDomainSnapshot> {
+  const index: IndexSnapshot = await readIndexSnapshot(repoRoot);
+
+  const states = new Map<string, PathState>();
+  for (const path of [...frozen.states.keys()].sort()) {
+    const { state } = await observePathState(repoRoot, path, index);
+    states.set(path, state);
+  }
+
+  // The map KEY is the root authority; the frozen value contributes only its
+  // kind, so a snapshot whose watch value disagreed with its key cannot widen
+  // what gets enumerated.
+  const entries = [...frozen.topologyWatches.entries()].sort((a, b) =>
+    a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0,
+  );
+  const topologyWatches = new Map<string, TopologyWatch>();
+  for (const [root, watch] of entries) {
+    topologyWatches.set(root, {
+      path: root,
+      kind: watch.kind,
+      members: sortMembers(await observeWatchMembers(repoRoot, root, watch.kind, states)),
+    });
+  }
+
+  return { states, topologyWatches };
 }
 
 // =============================================================================

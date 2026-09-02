@@ -3,12 +3,13 @@
 
 // Unit tests for the protected domain (M 0.8.0 step 10B, §9/§10 revision 13).
 //
-// Four sections:
+// Five sections:
 //   A. capture -- the protected path set (REAL repository, hand-built plans)
 //   B. capture -- topology watches       (REAL repository, hand-built plans)
 //   C. comparison                        (pure, no repository)
 //   D. source invariant                  (the state-only capture enumerates
 //                                          nothing)
+//   E. post-mutation observation         (frozen membership, F4)
 //
 // Plans are hand-built typed literals rather than produced by
 // `planSelectiveRestore`. The planner is proven in restore-selective.test.ts;
@@ -37,6 +38,7 @@ import {
   captureProtectedDomain,
   compareProtectedDomainSnapshots,
   compareProtectedStateMaps,
+  observeProtectedDomainFromFrozenMembership,
   type ProtectedDomainSnapshot,
   protectedDomainUnchanged,
   protectedStatesUnchanged,
@@ -956,6 +958,185 @@ describe("source invariant", () => {
       "captureProtectedDomain(",
     ]) {
       expect(body).not.toContain(forbidden);
+    }
+  });
+});
+
+// =============================================================================
+// Section E: post-mutation observation from frozen membership (F4)
+// =============================================================================
+//
+// Each behavioural case pairs the frozen-membership observation with a
+// RE-DERIVED capture of the same plan against the same mutated repository. The
+// contrast is the point: the comparator is bidirectional either way, so the
+// difference is never "one reports and the other stays silent". It is that
+// re-derivation turns a question about a protected path into a question about
+// whether that path is still a member, judged by rules the operation may itself
+// have rewritten.
+
+describe("observeProtectedDomainFromFrozenMembership", () => {
+  it("36: a DELETED frozen path is still observed, as absent, not dropped", async () => {
+    const repo = await setupRepo();
+    try {
+      await write(repo, "sel.txt", "selected\n");
+      await write(repo, "bystander.txt", "an unselected untracked file\n");
+
+      const observed = await currentState(repo.repoRoot, "sel.txt");
+      const plan = eligiblePlan({
+        classifications: [classificationAt("sel.txt", observed, regularState("before\n"))],
+      });
+
+      const frozen = await capture(repo, plan);
+      expect(frozen.states.has("bystander.txt")).toBe(true);
+
+      // The violation post-operation verification exists to catch.
+      await rm(join(repo.repoRoot, "bystander.txt"));
+
+      const now = await observeProtectedDomainFromFrozenMembership(repo.repoRoot, frozen);
+
+      // The key SURVIVES, so the question stays "what happened to this
+      // protected path?" rather than "is this path still a member?".
+      expect([...now.states.keys()]).toEqual([...frozen.states.keys()]);
+      const bystander = now.states.get("bystander.txt");
+      if (bystander === undefined) throw new Error("the frozen path left the observation");
+      expect(bystander.worktree.kind).toBe("absent");
+
+      const difference = compareProtectedDomainSnapshots(frozen, now);
+      expect(difference.changedPaths).toContain("bystander.txt");
+      expect(difference.removedPaths).toEqual([]);
+      expect(difference.addedPaths).toEqual([]);
+      expect(protectedDomainUnchanged(difference)).toBe(false);
+
+      // Re-derivation loses the key entirely, so the same damage arrives as
+      // membership churn rather than as a state change on a stable domain.
+      const rederived = await capture(repo, plan);
+      expect(rederived.states.has("bystander.txt")).toBe(false);
+      expect(compareProtectedStateMaps(frozen.states, rederived.states).removedPaths).toContain(
+        "bystander.txt",
+      );
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it("37: changing .gitignore cannot move a frozen path out of the domain", async () => {
+    const repo = await setupRepo();
+    try {
+      await write(repo, "sel.txt", "selected\n");
+      await write(repo, "logs/app.log", "untouched throughout\n");
+
+      const observed = await currentState(repo.repoRoot, "sel.txt");
+      const plan = eligiblePlan({
+        classifications: [classificationAt("sel.txt", observed, regularState("before\n"))],
+      });
+
+      const frozen = await capture(repo, plan);
+      expect(frozen.states.has("logs/app.log")).toBe(true);
+
+      // The ONLY mutation is to the ignore rules. `logs/app.log` is never
+      // touched, so any difference reported about it is an artefact of the
+      // yardstick moving rather than of anything happening to the file.
+      await write(repo, ".gitignore", ".viberevert/\nlogs/\n");
+
+      const now = await observeProtectedDomainFromFrozenMembership(repo.repoRoot, frozen);
+      const difference = compareProtectedDomainSnapshots(frozen, now);
+
+      // The bystander is still a member, and still unchanged. `.gitignore` is
+      // itself a frozen member, so the real edit is reported honestly, and it
+      // is the ONLY thing reported.
+      expect(now.states.has("logs/app.log")).toBe(true);
+      expect(difference.changedPaths).toEqual([".gitignore"]);
+      expect(difference.removedPaths).toEqual([]);
+      expect(difference.addedPaths).toEqual([]);
+
+      // Re-derivation drops a file nothing touched, purely because the
+      // operation rewrote the rules that decide membership. Step 11 would be
+      // adjudicating against a yardstick the operation moved.
+      const rederived = await capture(repo, plan);
+      expect(rederived.states.has("logs/app.log")).toBe(false);
+      expect(compareProtectedStateMaps(frozen.states, rederived.states).removedPaths).toContain(
+        "logs/app.log",
+      );
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it("38: watch roots and kinds come from S, while members are re-enumerated", async () => {
+    const repo = await setupRepo();
+    try {
+      await write(repo, "dir/leaf.txt", "leaf\n");
+      await write(repo, "dir/sibling.txt", "sibling\n");
+
+      const observed = await currentState(repo.repoRoot, "dir/leaf.txt");
+      const before = regularState("before\n");
+      const plan = eligiblePlan({
+        classifications: [classificationAt("dir/leaf.txt", observed, before)],
+        operations: [restoreOp("dir/leaf.txt", observed, before)],
+      });
+
+      const frozen = await capture(repo, plan);
+      expect(memberPaths(watchAt(frozen, "dir"))).toEqual(["dir/leaf.txt", "dir/sibling.txt"]);
+
+      await rm(join(repo.repoRoot, "dir", "sibling.txt"));
+      await write(repo, "dir/newcomer.txt", "appeared after S\n");
+
+      const now = await observeProtectedDomainFromFrozenMembership(repo.repoRoot, frozen);
+
+      // Watch roots are a pure PLAN projection during capture, so the risk here
+      // is not that they churn: it is that knowing them would require the plan.
+      // Taking roots and kinds from S is what lets post-operation verification
+      // run without the plan at all.
+      expect([...now.topologyWatches.keys()]).toEqual([...frozen.topologyWatches.keys()]);
+      expect(watchAt(now, "dir").kind).toBe(watchAt(frozen, "dir").kind);
+
+      // Members ARE freshly enumerated, which is observation rather than
+      // membership derivation: the roots are frozen, their contents are live.
+      expect(memberPaths(watchAt(now, "dir"))).toEqual(["dir/leaf.txt", "dir/newcomer.txt"]);
+
+      const watchDiff = compareProtectedDomainSnapshots(frozen, now).topologyWatchDifferences.find(
+        (d) => d.path === "dir",
+      );
+      if (watchDiff === undefined) throw new Error("expected a membership difference at dir");
+      expect(watchDiff.addedMembers).toEqual(["dir/newcomer.txt"]);
+      expect(watchDiff.removedMembers).toEqual(["dir/sibling.txt"]);
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it("39: the observation path derives no membership and never sees the plan", async () => {
+    const source = await readFile(new URL("../src/protected-domain.ts", import.meta.url), "utf8");
+
+    // Function-scoped, not import-scoped: this module legitimately imports the
+    // whole derivation machinery for the PRE-mutation capture path. Both
+    // functions on the POST-mutation observation path are checked, because
+    // moving live membership derivation into the watch helper would be the same
+    // F4 regression as putting it directly in the exported observer.
+    const functionSource = (declaration: string): string => {
+      const start = source.indexOf(declaration);
+      expect(start).toBeGreaterThan(-1);
+      const end = source.indexOf("\n}\n", start);
+      expect(end).toBeGreaterThan(start);
+      return source.slice(start, end);
+    };
+
+    const postMutationSurface = [
+      functionSource("async function observeWatchMembers("),
+      functionSource("export async function observeProtectedDomainFromFrozenMembership("),
+    ].join("\n");
+
+    for (const forbidden of [
+      "gitListUntracked",
+      "compileExcludeMatcher",
+      "captureProtectedStateMap(",
+      "captureProtectedDomain(",
+      // The plan must not reach post-operation membership at all, neither as a
+      // value nor as a type on either function's signature.
+      "plan",
+      "Plan",
+    ]) {
+      expect(postMutationSurface).not.toContain(forbidden);
     }
   });
 });
