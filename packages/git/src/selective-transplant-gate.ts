@@ -69,6 +69,14 @@
 // from which step 11 and step 12 derive candidate outcomes, without this package
 // ever returning `PreparedSelectiveTransplant`.
 //
+// The result declares that snapshot as `RecordedTransplantProgress` rather than
+// the structural type, and the distinction is load-bearing rather than
+// decorative. Step 11 requires the branded type, so widening these fields would
+// silently let a hand-built object reach verification as though it were an
+// execution record. The brand marks provenance for ordinary typed callers; the
+// gate's exclusive ownership of the accumulator, pinned by case 11 of this
+// module's suite, is what establishes it at runtime.
+//
 // `precondition_changed` carries no progress, because nothing was published and
 // nothing was mutated.
 //
@@ -165,7 +173,7 @@ import type { ProtectedDomainSnapshot } from "./protected-domain.js";
 import type { SelectiveRestorePlan } from "./restore-selective.js";
 import {
   createTransplantProgress,
-  type SelectiveTransplantProgress,
+  type RecordedTransplantProgress,
 } from "./transplant-obligations.js";
 import {
   executePreparedSelectiveTransplant,
@@ -241,7 +249,7 @@ export type SelectiveTransplantGateResult =
       readonly outcome: "mutation_completed";
       readonly attempt: RollbackAttempt;
       readonly rollbackDir: string;
-      readonly progress: SelectiveTransplantProgress;
+      readonly progress: RecordedTransplantProgress;
     }
   | {
       /** A marker exists and the repository may be partly mutated. */
@@ -249,7 +257,7 @@ export type SelectiveTransplantGateResult =
       readonly attempt: RollbackAttempt;
       readonly rollbackDir: string;
       readonly cause: unknown;
-      readonly progress: SelectiveTransplantProgress;
+      readonly progress: RecordedTransplantProgress;
     };
 
 // =============================================================================

@@ -45,7 +45,10 @@ import {
   runSelectiveTransplantGate,
   type SelectiveTransplantGateResult,
 } from "../src/selective-transplant-gate.js";
-import { deriveCandidateExecutionOutcomes } from "../src/transplant-obligations.js";
+import {
+  deriveCandidateExecutionOutcomes,
+  type RecordedTransplantProgress,
+} from "../src/transplant-obligations.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -583,6 +586,43 @@ const PRECONDITION_CHANGED_HAS_NO_PROGRESS: "progress" extends keyof Preconditio
   ? false
   : true = true;
 
+/**
+ * EXACT type equality, not assignability.
+ *
+ * `RecordedTransplantProgress` extends `SelectiveTransplantProgress`, so an
+ * assignability check would still pass if the gate widened its result back to
+ * the structural type and erased the brand. This form fails compilation on any
+ * difference in either direction.
+ */
+type Equals<A, B> =
+  (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
+
+type MutationCompletedResult = Extract<
+  SelectiveTransplantGateResult,
+  { readonly outcome: "mutation_completed" }
+>;
+type MutationFailedResult = Extract<
+  SelectiveTransplantGateResult,
+  { readonly outcome: "mutation_failed" }
+>;
+
+/**
+ * Both POST-MARKER arms must carry branded progress.
+ *
+ * Step 11 requires the brand, so widening either arm would silently let an
+ * ordinary typed hand-built object reach verification as though an accumulator
+ * had recorded it. The `precondition_changed` arm is deliberately excluded: it
+ * carries no progress at all, which the guard above pins separately.
+ */
+const COMPLETED_PROGRESS_IS_BRANDED: Equals<
+  MutationCompletedResult["progress"],
+  RecordedTransplantProgress
+> = true;
+const FAILED_PROGRESS_IS_BRANDED: Equals<
+  MutationFailedResult["progress"],
+  RecordedTransplantProgress
+> = true;
+
 describe("source invariant", () => {
   it("10: the executor has exactly one approved production caller, this gate", async () => {
     const srcDir = new URL("../src/", import.meta.url);
@@ -665,5 +705,7 @@ describe("source invariant", () => {
     );
 
     expect(PRECONDITION_CHANGED_HAS_NO_PROGRESS).toBe(true);
+    expect(COMPLETED_PROGRESS_IS_BRANDED).toBe(true);
+    expect(FAILED_PROGRESS_IS_BRANDED).toBe(true);
   });
 });
