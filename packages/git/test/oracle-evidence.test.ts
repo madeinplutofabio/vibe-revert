@@ -3,13 +3,24 @@
 
 // Unit tests for session-start oracle evidence validation (M 0.8.0 step 10B, §12).
 //
-// Every case runs the REAL oracle: a real checkpoint is materialized into a real
+// Cases 1-7 run the REAL oracle: a real checkpoint is materialized into a real
 // linked worktree and each candidate's asserted BEFORE state is observed there.
-// The question under test is whether the checkpoint can actually SUPPLY what the
-// contribution DESCRIBES, so faking either side would test nothing.
+// Case 8 isolates the evidence function's eligibility precondition without
+// materializing anything, and case 9 pins the module boundary from source.
+//
+// For the behavioral oracle cases, the question under test is whether the
+// checkpoint can actually SUPPLY what the contribution DESCRIBES, so faking
+// either side would test nothing.
 //
 // Checkpoint directories live OUTSIDE the repository, so they never become
 // untracked content the oracle would observe.
+//
+// F1: `findMissingEvidence` takes an ALREADY MATERIALIZED oracle worktree, so
+// cases 1-7 each open `withCheckpointOracle` themselves and pass that exact
+// `worktreePath` in. The lifecycle is written out inline ON PURPOSE. A local
+// `validate(repo, checkpointDir, plan)` helper would rebuild the deleted
+// self-opening wrapper under a new name and hide the very composition
+// production is required to use.
 
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -21,8 +32,9 @@ import { promisify } from "node:util";
 import type { PathState } from "@viberevert/session-format";
 import { describe, expect, it } from "vitest";
 import { createCheckpoint } from "../src/checkpoint.js";
+import { withCheckpointOracle } from "../src/checkpoint-oracle.js";
 import { CheckpointNotFoundError } from "../src/errors.js";
-import { validateOracleEvidence } from "../src/oracle-evidence.js";
+import { findMissingEvidence, type OracleEvidenceVerdict } from "../src/oracle-evidence.js";
 import { observePathState, readIndexSnapshot } from "../src/path-state.js";
 import {
   ABSENT_PATH_STATE,
@@ -38,6 +50,29 @@ const execFileAsync = promisify(execFile);
 // =============================================================================
 
 const GROUP = "cg_0000000000000000000000000000000000000000000000000000000000000001";
+
+/**
+ * This suite's own oracle prefix.
+ *
+ * The module under test no longer chooses one, because it no longer materializes
+ * anything. Whoever owns the oracle owns its scratch naming.
+ */
+const TEST_ORACLE_PREFIX = "viberevert-evidence-test-oracle-";
+
+/** Distributive, so it collects keys from EVERY arm rather than the shared ones. */
+type KeysOfUnion<T> = T extends T ? keyof T : never;
+
+/**
+ * F1's API boundary, pinned at COMPILE time: the verdict is evidence semantics
+ * only, and lifecycle belongs to whoever owns the oracle.
+ *
+ * A runtime key check proves only that today's `sufficient` value is clean. It
+ * would still pass if `cleanupWarnings?:` were added back to either arm, which
+ * is exactly the regression this guard exists to stop.
+ */
+const VERDICT_HAS_NO_CLEANUP_WARNINGS: "cleanupWarnings" extends KeysOfUnion<OracleEvidenceVerdict>
+  ? false
+  : true = true;
 
 const sha256 = (text: string): string =>
   createHash("sha256").update(Buffer.from(text, "utf8")).digest("hex");
@@ -137,21 +172,18 @@ function eligiblePlan(
   };
 }
 
-const validate = (repo: TestRepo, checkpointDir: string, plan: SelectiveRestorePlan) =>
-  validateOracleEvidence({ repoRoot: repo.repoRoot, checkpointDir, plan });
-
-function expectMissing(result: Awaited<ReturnType<typeof validate>>) {
-  if (result.outcome !== "missing_evidence") {
-    throw new Error(`expected missing_evidence, got ${result.outcome}`);
+function expectMissing(verdict: OracleEvidenceVerdict) {
+  if (verdict.outcome !== "missing_evidence") {
+    throw new Error(`expected missing_evidence, got ${verdict.outcome}`);
   }
-  return result;
+  return verdict;
 }
 
 // =============================================================================
 // Section A: can the checkpoint supply what the contribution asserts?
 // =============================================================================
 
-describe("validateOracleEvidence", () => {
+describe("findMissingEvidence", () => {
   it("1: a checkpoint reproducing every candidate is sufficient evidence", async () => {
     const repo = await setupRepo();
     try {
@@ -170,9 +202,19 @@ describe("validateOracleEvidence", () => {
         candidate("untracked.txt", untrackedBefore),
       ]);
 
-      const result = await validate(repo, checkpointDir, plan);
-      expect(result.outcome).toBe("sufficient");
-      expect(result.cleanupWarnings).toEqual([]);
+      const { value, cleanupWarnings } = await withCheckpointOracle(repo.repoRoot, checkpointDir, {
+        tempDirPrefix: TEST_ORACLE_PREFIX,
+        run: ({ worktreePath }) => findMissingEvidence(worktreePath, plan),
+      });
+
+      expect(value.outcome).toBe("sufficient");
+      // Lifecycle warnings now belong to the oracle's owner, which is this test.
+      // The verdict itself carries none.
+      expect(cleanupWarnings).toEqual([]);
+      expect(Object.keys(value)).toEqual(["outcome"]);
+      // Compile-time boundary: lifecycle cannot creep back into either verdict
+      // arm, optional or required.
+      expect(VERDICT_HAS_NO_CLEANUP_WARNINGS).toBe(true);
     } finally {
       await repo.cleanup();
     }
@@ -191,7 +233,12 @@ describe("validateOracleEvidence", () => {
 
       const plan = eligiblePlan([candidate("a.txt", regularState("a different BEFORE\n"))]);
 
-      const result = expectMissing(await validate(repo, checkpointDir, plan));
+      const { value } = await withCheckpointOracle(repo.repoRoot, checkpointDir, {
+        tempDirPrefix: TEST_ORACLE_PREFIX,
+        run: ({ worktreePath }) => findMissingEvidence(worktreePath, plan),
+      });
+
+      const result = expectMissing(value);
       expect(result.path).toBe("a.txt");
       expect(result.detail).toContain("the contribution asserts");
     } finally {
@@ -213,7 +260,12 @@ describe("validateOracleEvidence", () => {
         candidate("a.txt", { worktree: observed.worktree, index: { kind: "absent" } }),
       ]);
 
-      const result = expectMissing(await validate(repo, checkpointDir, plan));
+      const { value } = await withCheckpointOracle(repo.repoRoot, checkpointDir, {
+        tempDirPrefix: TEST_ORACLE_PREFIX,
+        run: ({ worktreePath }) => findMissingEvidence(worktreePath, plan),
+      });
+
+      const result = expectMissing(value);
       expect(result.path).toBe("a.txt");
       expect(result.detail).toContain("index absent");
     } finally {
@@ -230,7 +282,12 @@ describe("validateOracleEvidence", () => {
         candidate("never-existed.txt", regularState("claimed to have existed\n")),
       ]);
 
-      const result = expectMissing(await validate(repo, checkpointDir, plan));
+      const { value } = await withCheckpointOracle(repo.repoRoot, checkpointDir, {
+        tempDirPrefix: TEST_ORACLE_PREFIX,
+        run: ({ worktreePath }) => findMissingEvidence(worktreePath, plan),
+      });
+
+      const result = expectMissing(value);
       expect(result.path).toBe("never-existed.txt");
       expect(result.detail).toContain("worktree absent");
     } finally {
@@ -253,8 +310,12 @@ describe("validateOracleEvidence", () => {
       ]);
       expect(plan.operations).toEqual([]);
 
-      const result = expectMissing(await validate(repo, checkpointDir, plan));
-      expect(result.path).toBe("settled.txt");
+      const { value } = await withCheckpointOracle(repo.repoRoot, checkpointDir, {
+        tempDirPrefix: TEST_ORACLE_PREFIX,
+        run: ({ worktreePath }) => findMissingEvidence(worktreePath, plan),
+      });
+
+      expect(expectMissing(value).path).toBe("settled.txt");
     } finally {
       await repo.cleanup();
     }
@@ -272,8 +333,12 @@ describe("validateOracleEvidence", () => {
         candidate("a.txt", regularState("a BEFORE\n")),
       ]);
 
-      const result = expectMissing(await validate(repo, checkpointDir, plan));
-      expect(result.path).toBe("a.txt");
+      const { value } = await withCheckpointOracle(repo.repoRoot, checkpointDir, {
+        tempDirPrefix: TEST_ORACLE_PREFIX,
+        run: ({ worktreePath }) => findMissingEvidence(worktreePath, plan),
+      });
+
+      expect(expectMissing(value).path).toBe("a.txt");
       // And the approved plan is untouched by the local sort.
       expect(plan.classifications.map((c) => c.path)).toEqual(["z.txt", "a.txt"]);
     } finally {
@@ -281,47 +346,59 @@ describe("validateOracleEvidence", () => {
     }
   });
 
-  it("7: a genuine checkpoint failure throws rather than reporting missing evidence", async () => {
+  it("7: a checkpoint that cannot materialize never reaches evidence validation", async () => {
     const repo = await setupRepo();
     try {
-      // "We could not read the evidence" and "the evidence contradicts the
-      // plan" demand different recovery advice.
       const plan = eligiblePlan([candidate("a.txt", regularState("anything\n"))]);
       const missing = join(repo.checkpointRoot, "does-not-exist");
+      let ran = false;
 
-      await expect(validate(repo, missing, plan)).rejects.toBeInstanceOf(CheckpointNotFoundError);
+      await expect(
+        withCheckpointOracle(repo.repoRoot, missing, {
+          tempDirPrefix: TEST_ORACLE_PREFIX,
+          run: ({ worktreePath }) => {
+            ran = true;
+            return findMissingEvidence(worktreePath, plan);
+          },
+        }),
+      ).rejects.toBeInstanceOf(CheckpointNotFoundError);
+
+      // "We could not read the evidence" and "the evidence contradicts the
+      // plan" demand different recovery advice, so the second must be
+      // UNREACHABLE when the first happened. Under F1 that is a property of the
+      // composition rather than of one self-opening function.
+      expect(ran).toBe(false);
     } finally {
       await repo.cleanup();
     }
   });
 
-  it("8: a noop or conflicted plan throws BEFORE any oracle work", async () => {
-    const repo = await setupRepo();
-    try {
-      const base = {
-        capabilities: { symlinkCheckout: true },
-        selectedChangeGroupIds: [GROUP],
-        classifications: [],
-        topologyDependencyPaths: [],
-        operations: [],
-      } as const;
+  it("8: a non-eligible plan throws without reading any oracle at all", async () => {
+    const base = {
+      capabilities: { symlinkCheckout: true },
+      selectedChangeGroupIds: [GROUP],
+      classifications: [],
+      topologyDependencyPaths: [],
+      operations: [],
+    } as const;
 
-      const noop: SelectiveRestorePlan = { ...base, outcome: "noop", conflicts: [] };
-      const conflicted: SelectiveRestorePlan = {
-        ...base,
-        outcome: "conflicted",
-        conflicts: [{ changeGroupId: GROUP, path: "x", reason: { code: "MODIFIED_SINCE" } }],
-      };
+    const noop: SelectiveRestorePlan = { ...base, outcome: "noop", conflicts: [] };
+    const conflicted: SelectiveRestorePlan = {
+      ...base,
+      outcome: "conflicted",
+      conflicts: [{ changeGroupId: GROUP, path: "x", reason: { code: "MODIFIED_SINCE" } }],
+    };
 
-      // Pointed at a checkpoint that does NOT exist: if the guard ran after the
-      // oracle, these would reject with CheckpointNotFoundError instead. The
-      // guard's own message is what proves the ordering.
-      const absent = join(repo.checkpointRoot, "does-not-exist");
-      await expect(validate(repo, absent, noop)).rejects.toThrow(/requires an eligible plan/);
-      await expect(validate(repo, absent, conflicted)).rejects.toThrow(/requires an eligible plan/);
-    } finally {
-      await repo.cleanup();
-    }
+    // Eligibility is this function's own precondition, not an orchestration
+    // convenience. The worktree path is deliberately nonexistent: if the guard
+    // ran after the first index read, these would reject with a filesystem
+    // error instead. The guard's own message is what proves the ordering, and
+    // no repository or checkpoint is needed to prove it.
+    const absent = join(tmpdir(), "viberevert-oracle-must-not-be-read");
+    await expect(findMissingEvidence(absent, noop)).rejects.toThrow(/requires an eligible plan/);
+    await expect(findMissingEvidence(absent, conflicted)).rejects.toThrow(
+      /requires an eligible plan/,
+    );
   });
 });
 
@@ -330,13 +407,15 @@ describe("validateOracleEvidence", () => {
 // =============================================================================
 
 describe("source invariant", () => {
-  it("9: the evidence chain has no protected-domain, topology, or object-store input", async () => {
+  it("9: the evidence module has no lifecycle, protected-domain, or object-store input", async () => {
     const source = await readFile(new URL("../src/oracle-evidence.ts", import.meta.url), "utf8");
 
     // Scoped to the IMPORT BLOCK: the file header names several of these
-    // deliberately, to explain why none of them is used.
+    // deliberately, to explain why none of them is used. The end anchor is the
+    // first exported declaration, since the temp-dir constant that used to sit
+    // here went away with the self-opening wrapper.
     const start = source.indexOf("import type { PathState }");
-    const end = source.indexOf("const TEMP_DIR_PREFIX");
+    const end = source.indexOf("export type OracleEvidenceVerdict");
     expect(start).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(start);
     const imports = source.slice(start, end);
@@ -345,6 +424,10 @@ describe("source invariant", () => {
       "./protected-domain.js",
       "./recovery-handle.js",
       "./fs-topology.js",
+      // F1: this module must never materialize an oracle again. Evidence has to
+      // be proven about the SAME worktree the transplant reads from, which is
+      // only possible if the transaction owner supplies it.
+      "./checkpoint-oracle.js",
       // The object store lives in @viberevert/core, which @viberevert/git does
       // not depend on at all. `oid` and `content_ref` are compared here, never
       // dereferenced.

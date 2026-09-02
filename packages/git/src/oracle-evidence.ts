@@ -15,6 +15,37 @@
 // anything is transplanted from one to the other.
 //
 // =============================================================================
+// This module does NOT own an oracle (F1)
+// =============================================================================
+//
+// It takes an ALREADY MATERIALIZED oracle worktree. A self-opening entry point
+// used to live here, and it was the last place in step 10 where evidence could
+// be proven ABOUT one materialization while the mutation READ FROM another:
+//
+//     validation   -> oracle A -> "the checkpoint reproduces BEFORE"
+//     transplant   -> oracle B -> writes bytes out of B
+//
+// Nothing related A to B. They are built from the same checkpoint, so they
+// normally agree, and "normally" is not what a restoration guarantee means.
+//
+// So the transaction owner materializes ONE oracle and threads its path through
+// every phase that consults it:
+//
+//     withCheckpointOracle(...)
+//         findMissingEvidence(worktreePath, plan)
+//         runSelectiveTransplantGate({ oracleWorktree: worktreePath, ... })
+//         step 11 verification, against that same worktreePath
+//
+// Consequently this file has no temp-directory prefix and the verdict carries no
+// `cleanupWarnings`. Oracle lifecycle, and every warning it produces, belongs
+// entirely to whoever owns the oracle.
+//
+// The eligible-plan guard stays HERE, because eligibility is this function's
+// semantic precondition rather than an orchestration convenience. Hoisting it
+// upward would let some later caller hand this module a non-eligible plan while
+// the evidence layer quietly stopped defending its own contract.
+//
+// =============================================================================
 // Every classification, not just the write footprint
 // =============================================================================
 //
@@ -46,11 +77,11 @@
 // A read failure is not a mismatch
 // =============================================================================
 //
-// There is no `catch`. A corrupt checkpoint, a failed worktree add, or an
-// observation error throws. "We could not read the evidence" and "the evidence
-// contradicts the plan" are different failures demanding different recovery
-// advice, and collapsing them would tell the user their contribution is
-// unrestorable when the truth is that we never managed to look.
+// There is no `catch`. A corrupt checkpoint or an observation error throws. "We
+// could not read the evidence" and "the evidence contradicts the plan" are
+// different failures demanding different recovery advice, and collapsing them
+// would tell the user their contribution is unrestorable when the truth is that
+// we never managed to look.
 //
 // =============================================================================
 // What this module deliberately never touches
@@ -61,13 +92,13 @@
 // `content_ref` are COMPARISON EVIDENCE here, never fetch keys. The entire
 // evidence chain is
 //
-//     checkpoint oracle -> one IndexSnapshot -> observePathState -> pathStateEqual
+//     the caller's oracle worktree -> one IndexSnapshot -> observePathState
+//         -> pathStateEqual
 //
 // with no content-ref dereference anywhere in it.
 
 import type { PathState } from "@viberevert/session-format";
 
-import { withCheckpointOracle } from "./checkpoint-oracle.js";
 import {
   type IndexSnapshot,
   observePathState,
@@ -76,33 +107,15 @@ import {
 } from "./path-state.js";
 import type { SelectiveRestoreClassification, SelectiveRestorePlan } from "./restore-selective.js";
 
-/**
- * Prefix for the oracle's scratch directory. Required by
- * `withCheckpointOracle` rather than defaulted, because it appears verbatim in
- * cleanup warnings and a shared default would mislabel whichever consumer did
- * not choose it.
- */
-const TEMP_DIR_PREFIX = "viberevert-evidence-oracle-";
-
-export interface OracleEvidenceValidationOptions {
-  readonly repoRoot: string;
-  /** The SESSION-START checkpoint: the restoration source, per §2. */
-  readonly checkpointDir: string;
-  readonly plan: SelectiveRestorePlan;
-}
-
-export type OracleEvidenceValidationResult =
-  | {
-      readonly outcome: "sufficient";
-      readonly cleanupWarnings: readonly string[];
-    }
+/** Evidence semantics only. Oracle lifecycle is the caller's concern. */
+export type OracleEvidenceVerdict =
+  | { readonly outcome: "sufficient" }
   | {
       readonly outcome: "missing_evidence";
       /** The machine-readable fact. */
       readonly path: string;
       /** A compact hint for rendering; `path` is what a caller keys on. */
       readonly detail: string;
-      readonly cleanupWarnings: readonly string[];
     };
 
 // =============================================================================
@@ -151,11 +164,6 @@ const describe = (state: PathState): string =>
 // Validation
 // =============================================================================
 
-interface MissingEvidence {
-  readonly path: string;
-  readonly detail: string;
-}
-
 /** Deterministic candidate order, over a copy. The plan is immutable input. */
 function orderedCandidates(plan: SelectiveRestorePlan): readonly SelectiveRestoreClassification[] {
   return [...plan.classifications].sort((a, b) => {
@@ -166,45 +174,37 @@ function orderedCandidates(plan: SelectiveRestorePlan): readonly SelectiveRestor
 }
 
 /**
- * Require the session-start checkpoint to reproduce every selected candidate's
- * asserted BEFORE state.
+ * Require an already-materialized session-start oracle to reproduce every
+ * selected candidate's asserted BEFORE state.
+ *
+ * `oracleWorktree` must be the SAME materialization the transplant will later
+ * read from, which is what makes this evidence about the transaction rather
+ * than about a sibling checkout built from the same checkpoint.
  *
  * ONE `IndexSnapshot` serves every observation, so the index axis cannot
- * disagree with itself across the walk. Observation is sequential over a
- * disposable oracle worktree. Unlike the live checkout, this is
- * VibeRevert-owned scratch state materialized for this validation, so Step 10
- * does not add a separate live-checkout fence around this read.
- *
- * The verdict is computed INSIDE the oracle callback, while the materialized
- * worktree is alive, and the lifecycle warnings are joined afterwards.
+ * disagree with itself across the walk. Observation is sequential. Unlike the
+ * live checkout, this is VibeRevert-owned scratch state materialized for the
+ * transaction, so Step 10 adds no separate live-checkout fence around this read.
  */
-export async function validateOracleEvidence(
-  opts: OracleEvidenceValidationOptions,
-): Promise<OracleEvidenceValidationResult> {
-  const { repoRoot, checkpointDir, plan } = opts;
+export async function findMissingEvidence(
+  oracleWorktree: string,
+  plan: SelectiveRestorePlan,
+): Promise<OracleEvidenceVerdict> {
   if (plan.outcome !== "eligible") {
     throw new Error(
       `oracle evidence validation requires an eligible plan, received ${JSON.stringify(plan.outcome)}`,
     );
   }
 
-  const { value: missing, cleanupWarnings } = await withCheckpointOracle(repoRoot, checkpointDir, {
-    tempDirPrefix: TEMP_DIR_PREFIX,
-    run: async ({ worktreePath }): Promise<MissingEvidence | null> => {
-      const index: IndexSnapshot = await readIndexSnapshot(worktreePath);
-      for (const candidate of orderedCandidates(plan)) {
-        const { state } = await observePathState(worktreePath, candidate.path, index);
-        if (pathStateEqual(state, candidate.expectedBefore)) continue;
-        return {
-          path: candidate.path,
-          detail: `the contribution asserts ${describe(candidate.expectedBefore)}, but the session-start checkpoint reconstructs ${describe(state)}`,
-        };
-      }
-      return null;
-    },
-  });
-
-  return missing === null
-    ? { outcome: "sufficient", cleanupWarnings }
-    : { outcome: "missing_evidence", path: missing.path, detail: missing.detail, cleanupWarnings };
+  const index: IndexSnapshot = await readIndexSnapshot(oracleWorktree);
+  for (const candidate of orderedCandidates(plan)) {
+    const { state } = await observePathState(oracleWorktree, candidate.path, index);
+    if (pathStateEqual(state, candidate.expectedBefore)) continue;
+    return {
+      outcome: "missing_evidence",
+      path: candidate.path,
+      detail: `the contribution asserts ${describe(candidate.expectedBefore)}, but the session-start checkpoint reconstructs ${describe(state)}`,
+    };
+  }
+  return { outcome: "sufficient" };
 }
