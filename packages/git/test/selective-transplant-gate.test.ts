@@ -7,7 +7,7 @@
 //   A. before the marker      (1-3)
 //   B. the marker binding     (4-7)
 //   C. success and failure    (8-9)
-//   D. reachability           (10)
+//   D. reachability           (10-11)
 //
 // The repository is REAL because the fence observes it through
 // `readIndexSnapshot` and `gitListUntracked`. The ORACLE stays a plain
@@ -45,6 +45,7 @@ import {
   runSelectiveTransplantGate,
   type SelectiveTransplantGateResult,
 } from "../src/selective-transplant-gate.js";
+import { deriveCandidateExecutionOutcomes } from "../src/transplant-obligations.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -494,10 +495,21 @@ describe("runSelectiveTransplantGate: success and failure", () => {
       ]);
       expect(p.calls[0]?.resolvedChangeGroupIds).toEqual(t.plan.selectedChangeGroupIds);
 
-      expect(result.outcome).toBe("mutated");
-      if (result.outcome !== "mutated") throw new Error("unreachable");
+      expect(result.outcome).toBe("mutation_completed");
+      if (result.outcome !== "mutation_completed") throw new Error("unreachable");
       expect(result.rollbackDir).toBe(ROLLBACK_DIR);
       expect(result.attempt.pre_rollback_checkpoint_id).toBe(CHECKPOINT_ID);
+
+      // The execution record describes THIS transaction's schedule, complete.
+      // `mutation_completed` claims exactly that every primitive returned; it
+      // makes no claim that anything is restored.
+      expect(result.progress.states).toEqual(["completed"]);
+      expect(result.progress.obligations.map((o) => [o.phase, o.path])).toEqual([
+        ["leaf", RESTORED],
+      ]);
+      expect(result.progress.candidates.map((c) => c.path)).toEqual([RESTORED]);
+      // Frozen, so evidence the gate handed out cannot drift afterwards.
+      expect(Object.isFrozen(result.progress)).toBe(true);
     } finally {
       await t.cleanup();
     }
@@ -530,6 +542,17 @@ describe("runSelectiveTransplantGate: success and failure", () => {
 
       // Nothing was written before the failure.
       expect(await read(t.repo, RESTORED)).toBe(AFTER_BYTES);
+
+      // The execution record survives the throw, because the gate owns the
+      // accumulator rather than reading a value the executor never returned.
+      expect(result.progress.states).toEqual(["attempted"]);
+
+      // End to end: the raw fact classifies as `failed`, never `not_attempted`,
+      // even though this primitive happened to write nothing. It was entered,
+      // and a primitive may mutate before failing.
+      expect(deriveCandidateExecutionOutcomes(result.progress)).toEqual([
+        { path: RESTORED, changeGroupId: GROUP, status: "failed" },
+      ]);
     } finally {
       await t.cleanup();
     }
@@ -539,6 +562,26 @@ describe("runSelectiveTransplantGate: success and failure", () => {
 // =============================================================================
 // Section D: reachability
 // =============================================================================
+
+type PreconditionChangedResult = Extract<
+  SelectiveTransplantGateResult,
+  { readonly outcome: "precondition_changed" }
+>;
+
+/**
+ * The fence-refusal branch carries no execution record, pinned at COMPILE time.
+ *
+ * Nothing was published and nothing was mutated there, so an all-pending
+ * snapshot would conflate "no mutation was authorized" with "mutation was
+ * authorized and nothing ran". Only the second leaves a marker on disk.
+ *
+ * Written against `keyof` rather than an `extends { progress: unknown }` check,
+ * which an accidental `progress?:` would silently satisfy. Optional progress
+ * violates the distinction exactly as much as a required one.
+ */
+const PRECONDITION_CHANGED_HAS_NO_PROGRESS: "progress" extends keyof PreconditionChangedResult
+  ? false
+  : true = true;
 
 describe("source invariant", () => {
   it("10: the executor has exactly one approved production caller, this gate", async () => {
@@ -572,5 +615,55 @@ describe("source invariant", () => {
     const barrel = await readFile(new URL("index.ts", srcDir), "utf8");
     expect(barrel).not.toContain("transplant-schedule");
     expect(barrel).not.toContain("selective-transplant-gate");
+  });
+
+  it("11: the gate owns the accumulator, the ordering, and the catch scope", async () => {
+    const source = await readFile(
+      new URL("../src/selective-transplant-gate.ts", import.meta.url),
+      "utf8",
+    );
+
+    // OWNERSHIP. The concrete accumulator is built here, from this
+    // transaction's own validated schedule, and that exact object reaches the
+    // executor. The executor's parameter is an interface, so the safety
+    // property is this composition rather than the type.
+    expect(source).toMatch(
+      /import\s*\{[^}]*\bcreateTransplantProgress\b[^}]*\}\s*from\s*["']\.\/transplant-obligations\.js["']/s,
+    );
+    expect(source).toMatch(
+      /const\s+progress\s*=\s*createTransplantProgress\(\s*prepared\.obligations,\s*prepared\.candidates,?\s*\)/,
+    );
+    expect(source).toMatch(/executePreparedSelectiveTransplant\([^)]*\bprogress\b[^)]*\)/);
+
+    // NO injected factory and no caller-supplied sink. Post-marker safety must
+    // never depend on arbitrary caller code choosing not to throw.
+    const optionsStart = source.indexOf("export interface SelectiveTransplantGateOptions");
+    expect(optionsStart).toBeGreaterThan(-1);
+    const optionsEnd = source.indexOf("\n}\n", optionsStart);
+    expect(optionsEnd).toBeGreaterThan(optionsStart);
+    expect(source.slice(optionsStart, optionsEnd)).not.toMatch(/progress/i);
+
+    // ORDERING, in source order: preparation precedes accumulator construction;
+    // construction and the immutable schedule-evidence projection precede the
+    // fence; publication follows the fence; execution follows publication.
+    const prepareIdx = source.indexOf("await prepareSelectiveTransplant(");
+    const createIdx = source.indexOf("createTransplantProgress(prepared.obligations");
+    const fenceIdx = source.indexOf("await finalProtectedDomainFence(");
+    const publishIdx = source.indexOf("await opts.publishAttempt(");
+    const executeIdx = source.indexOf("await executePreparedSelectiveTransplant(");
+    expect(prepareIdx).toBeGreaterThan(-1);
+    expect(prepareIdx).toBeLessThan(createIdx);
+    expect(createIdx).toBeLessThan(fenceIdx);
+    expect(fenceIdx).toBeLessThan(publishIdx);
+    expect(publishIdx).toBeLessThan(executeIdx);
+
+    // CATCH SCOPE. The `try` wraps the executor ALONE. Widening it would let a
+    // snapshot failure, after every primitive completed, be reported as a
+    // mutation failure, which is a different fact entirely.
+    expect(source).toMatch(
+      /try\s*\{\s*await executePreparedSelectiveTransplant\([^;]*\);\s*\}\s*catch\s*\(cause\)\s*\{/,
+    );
+
+    expect(PRECONDITION_CHANGED_HAS_NO_PROGRESS).toBe(true);
   });
 });

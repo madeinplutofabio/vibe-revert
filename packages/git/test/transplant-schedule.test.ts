@@ -3,7 +3,7 @@
 
 // Unit tests for the mutation schedule (M 0.8.0 step 10F, §13).
 //
-// Eight sections:
+// Nine sections:
 //   A. derivation and ordering      (1-3)
 //   B. authorization                (4-8)
 //   C. evidence linkage             (9-12)
@@ -12,6 +12,7 @@
 //   F. oracle index                 (20-21)
 //   G. execution                    (22-25)
 //   H. source invariant             (26)
+//   I. obligation graph             (27-29)
 //
 // THREE FIXTURE TIERS, by what each case genuinely needs:
 //
@@ -46,10 +47,13 @@ import type {
   SelectiveRestoreOperation,
   SelectiveRestorePlan,
 } from "../src/restore-selective.js";
+import { createTransplantProgress } from "../src/transplant-obligations.js";
 import {
   executePreparedSelectiveTransplant,
+  type PreparedIndexPhase,
   type PreparedSelectiveTransplant,
   prepareSelectiveTransplant,
+  type ScheduledObligation,
 } from "../src/transplant-schedule.js";
 
 const execFileAsync = promisify(execFile);
@@ -240,6 +244,100 @@ const leafPaths = (prepared: PreparedSelectiveTransplant): readonly string[] =>
 const indexWritePaths = (prepared: PreparedSelectiveTransplant): readonly string[] =>
   prepared.indexPhase.kind === "writes" ? prepared.indexPhase.writes.map((w) => w.path) : [];
 
+const removalPaths = (prepared: PreparedSelectiveTransplant): readonly string[] =>
+  prepared.removals.map((r) => r.path);
+
+const directoryPaths = (prepared: PreparedSelectiveTransplant): readonly string[] =>
+  prepared.directories.map((d) => d.path);
+
+/**
+ * Build a prepared value directly, for the execution cases.
+ *
+ * Assigns ids sequentially in ARRAY order and deliberately does NOT sort. These
+ * cases prove the executor honors the order it is handed; the sorting authority
+ * belongs to preparation and is proven by cases 1 and 27.
+ *
+ * Attribution defaults to the step's own path, which is all a case observing
+ * filesystem effects needs. The production relation, including a shared
+ * synthetic parent serving several candidates, is proven from real plans in
+ * case 28.
+ */
+function preparedOf(parts: {
+  readonly removals?: readonly string[];
+  readonly directories?: readonly string[];
+  readonly leaves?: readonly { readonly path: string; readonly target: PathState }[];
+  readonly indexWrites?: readonly { readonly path: string; readonly target: IndexState }[];
+  readonly oracleIndex?: IndexSnapshot;
+  readonly attribution?: ReadonlyMap<string, readonly string[]>;
+}): PreparedSelectiveTransplant {
+  const attributed = (path: string): readonly string[] => parts.attribution?.get(path) ?? [path];
+
+  const removalsIn = parts.removals ?? [];
+  const directoriesIn = parts.directories ?? [];
+  const leavesIn = parts.leaves ?? [];
+  const indexIn = parts.indexWrites ?? [];
+
+  const directoryBase = removalsIn.length;
+  const leafBase = directoryBase + directoriesIn.length;
+  const indexBase = leafBase + leavesIn.length;
+
+  const removals = removalsIn.map((path, i) => ({
+    id: i,
+    phase: "removal" as const,
+    path,
+    candidatePaths: attributed(path),
+  }));
+  const directories = directoriesIn.map((path, i) => ({
+    id: directoryBase + i,
+    phase: "directory" as const,
+    path,
+    candidatePaths: attributed(path),
+  }));
+  const leaves = leavesIn.map((leaf, i) => ({
+    id: leafBase + i,
+    phase: "leaf" as const,
+    path: leaf.path,
+    candidatePaths: attributed(leaf.path),
+    target: leaf.target,
+  }));
+  const indexWrites = indexIn.map((write, i) => ({
+    id: indexBase + i,
+    phase: "index" as const,
+    path: write.path,
+    candidatePaths: attributed(write.path),
+    target: write.target,
+  }));
+
+  const obligations: readonly ScheduledObligation[] = [
+    ...removals,
+    ...directories,
+    ...leaves,
+    ...indexWrites,
+  ];
+
+  const idsByCandidate = new Map<string, number[]>();
+  for (const obligation of obligations) {
+    for (const candidatePath of obligation.candidatePaths) {
+      const ids = idsByCandidate.get(candidatePath) ?? [];
+      ids.push(obligation.id);
+      idsByCandidate.set(candidatePath, ids);
+    }
+  }
+  const candidates = [...idsByCandidate.entries()]
+    .map(([path, obligationIds]) => ({ path, changeGroupId: GROUP, obligationIds }))
+    .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+
+  let indexPhase: PreparedIndexPhase = { kind: "none" };
+  if (indexWrites.length > 0) {
+    if (parts.oracleIndex === undefined) {
+      throw new Error("fixture: index writes require an oracle snapshot");
+    }
+    indexPhase = { kind: "writes", writes: indexWrites, oracleIndex: parts.oracleIndex };
+  }
+
+  return { removals, directories, leaves, indexPhase, obligations, candidates };
+}
+
 // =============================================================================
 // Section A: derivation and ordering
 // =============================================================================
@@ -288,9 +386,9 @@ describe("prepareSelectiveTransplant: derivation and ordering", () => {
 
       // Removals: a candidate whose BEFORE worktree is absent is a removal, not
       // a leaf. Deepest first, ties lexical.
-      expect(prepared.removals).toEqual(["a/b/deep.txt", "top.txt"]);
+      expect(removalPaths(prepared)).toEqual(["a/b/deep.txt", "top.txt"]);
       // Directories: shallowest first.
-      expect(prepared.directories).toEqual(["m", "z/deeper"]);
+      expect(directoryPaths(prepared)).toEqual(["m", "z/deeper"]);
       // Leaves: lexical.
       expect(leafPaths(prepared)).toEqual(["m/leaf.txt", "z/deeper/x.txt", "z/leaf.txt"]);
       // Index: only the axis that actually differs.
@@ -298,7 +396,7 @@ describe("prepareSelectiveTransplant: derivation and ordering", () => {
 
       // The independence property, stated directly: identical worktree means no
       // removal and no leaf, yet the index write is still scheduled.
-      expect(prepared.removals).not.toContain("keep.txt");
+      expect(removalPaths(prepared)).not.toContain("keep.txt");
       expect(leafPaths(prepared)).not.toContain("keep.txt");
     } finally {
       await fx.cleanup();
@@ -319,7 +417,7 @@ describe("prepareSelectiveTransplant: derivation and ordering", () => {
     for (const [label, observed, before, removalExpected] of rows) {
       const plan = planOf({ classifications: [restoreRequired("p.txt", before, observed)] });
       const prepared = await prepare(plan);
-      expect(prepared.removals, label).toEqual(removalExpected ? ["p.txt"] : []);
+      expect(removalPaths(prepared), label).toEqual(removalExpected ? ["p.txt"] : []);
       // A present target always materializes; an absent one never does.
       expect(leafPaths(prepared), label).toEqual(
         before.worktree.kind === "absent" ? [] : ["p.txt"],
@@ -673,7 +771,7 @@ describe("prepareSelectiveTransplant: synthetic parent authority", () => {
 
     for (const plan of [parentFirst, parentLast]) {
       const prepared = await prepare(plan);
-      expect(prepared.directories).toEqual(["dir"]);
+      expect(directoryPaths(prepared)).toEqual(["dir"]);
       expect(leafPaths(prepared)).toEqual(["dir/leaf.txt"]);
     }
   });
@@ -819,8 +917,12 @@ describe("prepareSelectiveTransplant: oracle index", () => {
 // =============================================================================
 //
 // `PreparedSelectiveTransplant` is exported, so these build the prepared value
-// directly. That isolates the mutation phases from preparation, and keeps the
-// worktree cases on plain directories.
+// directly through `preparedOf`. That isolates the mutation phases from
+// preparation, and keeps the worktree cases on plain directories.
+//
+// Each case supplies a REAL accumulator built by `createTransplantProgress`,
+// because the gate's contract is that the executor never receives one it did
+// not construct. A stub sink here would test an arrangement production forbids.
 
 describe("executePreparedSelectiveTransplant", () => {
   it("22: a mixed transplant removes, creates, and materializes", async () => {
@@ -829,16 +931,19 @@ describe("executePreparedSelectiveTransplant", () => {
       await write(fx.repo, "gone.txt", "delete me\n");
       await write(fx.oracle, "new/leaf.txt", "materialized\n");
 
-      await executePreparedSelectiveTransplant(fx.repo, fx.oracle, {
+      const prepared = preparedOf({
         removals: ["gone.txt"],
         directories: ["new"],
         leaves: [{ path: "new/leaf.txt", target: regular("materialized\n") }],
-        indexPhase: { kind: "none" },
       });
+      const progress = createTransplantProgress(prepared.obligations, prepared.candidates);
+      await executePreparedSelectiveTransplant(fx.repo, fx.oracle, prepared, progress);
 
       await expect(lstat(join(fx.repo, "gone.txt"))).rejects.toThrow();
       expect((await lstat(join(fx.repo, "new"))).isDirectory()).toBe(true);
       expect(await readFile(join(fx.repo, "new", "leaf.txt"), "utf8")).toBe("materialized\n");
+      // A completed run leaves every obligation completed.
+      expect(progress.snapshot().states).toEqual(["completed", "completed", "completed"]);
     } finally {
       await fx.cleanup();
     }
@@ -851,12 +956,9 @@ describe("executePreparedSelectiveTransplant", () => {
 
       // `removeWorktreePath` uses `rmdir` and refuses ENOTEMPTY, so the reverse
       // order could not succeed.
-      await executePreparedSelectiveTransplant(fx.repo, fx.oracle, {
-        removals: ["a/b/c.txt", "a/b", "a"],
-        directories: [],
-        leaves: [],
-        indexPhase: { kind: "none" },
-      });
+      const prepared = preparedOf({ removals: ["a/b/c.txt", "a/b", "a"] });
+      const progress = createTransplantProgress(prepared.obligations, prepared.candidates);
+      await executePreparedSelectiveTransplant(fx.repo, fx.oracle, prepared, progress);
 
       await expect(lstat(join(fx.repo, "a"))).rejects.toThrow();
     } finally {
@@ -869,12 +971,9 @@ describe("executePreparedSelectiveTransplant", () => {
     try {
       // `createWorktreeDirectory` uses a non-recursive `mkdir`, so the reverse
       // order could not succeed.
-      await executePreparedSelectiveTransplant(fx.repo, fx.oracle, {
-        removals: [],
-        directories: ["x", "x/y", "x/y/z"],
-        leaves: [],
-        indexPhase: { kind: "none" },
-      });
+      const prepared = preparedOf({ directories: ["x", "x/y", "x/y/z"] });
+      const progress = createTransplantProgress(prepared.obligations, prepared.candidates);
+      await executePreparedSelectiveTransplant(fx.repo, fx.oracle, prepared, progress);
 
       expect((await lstat(join(fx.repo, "x", "y", "z"))).isDirectory()).toBe(true);
     } finally {
@@ -904,13 +1003,15 @@ describe("executePreparedSelectiveTransplant", () => {
       await mkdir(join(fx.root, "blocked.txt"), { recursive: true });
       await write(dirs.oracle, "blocked.txt", "leaf bytes\n");
 
+      const prepared = preparedOf({
+        leaves: [{ path: "blocked.txt", target: regular("leaf bytes\n") }],
+        indexWrites: [{ path: "k.txt", target: v1Entry }],
+        oracleIndex,
+      });
+      const progress = createTransplantProgress(prepared.obligations, prepared.candidates);
+
       await expect(
-        executePreparedSelectiveTransplant(fx.root, dirs.oracle, {
-          removals: [],
-          directories: [],
-          leaves: [{ path: "blocked.txt", target: regular("leaf bytes\n") }],
-          indexPhase: { kind: "writes", writes: [{ path: "k.txt", target: v1Entry }], oracleIndex },
-        }),
+        executePreparedSelectiveTransplant(fx.root, dirs.oracle, prepared, progress),
       ).rejects.toThrow(/is in the way/);
 
       // The load-bearing assertion: phase 4 never ran, so the real index is
@@ -930,7 +1031,7 @@ describe("executePreparedSelectiveTransplant", () => {
 // =============================================================================
 
 describe("source invariant", () => {
-  it("26: the post-marker region awaits exactly the four phases, in order", async () => {
+  it("26: the post-marker region is exactly four primitives and their bookkeeping", async () => {
     const source = await readFile(
       new URL("../src/transplant-schedule.ts", import.meta.url),
       "utf8",
@@ -938,9 +1039,13 @@ describe("source invariant", () => {
 
     const start = source.indexOf("export async function executePreparedSelectiveTransplant(");
     expect(start).toBeGreaterThan(-1);
-    const end = source.indexOf("\n}\n", start);
-    expect(end).toBeGreaterThan(start);
-    const body = source.slice(start, end);
+    // Slice AFTER the signature, so the function's own name is not counted as a
+    // call by the scan below.
+    const signatureEnd = source.indexOf("): Promise<void> {", start);
+    expect(signatureEnd).toBeGreaterThan(start);
+    const end = source.indexOf("\n}\n", signatureEnd);
+    expect(end).toBeGreaterThan(signatureEnd);
+    const body = source.slice(signatureEnd, end);
 
     // ORDERED, not merely a set: this pins §13's four phases at the call
     // boundary, while cases 23 to 25 prove at runtime why the order matters.
@@ -952,11 +1057,184 @@ describe("source invariant", () => {
       "transplantIndexPath",
     ]);
 
+    // EVERY call, not only the awaited ones. Without this a future SYNCHRONOUS
+    // `validateSomething()` would reintroduce a deterministic post-marker
+    // refusal while still satisfying the assertion above.
+    const keywords = new Set(["if", "for", "while", "switch", "catch", "return", "typeof"]);
+    const called = new Set(
+      [...body.matchAll(/(?<![.\w$])([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*\(/g)]
+        .map((m) => m[1])
+        .filter((name): name is string => name !== undefined && !keywords.has(name)),
+    );
+    expect([...called].sort()).toEqual([
+      "createWorktreeDirectory",
+      "materializeWorktreeLeaf",
+      "progress.markAttempted",
+      "progress.markCompleted",
+      "removeWorktreePath",
+      "transplantIndexPath",
+    ]);
+
+    // The F3 ordering rule, structurally rather than by convention: every
+    // primitive is bracketed by its own marks, and ATTEMPTED is recorded before
+    // the primitive runs, because a primitive may mutate and still fail.
+    const bracketed = [
+      ...body.matchAll(
+        /progress\.markAttempted\(step\.id\);\s*await\s+([A-Za-z_$][\w$]*)\([^;]*\);\s*progress\.markCompleted\(step\.id\);/g,
+      ),
+    ].map((m) => m[1]);
+    expect(bracketed).toEqual([
+      "removeWorktreePath",
+      "createWorktreeDirectory",
+      "materializeWorktreeLeaf",
+      "transplantIndexPath",
+    ]);
+
     // Nothing between the marker and the first mutation may deterministically
-    // refuse. A name-based check would miss a future `readIndexSnapshot` or
-    // filesystem preflight; requiring the awaited set to be exactly the four
-    // primitives catches those too.
+    // refuse.
     expect(body).not.toContain("throw");
     expect(body).not.toMatch(/\breturn\b/);
+  });
+});
+
+// =============================================================================
+// Section I: obligation graph
+// =============================================================================
+//
+// Built from REAL plans rather than hand-assembled values, because the point is
+// what preparation derives, not what a fixture can assert about itself.
+
+describe("the obligation graph", () => {
+  it("27: ids are dense and follow execution order across all four phases", async () => {
+    const fx = await setupGitRoot();
+    try {
+      await write(fx.root, "keep.txt", "kept\n");
+      await git(fx.root, ["add", "-A"]);
+      await git(fx.root, ["commit", "-m", "seed"]);
+      const oracleIndex = await readIndexSnapshot(fx.root);
+      const keptEntry = requireEntry(oracleIndex, "keep.txt");
+
+      const classifications = [
+        restoreRequired("top.txt", ABSENT, regular("top")),
+        restoreRequired("m/leaf.txt", regular("before"), regular("after")),
+        restoreRequired(
+          "keep.txt",
+          withIndex(regular("kept\n"), keptEntry),
+          withIndex(regular("kept\n"), { kind: "absent" }),
+        ),
+      ];
+      const plan = planOf({
+        classifications,
+        operations: [...classifications.map(candidateOp), parentOp("m", ["m/leaf.txt"])],
+      });
+
+      const prepared = await prepare(plan, fx.root);
+
+      // Dense: the table is indexed by its own ids, with no gaps.
+      expect(prepared.obligations.map((o) => o.id)).toEqual(prepared.obligations.map((_, i) => i));
+
+      // And that order IS execution order: removals, directories, leaves, index.
+      expect(prepared.obligations.map((o) => [o.phase, o.path])).toEqual([
+        ["removal", "top.txt"],
+        ["directory", "m"],
+        ["leaf", "m/leaf.txt"],
+        ["index", "keep.txt"],
+      ]);
+
+      // The flattened table is an INDEX over the execution program, not a
+      // parallel description. Every phase entry is the exact object reachable
+      // through its obligation id.
+      const phaseSteps = [
+        ...prepared.removals,
+        ...prepared.directories,
+        ...prepared.leaves,
+        ...(prepared.indexPhase.kind === "writes" ? prepared.indexPhase.writes : []),
+      ];
+      for (const step of phaseSteps) {
+        expect(prepared.obligations[step.id]).toBe(step);
+      }
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  it("28: attribution is reciprocal, and the table holds the phase-step objects", async () => {
+    const a = restoreRequired("src/a.ts", regular("a-before"), regular("a-after"));
+    const b = restoreRequired("src/b.ts", regular("b-before"), regular("b-after"));
+    const plan = planOf({
+      classifications: [a, b],
+      operations: [candidateOp(a), candidateOp(b), parentOp("src", ["src/a.ts", "src/b.ts"])],
+    });
+
+    const prepared = await prepare(plan);
+
+    const parent = prepared.directories[0];
+    if (parent === undefined) throw new Error("fixture: expected a synthetic parent");
+    expect(parent.path).toBe("src");
+    // The one many-to-many case: a shared parent serves BOTH candidates, so its
+    // failure can later mark both incomplete.
+    expect([...parent.candidatePaths].sort()).toEqual(["src/a.ts", "src/b.ts"]);
+
+    expect(prepared.candidates.map((c) => c.path)).toEqual(["src/a.ts", "src/b.ts"]);
+    for (const candidate of prepared.candidates) {
+      // Reverse direction: the shared parent appears in every record it serves.
+      expect(candidate.obligationIds).toContain(parent.id);
+      expect([...candidate.obligationIds]).toEqual(
+        [...candidate.obligationIds].sort((x, y) => x - y),
+      );
+      // Forward direction: every id named attributes back to this candidate.
+      for (const id of candidate.obligationIds) {
+        const obligation = prepared.obligations[id];
+        if (obligation === undefined) throw new Error(`fixture: no obligation ${id}`);
+        expect(obligation.candidatePaths).toContain(candidate.path);
+      }
+    }
+
+    // IDENTITY, not equality. The table is a view over the execution program,
+    // never a parallel description that could drift from it.
+    expect(prepared.obligations[parent.id]).toBe(parent);
+    for (const leaf of prepared.leaves) {
+      expect(prepared.obligations[leaf.id]).toBe(leaf);
+    }
+  });
+
+  it("29: a primitive failure leaves exactly one obligation attempted", async () => {
+    const fx = await setupRoots();
+    try {
+      await write(fx.repo, "gone.txt", "delete me\n");
+      await write(fx.oracle, "a.txt", "a\n");
+      await write(fx.oracle, "blocked.txt", "blocked\n");
+      // A directory where a leaf must be materialized, which
+      // `materializeWorktreeLeaf` refuses, exactly as in case 25.
+      await mkdir(join(fx.repo, "blocked.txt"), { recursive: true });
+
+      const prepared = preparedOf({
+        removals: ["gone.txt"],
+        directories: ["new"],
+        leaves: [
+          { path: "a.txt", target: regular("a\n") },
+          { path: "blocked.txt", target: regular("blocked\n") },
+          { path: "z.txt", target: regular("never\n") },
+        ],
+      });
+      const progress = createTransplantProgress(prepared.obligations, prepared.candidates);
+
+      await expect(
+        executePreparedSelectiveTransplant(fx.repo, fx.oracle, prepared, progress),
+      ).rejects.toThrow(/is in the way/);
+
+      // The RAW fact from which `failed` versus `not_attempted` is later
+      // derived. Nothing here classifies anything: that belongs to the evidence
+      // layer, and is proven separately.
+      expect(progress.snapshot().states).toEqual([
+        "completed", // gone.txt removal
+        "completed", // new directory
+        "completed", // a.txt leaf
+        "attempted", // blocked.txt leaf: reached, refused, never completed
+        "pending", // z.txt leaf: never reached
+      ]);
+    } finally {
+      await fx.cleanup();
+    }
   });
 });

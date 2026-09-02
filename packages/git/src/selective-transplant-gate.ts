@@ -3,9 +3,10 @@
 
 // The selective transplant gate (M 0.8.0 step 10F).
 //
-// Makes the locked pre-mutation ordering unskippable by owning all four steps:
+// Makes the locked pre-mutation ordering unskippable by owning every step:
 //
 //     prepareSelectiveTransplant          all validation, all derivation
+//     createTransplantProgress            allocate + project, still pre-marker
 //     finalProtectedDomainFence           last protected-domain + HEAD look
 //     publishAttempt                      the marker, injected by the caller
 //     executePreparedSelectiveTransplant  the first mutation
@@ -43,6 +44,33 @@
 // what to publish. Otherwise the session, contribution, recovery checkpoint, and
 // group set would live only in the caller's closure, and the gate would have
 // nothing to compare the returned artifact against.
+//
+// =============================================================================
+// Progress is constructed HERE, concretely (F3)
+// =============================================================================
+//
+// The executor accepts a `TransplantProgressAccumulator`, and an arbitrary
+// implementation of that interface could throw. So the safety property is not
+// the type: it is that THIS function builds the concrete accumulator with
+// `createTransplantProgress` and hands that exact object to the executor. There
+// is deliberately no progress factory parameter and no caller-supplied sink,
+// for the same reason the marker WRITER is injected but its BINDING is not.
+// Post-marker safety must never depend on arbitrary caller code.
+//
+// Accumulator allocation and the immutable schedule-evidence projection happen
+// immediately after preparation, BEFORE the fence and before the marker. Only
+// final snapshot materialization remains post-execution; if that allocation or
+// freeze fails, it propagates and is never classified as a mutation failure.
+//
+// The gate outlives the executor's failure, which is the entire point. A thrown
+// primitive discards whatever the executor might have produced, so the facts
+// must live in an object the gate already holds. Both post-marker outcomes
+// therefore carry `progress.snapshot()`: a deeply frozen, self-describing view
+// from which step 11 and step 12 derive candidate outcomes, without this package
+// ever returning `PreparedSelectiveTransplant`.
+//
+// `precondition_changed` carries no progress, because nothing was published and
+// nothing was mutated.
 //
 // =============================================================================
 // What the gate validates about the returned evidence
@@ -106,6 +134,7 @@
 // =============================================================================
 //
 //     preparation error   propagates. Nothing was published, nothing mutated.
+//     accumulator build   propagates. Still pre-fence and pre-marker.
 //     fence THROWS        propagates. We never observed the repository, which
 //                         is not the same as observing that it moved.
 //     fence unstable      returned as `precondition_changed`, before publication
@@ -115,9 +144,16 @@
 //                         cannot claim no marker exists: one may have been
 //                         written before the throw.
 //     binding mismatch    propagates. The marker exists but is untrustworthy.
-//     execution error     CAUGHT, and returned with the marker evidence, because
-//                         past this point a marker exists and the repository may
-//                         be partly mutated.
+//     execution error     CAUGHT, and returned with the marker evidence AND the
+//                         progress recorded up to the failure, because past this
+//                         point a marker exists and the repository may be partly
+//                         mutated.
+//     snapshot failure    propagates. The `try` wraps the EXECUTOR ALONE, so a
+//                         failure finalizing evidence after every primitive
+//                         returned is never falsified into `mutation_failed`.
+//                         Mutation completing and evidence finalization failing
+//                         are different facts, exactly as a malformed marker is
+//                         not a mutation failure.
 //
 // `cause` is `unknown`, not `Error`: JavaScript permits throwing any value, and
 // narrowing it here would be a lie about what a primitive can raise.
@@ -127,6 +163,10 @@ import { type RollbackAttempt, RollbackAttemptSchema } from "@viberevert/session
 import { type FinalProtectedDomainFenceResult, finalProtectedDomainFence } from "./final-fence.js";
 import type { ProtectedDomainSnapshot } from "./protected-domain.js";
 import type { SelectiveRestorePlan } from "./restore-selective.js";
+import {
+  createTransplantProgress,
+  type SelectiveTransplantProgress,
+} from "./transplant-obligations.js";
 import {
   executePreparedSelectiveTransplant,
   prepareSelectiveTransplant,
@@ -197,9 +237,11 @@ type FencePreconditionChanged = Extract<
 export type SelectiveTransplantGateResult =
   | FencePreconditionChanged
   | {
-      readonly outcome: "mutated";
+      /** Every scheduled primitive returned. NOT a claim that anything is restored. */
+      readonly outcome: "mutation_completed";
       readonly attempt: RollbackAttempt;
       readonly rollbackDir: string;
+      readonly progress: SelectiveTransplantProgress;
     }
   | {
       /** A marker exists and the repository may be partly mutated. */
@@ -207,6 +249,7 @@ export type SelectiveTransplantGateResult =
       readonly attempt: RollbackAttempt;
       readonly rollbackDir: string;
       readonly cause: unknown;
+      readonly progress: SelectiveTransplantProgress;
     };
 
 // =============================================================================
@@ -260,7 +303,8 @@ function requireAttemptMatchesBinding(
  *
  * Returns `precondition_changed` without publishing anything when the fence
  * refuses. Otherwise publishes the marker and mutates, returning the marker
- * evidence on either outcome so the caller can record a receipt.
+ * evidence and the recorded progress on either outcome so the caller can derive
+ * candidate execution outcomes and record a receipt.
  */
 export async function runSelectiveTransplantGate(
   opts: SelectiveTransplantGateOptions,
@@ -269,6 +313,10 @@ export async function runSelectiveTransplantGate(
 
   // Everything deterministic, decided before the fence and before the marker.
   const prepared = await prepareSelectiveTransplant(oracleWorktree, plan);
+
+  // Concrete, built here, from this transaction's own validated schedule. The
+  // executor never receives an accumulator this function did not construct.
+  const progress = createTransplantProgress(prepared.obligations, prepared.candidates);
 
   const fence = await finalProtectedDomainFence({
     repoRoot,
@@ -290,15 +338,27 @@ export async function runSelectiveTransplantGate(
   const attempt = RollbackAttemptSchema.parse(published.attempt);
   requireAttemptMatchesBinding(attempt, binding);
 
+  // The `try` covers the EXECUTOR ALONE. Widening it to include the success
+  // return would let a snapshot failure, after every primitive completed, be
+  // reported as a mutation failure.
   try {
-    await executePreparedSelectiveTransplant(repoRoot, oracleWorktree, prepared);
-    return { outcome: "mutated", attempt, rollbackDir: published.rollbackDir };
+    await executePreparedSelectiveTransplant(repoRoot, oracleWorktree, prepared, progress);
   } catch (cause) {
     return {
       outcome: "mutation_failed",
       attempt,
       rollbackDir: published.rollbackDir,
       cause,
+      // Taken AFTER the failure, so it holds the attempted-not-completed
+      // obligation that names where execution stopped.
+      progress: progress.snapshot(),
     };
   }
+
+  return {
+    outcome: "mutation_completed",
+    attempt,
+    rollbackDir: published.rollbackDir,
+    progress: progress.snapshot(),
+  };
 }

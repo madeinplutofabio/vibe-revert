@@ -47,6 +47,35 @@
 // have been known beforehand.
 //
 // =============================================================================
+// Obligations: what the executor is accountable for (F3)
+// =============================================================================
+//
+// Every phase step IS a scheduled obligation. It carries a dense `id`, its
+// `phase`, the physical `path` it mutates, and the candidate paths it serves.
+// `obligations` is an INDEX over exactly those objects, never a second program:
+//
+//     obligations = [...removals, ...directories, ...leaves, ...indexWrites]
+//
+// Ids are assigned AFTER each phase is sorted, so id order IS execution order,
+// and "everything after a failure is still pending" becomes structural rather
+// than an invariant somebody has to maintain.
+//
+// Attribution is many-to-many in one direction only. A candidate's own removal,
+// leaf, and index write name just that candidate; a synthetic parent names every
+// path in its `requiredBy`. That is what lets a single failed `mkdir` leave
+// several candidates incomplete WITHOUT inventing a receipt entry for a
+// directory nobody selected.
+//
+// `candidates` is the reverse index, sorted by path, with obligation ids in
+// ascending execution order. Both directions are proven here, before the fence
+// and before the marker, which is what allows `transplant-obligations.ts` to
+// classify post-mutation evidence conservatively instead of refusing: after
+// mutation, a lost receipt is worse than a cautious one.
+//
+// Ids are TRANSACTION-LOCAL. Nothing persists them; a receipt naming a failed
+// operation renders phase, path, and candidate paths.
+//
+// =============================================================================
 // The complete authority set
 // =============================================================================
 //
@@ -65,6 +94,7 @@
 //     worktree and index shape validity
 //     oracle index agreement
 //     a non-empty mutation schedule
+//     obligation <-> candidate attribution, in both directions
 //
 // `selectedChangeGroupIds` deserves particular note, because the
 // operation-to-classification link does NOT cover it. That link proves evidence;
@@ -112,6 +142,11 @@
 // plan authorized. Using `--cacheinfo` to refresh git's stat cache would mutate
 // index metadata this model does not represent; once the restored bytes match
 // the recorded oid, semantic correctness holds and re-stat is git's business.
+//
+// A consequence worth naming for F3: because the two axes are independent and
+// `restore_required` guarantees the observation differs from the target on at
+// least one of them, EVERY restore candidate contributes at least one
+// obligation. A zero-obligation candidate is unrepresentable, not merely rare.
 //
 // Throughout, `op.observed` is the plan's RECORDED phase-1 observation, not a
 // fresh read. Proving the real repository still matches it is the fence's job.
@@ -221,6 +256,11 @@ import type {
   SelectiveRestoreOperation,
   SelectiveRestorePlan,
 } from "./restore-selective.js";
+import type {
+  RestoreCandidateRecord,
+  ScheduledObligationBase,
+  TransplantProgressAccumulator,
+} from "./transplant-obligations.js";
 import {
   createWorktreeDirectory,
   materializeWorktreeLeaf,
@@ -235,15 +275,26 @@ import {
 // the same TS4081 constraint that governs 10D's narrowed index types. None of
 // them reaches the package barrel.
 
-export interface LeafWrite {
-  readonly path: string;
+export interface RemovalStep extends ScheduledObligationBase {
+  readonly phase: "removal";
+}
+
+export interface DirectoryStep extends ScheduledObligationBase {
+  readonly phase: "directory";
+}
+
+export interface LeafWrite extends ScheduledObligationBase {
+  readonly phase: "leaf";
   readonly target: PathState;
 }
 
-export interface IndexWrite {
-  readonly path: string;
+export interface IndexWrite extends ScheduledObligationBase {
+  readonly phase: "index";
   readonly target: IndexState;
 }
+
+/** The index over the execution program. Members are the phase steps themselves. */
+export type ScheduledObligation = RemovalStep | DirectoryStep | LeafWrite | IndexWrite;
 
 /**
  * Phase 4, with its snapshot attached rather than beside it.
@@ -262,18 +313,46 @@ export type PreparedIndexPhase =
 
 /** Everything the mutation phases need, fixed before the fence and the marker. */
 export interface PreparedSelectiveTransplant {
-  readonly removals: readonly string[];
-  readonly directories: readonly string[];
+  readonly removals: readonly RemovalStep[];
+  readonly directories: readonly DirectoryStep[];
   readonly leaves: readonly LeafWrite[];
   readonly indexPhase: PreparedIndexPhase;
+  /** Indexed by obligation id; the same objects as the phase arrays above. */
+  readonly obligations: readonly ScheduledObligation[];
+  /** The reverse index, sorted by path. */
+  readonly candidates: readonly RestoreCandidateRecord[];
 }
 
 /** Internal: the pure projection, before the oracle snapshot is acquired. */
 interface DerivedSchedule {
-  readonly removals: readonly string[];
-  readonly directories: readonly string[];
+  readonly removals: readonly RemovalStep[];
+  readonly directories: readonly DirectoryStep[];
   readonly leaves: readonly LeafWrite[];
   readonly indexWrites: readonly IndexWrite[];
+  readonly obligations: readonly ScheduledObligation[];
+  readonly candidates: readonly RestoreCandidateRecord[];
+}
+
+/** Internal: a phase entry before ids exist, which is before sorting completes. */
+interface DirectoryDraft {
+  readonly path: string;
+  readonly requiredBy: readonly string[];
+}
+
+interface LeafDraft {
+  readonly path: string;
+  readonly target: PathState;
+}
+
+interface IndexDraft {
+  readonly path: string;
+  readonly target: IndexState;
+}
+
+/** Internal: what pass 2 and the candidate index need to know about a candidate. */
+interface CandidateEntry {
+  readonly changeGroupId: string;
+  readonly target: PathState;
 }
 
 type SyntheticParentOperation = Extract<
@@ -388,7 +467,7 @@ function requireClassificationFor(
 function requireParentAuthority(
   op: SyntheticParentOperation,
   classifications: ReadonlyMap<string, SelectiveRestoreClassification>,
-  candidateTargets: ReadonlyMap<string, PathState>,
+  candidatesByPath: ReadonlyMap<string, CandidateEntry>,
 ): void {
   // Shape: create an absent directory, touching no index.
   if (op.observed.worktree.kind !== "absent") {
@@ -414,8 +493,8 @@ function requireParentAuthority(
     invariant(op.path, "a synthetic parent names no candidate requiring it");
   }
   for (const required of op.requiredBy) {
-    const requiredTarget = candidateTargets.get(required);
-    if (requiredTarget === undefined) {
+    const entry = candidatesByPath.get(required);
+    if (entry === undefined) {
       invariant(
         op.path,
         `a synthetic parent is required by ${JSON.stringify(required)}, which is not a restore candidate`,
@@ -427,11 +506,131 @@ function requireParentAuthority(
         `a synthetic parent is required by ${JSON.stringify(required)}, which is not beneath it`,
       );
     }
-    if (requiredTarget.worktree.kind === "absent") {
+    if (entry.target.worktree.kind === "absent") {
       invariant(
         op.path,
         `a synthetic parent is required by ${JSON.stringify(required)}, which restores no worktree node`,
       );
+    }
+  }
+}
+
+// =============================================================================
+// Attribution
+// =============================================================================
+
+/**
+ * Build the reverse index, in one pass over the obligations in id order so each
+ * candidate's ids come out ascending without a second sort.
+ */
+function buildCandidateRecords(
+  obligations: readonly ScheduledObligation[],
+  candidatesByPath: ReadonlyMap<string, CandidateEntry>,
+): readonly RestoreCandidateRecord[] {
+  const idsByCandidate = new Map<string, number[]>();
+  for (const path of candidatesByPath.keys()) idsByCandidate.set(path, []);
+
+  for (const obligation of obligations) {
+    for (const candidatePath of obligation.candidatePaths) {
+      const ids = idsByCandidate.get(candidatePath);
+      if (ids === undefined) {
+        invariant(
+          obligation.path,
+          `the obligation is attributed to ${JSON.stringify(candidatePath)}, which is not a restore candidate`,
+        );
+      }
+      ids.push(obligation.id);
+    }
+  }
+
+  return [...idsByCandidate.entries()]
+    .map(([path, obligationIds]) => {
+      const entry = candidatesByPath.get(path);
+      if (entry === undefined) invariant(path, "a candidate record lost its own entry");
+      return { path, changeGroupId: entry.changeGroupId, obligationIds };
+    })
+    .sort((a, b) => byPath(a.path, b.path));
+}
+
+/**
+ * Prove the obligation graph both ways, before the fence and the marker.
+ *
+ * Everything here is true by construction of the two functions above. It is
+ * checked anyway for the same reason `requireOracleAgreement` re-checks 10D:
+ * this is the last place a contradiction can be REFUSED rather than merely
+ * classified, and `transplant-obligations.ts` deliberately classifies, because
+ * it runs after mutation where throwing would destroy a receipt.
+ */
+function requireAttributionConsistency(
+  obligations: readonly ScheduledObligation[],
+  candidates: readonly RestoreCandidateRecord[],
+): void {
+  obligations.forEach((obligation, index) => {
+    if (obligation.id !== index) {
+      invariant(
+        obligation.path,
+        `the obligation carries id ${obligation.id} at index ${index}, so the table is not indexed by its own ids`,
+      );
+    }
+    if (obligation.candidatePaths.length === 0) {
+      invariant(obligation.path, "a scheduled obligation serves no candidate");
+    }
+  });
+
+  const byCandidatePath = new Map<string, RestoreCandidateRecord>();
+  let previousPath: string | undefined;
+  for (const candidate of candidates) {
+    if (byCandidatePath.has(candidate.path)) {
+      invariant(candidate.path, "two candidate records name the same path");
+    }
+    if (previousPath !== undefined && byPath(previousPath, candidate.path) >= 0) {
+      invariant(candidate.path, "the candidate records are not sorted by path");
+    }
+    previousPath = candidate.path;
+    byCandidatePath.set(candidate.path, candidate);
+
+    if (candidate.obligationIds.length === 0) {
+      invariant(candidate.path, "a restore candidate has no scheduled obligation");
+    }
+
+    // Forward: every id the candidate names exists and attributes back to it.
+    let lastId = -1;
+    for (const id of candidate.obligationIds) {
+      if (id <= lastId) {
+        invariant(candidate.path, "the candidate's obligation ids are not in ascending order");
+      }
+      lastId = id;
+      const obligation = obligations[id];
+      if (obligation === undefined) {
+        invariant(candidate.path, `the candidate names obligation ${id}, which does not exist`);
+      }
+      if (!obligation.candidatePaths.includes(candidate.path)) {
+        invariant(
+          candidate.path,
+          `the candidate names obligation ${id}, which is not attributed to it`,
+        );
+      }
+    }
+  }
+
+  // Reverse: every attribution an obligation declares appears in that
+  // candidate's record. Omission is the dangerous direction, because it would
+  // let a shared parent's failure go unrecorded against a candidate it blocked.
+  for (const obligation of obligations) {
+    for (const candidatePath of obligation.candidatePaths) {
+      const candidate = byCandidatePath.get(candidatePath);
+      if (candidate === undefined) {
+        invariant(
+          obligation.path,
+          `the obligation is attributed to ${JSON.stringify(candidatePath)}, which has no candidate record`,
+        );
+      }
+      if (!candidate.obligationIds.includes(obligation.id)) {
+        invariant(
+          obligation.path,
+          `the obligation is attributed to ${JSON.stringify(candidatePath)}, whose record omits it`,
+        );
+      }
     }
   }
 }
@@ -460,17 +659,17 @@ function deriveSchedule(plan: SelectiveRestorePlan): DerivedSchedule {
 
   const classifications = classificationsByPath(plan.classifications);
   const selectedGroups = new Set(plan.selectedChangeGroupIds);
-  const removals: string[] = [];
-  const directories: string[] = [];
-  const leaves: LeafWrite[] = [];
-  const indexWrites: IndexWrite[] = [];
+  const removalDrafts: string[] = [];
+  const directoryDrafts: DirectoryDraft[] = [];
+  const leafDrafts: LeafDraft[] = [];
+  const indexDrafts: IndexDraft[] = [];
 
   // One operation per physical path. Two operations on one path would let the
   // second act against a node the first already changed. Plan stabilization
   // cannot catch this: it keys operations by path through a `Map`, which
   // silently drops the duplicate rather than reporting it.
   const seen = new Set<string>();
-  const candidateTargets = new Map<string, PathState>();
+  const candidatesByPath = new Map<string, CandidateEntry>();
   const syntheticParents: SyntheticParentOperation[] = [];
 
   // ---- Pass 1: candidates, linked to their evidence and authorization ------
@@ -523,19 +722,19 @@ function deriveSchedule(plan: SelectiveRestorePlan): DerivedSchedule {
     requireTransplantable(op.observed.index, "observed", op.path);
     requireTransplantable(op.target.index, "target", op.path);
 
-    candidateTargets.set(op.path, op.target);
+    candidatesByPath.set(op.path, { changeGroupId: op.changeGroupId, target: op.target });
 
     if (!worktreeStateEqual(observed, target)) {
       if (observed.kind !== "absent" && observed.kind !== target.kind) {
-        removals.push(op.path);
+        removalDrafts.push(op.path);
       }
       if (target.kind !== "absent") {
-        leaves.push({ path: op.path, target: op.target });
+        leafDrafts.push({ path: op.path, target: op.target });
       }
     }
 
     if (!indexStateEqual(op.observed.index, op.target.index)) {
-      indexWrites.push({ path: op.path, target: op.target.index });
+      indexDrafts.push({ path: op.path, target: op.target.index });
     }
   }
 
@@ -553,7 +752,7 @@ function deriveSchedule(plan: SelectiveRestorePlan): DerivedSchedule {
       invariant(classification.path, "an eligible plan carries a conflicted classification");
     }
     if (!isRestoreRequired(classification)) continue;
-    if (!candidateTargets.has(classification.path)) {
+    if (!candidatesByPath.has(classification.path)) {
       invariant(
         classification.path,
         "a restore_required classification has no restore-candidate operation",
@@ -563,16 +762,60 @@ function deriveSchedule(plan: SelectiveRestorePlan): DerivedSchedule {
 
   // ---- Pass 2: synthetic parents, against the COMPLETE candidate map -------
   for (const op of syntheticParents) {
-    requireParentAuthority(op, classifications, candidateTargets);
-    directories.push(op.path);
+    requireParentAuthority(op, classifications, candidatesByPath);
+    directoryDrafts.push({ path: op.path, requiredBy: op.requiredBy });
   }
 
-  return {
-    removals: removals.sort(deepestFirst),
-    directories: directories.sort(shallowestFirst),
-    leaves: leaves.sort((a, b) => byPath(a.path, b.path)),
-    indexWrites: indexWrites.sort((a, b) => byPath(a.path, b.path)),
-  };
+  // ---- Ids, assigned AFTER sorting so id order is execution order ----------
+  const sortedRemovals = [...removalDrafts].sort(deepestFirst);
+  const sortedDirectories = [...directoryDrafts].sort((a, b) => shallowestFirst(a.path, b.path));
+  const sortedLeaves = [...leafDrafts].sort((a, b) => byPath(a.path, b.path));
+  const sortedIndex = [...indexDrafts].sort((a, b) => byPath(a.path, b.path));
+
+  const directoryBase = sortedRemovals.length;
+  const leafBase = directoryBase + sortedDirectories.length;
+  const indexBase = leafBase + sortedLeaves.length;
+
+  const removals: readonly RemovalStep[] = sortedRemovals.map((path, i) => ({
+    id: i,
+    phase: "removal",
+    path,
+    candidatePaths: [path],
+  }));
+  const directories: readonly DirectoryStep[] = sortedDirectories.map((draft, i) => ({
+    id: directoryBase + i,
+    phase: "directory",
+    path: draft.path,
+    // The ONE many-to-many case: a shared parent blocks every candidate beneath
+    // it, so its failure must reach all of them.
+    candidatePaths: [...draft.requiredBy],
+  }));
+  const leaves: readonly LeafWrite[] = sortedLeaves.map((draft, i) => ({
+    id: leafBase + i,
+    phase: "leaf",
+    path: draft.path,
+    candidatePaths: [draft.path],
+    target: draft.target,
+  }));
+  const indexWrites: readonly IndexWrite[] = sortedIndex.map((draft, i) => ({
+    id: indexBase + i,
+    phase: "index",
+    path: draft.path,
+    candidatePaths: [draft.path],
+    target: draft.target,
+  }));
+
+  // The SAME objects, not a parallel description of them.
+  const obligations: readonly ScheduledObligation[] = [
+    ...removals,
+    ...directories,
+    ...leaves,
+    ...indexWrites,
+  ];
+  const candidates = buildCandidateRecords(obligations, candidatesByPath);
+  requireAttributionConsistency(obligations, candidates);
+
+  return { removals, directories, leaves, indexWrites, obligations, candidates };
 }
 
 /**
@@ -610,12 +853,7 @@ export async function prepareSelectiveTransplant(
 ): Promise<PreparedSelectiveTransplant> {
   const schedule = deriveSchedule(plan);
 
-  const mutations =
-    schedule.removals.length +
-    schedule.directories.length +
-    schedule.leaves.length +
-    schedule.indexWrites.length;
-  if (mutations === 0) {
+  if (schedule.obligations.length === 0) {
     // A backstop rather than the primary detector: per-candidate checks above
     // already reject a no-op candidate. An empty executable set is outcome
     // `noop`, which never reaches here, and a marker published for this would
@@ -640,6 +878,8 @@ export async function prepareSelectiveTransplant(
     directories: schedule.directories,
     leaves: schedule.leaves,
     indexPhase,
+    obligations: schedule.obligations,
+    candidates: schedule.candidates,
   };
 }
 
@@ -654,7 +894,7 @@ export async function prepareSelectiveTransplant(
  * Contains no refusal of its own, deliberately: every deterministic failure was
  * settled by `prepareSelectiveTransplant` before the marker existed, and the
  * prepared value's shape carries the rest. The primitives keep their own safety
- * validation and may still throw here; that is a race, not a decision this
+ * validation and may still fail here; that is a race, not a decision this
  * schedule could have made earlier.
  *
  * Phases run sequentially. Within a phase the operations are independent and
@@ -662,32 +902,47 @@ export async function prepareSelectiveTransplant(
  * reproducible and attributable to one path, which matters far more here than
  * throughput.
  *
- * Returns nothing. The plan already describes what was to be done and each
- * primitive's error names its own path, so a progress report would duplicate the
- * plan without adding recoverable information. Recovery after a failure goes
- * through the marker's `pre_rollback_checkpoint_id`.
+ * Progress is written into a CALLER-OWNED accumulator rather than returned. On
+ * the failing path this function does not complete normally, so a return value
+ * would be unreachable in exactly the case a receipt needs it. The gate owns the
+ * accumulator and still holds every recorded fact after a primitive fails.
+ *
+ * Each obligation is marked attempted BEFORE its primitive runs, because a
+ * primitive may mutate and then fail. Marking afterwards would make a
+ * partially-mutating failure indistinguishable from an operation never reached.
+ * The bookkeeping performs no validation and no lookup, so it cannot discover a
+ * new invalid condition after the marker.
  */
 export async function executePreparedSelectiveTransplant(
   repoRoot: string,
   oracleWorktree: string,
   prepared: PreparedSelectiveTransplant,
+  progress: TransplantProgressAccumulator,
 ): Promise<void> {
-  for (const path of prepared.removals) {
-    await removeWorktreePath(repoRoot, path);
+  for (const step of prepared.removals) {
+    progress.markAttempted(step.id);
+    await removeWorktreePath(repoRoot, step.path);
+    progress.markCompleted(step.id);
   }
 
-  for (const path of prepared.directories) {
-    await createWorktreeDirectory(repoRoot, path);
+  for (const step of prepared.directories) {
+    progress.markAttempted(step.id);
+    await createWorktreeDirectory(repoRoot, step.path);
+    progress.markCompleted(step.id);
   }
 
-  for (const leaf of prepared.leaves) {
-    await materializeWorktreeLeaf(repoRoot, oracleWorktree, leaf.path, leaf.target);
+  for (const step of prepared.leaves) {
+    progress.markAttempted(step.id);
+    await materializeWorktreeLeaf(repoRoot, oracleWorktree, step.path, step.target);
+    progress.markCompleted(step.id);
   }
 
   if (prepared.indexPhase.kind === "writes") {
     const { writes, oracleIndex } = prepared.indexPhase;
-    for (const write of writes) {
-      await transplantIndexPath(repoRoot, write.path, write.target, oracleIndex);
+    for (const step of writes) {
+      progress.markAttempted(step.id);
+      await transplantIndexPath(repoRoot, step.path, step.target, oracleIndex);
+      progress.markCompleted(step.id);
     }
   }
 }
