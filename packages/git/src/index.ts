@@ -328,3 +328,11 @@ export type {
 } from "./restore.js";
 // Runtime values: restore APIs (M D — D73 promotion + D76 dry-run sibling).
 export { planRestoreCheckpoint, restoreCheckpoint } from "./restore.js";
+
+// Inferred TypeScript types: the selective planner (M 0.8.0 step 10F).
+export type { SelectiveRestorePlan } from "./restore-selective.js";
+// Runtime values: the selective planner. Its first consumer is the transaction
+// root in `@viberevert/cli-commands`, which must derive the plan from the same
+// verified contribution it resolved selectors over. The rest of
+// `restore-selective.ts` stays package-internal.
+export { planSelectiveRestore } from "./restore-selective.js";

@@ -6,9 +6,13 @@
 // Pure and I/O-free. Takes already-loaded artifacts and returns which change
 // groups the user's selectors resolve to.
 //
-// NOT this module's job: loading artifacts, discovering reports, proving
-// `report.source_contribution_sha256` matches the contribution, or deciding
-// how an empty result is presented. Step 12 owns all of those.
+// NOT this module's job: loading artifacts, discovering reports, or proving
+// report provenance. The caller that composes verified contribution evidence
+// with selector intent must prove a consulted report's
+// `source_contribution_sha256` matches that contribution BEFORE calling this
+// resolver; receipt serialization happens later and cannot establish
+// selection-time provenance retroactively. How an empty result is presented is
+// also not decided here.
 //
 // =============================================================================
 // Locked semantics
@@ -119,6 +123,16 @@ export type SelectionResolution =
       readonly reason: SelectionInvalidReason;
     };
 
+/**
+ * Whether these selectors consult report evidence.
+ *
+ * Exported so the provenance layer binds a report's origin under exactly the
+ * condition this module consults one. Two copies of this rule would let a
+ * future report-backed selector be consumed without its provenance proven.
+ */
+export const selectionRequiresReport = (selectors: SelectionSelectors): boolean =>
+  selectors.finding.length > 0 || selectors.risk !== undefined;
+
 export function resolveSelection(input: {
   readonly contribution?: SessionContributionFile;
   readonly report?: SessionReport;
@@ -176,7 +190,7 @@ export function resolveSelection(input: {
   const positives: Set<string>[] = [];
   if (onlySupplied) positives.push(matchByAlias(selectors.only));
 
-  if (findingSupplied || risk !== undefined) {
+  if (selectionRequiresReport(selectors)) {
     if (report === undefined) {
       // Not empty: without a report there is no evidence from which to derive
       // group risk or finding identity, and "nothing matched" would read as
