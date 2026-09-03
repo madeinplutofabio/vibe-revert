@@ -118,6 +118,19 @@
 //             (EISDIR on Linux/macOS, EPERM/EACCES variants on
 //             Windows) — the contract is "non-ENOENT propagates",
 //             not "EISDIR specifically".
+//
+// Rung 3 addition (runGit stdin option):
+//   - NUL-framed input reaches the git subcommand intact, including a
+//     path containing a literal newline that newline framing could not
+//     represent;
+//   - allowedExitCodes still applies on the stdin path, so a subcommand
+//     whose "nothing matched" answer is exit 1 stays a normal answer;
+//   - a non-allowed git failure on the stdin path surfaces as git's own
+//     error, with the exit status and stderr that the runGit docblock
+//     documents it propagates, rather than as a stream EPIPE.
+//   The partial-write race is structurally excluded by awaiting stream
+//   `finished()` alongside the subprocess, so it is not simulated: a
+//   synthetic reproduction would test the mock, not the runner.
 
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -127,6 +140,7 @@ import { promisify } from "node:util";
 import { SESSION_STATE_SCHEMA_VERSION, type SessionState } from "@viberevert/session-format";
 import { describe, expect, it } from "vitest";
 
+import { GitNotAvailableError } from "../src/errors.js";
 import {
   CommitRefNotFoundError,
   getCommitTimestamp,
@@ -135,6 +149,7 @@ import {
   loadEndOfSessionChangedPaths,
   parseStatusPorcelainZ,
   resolveCommitRef,
+  runGit as runGitPrimitive,
 } from "../src/git-cli.js";
 
 // =============================================================================
@@ -1134,6 +1149,113 @@ describe("loadEndOfSessionChangedPaths — M D Step 4b rollback dirty-tree consu
 
       const session = buildSession();
       await expect(loadEndOfSessionChangedPaths(session, repo.repoRoot)).rejects.toThrow();
+    } finally {
+      await repo.cleanup();
+    }
+  });
+});
+
+// =============================================================================
+// runGit stdin option (rung 3 runner amendment)
+//
+// `stdin` is a shared subprocess primitive, so it is proven against the runner
+// itself rather than only through its first consumer.
+//
+// `git check-ignore --stdin -z` is the vehicle: it is the subcommand that
+// motivated the option, it reads NUL-framed input, and it matches path STRINGS
+// against ignore rules without requiring those paths to exist on disk. That
+// last property is what lets the newline case run on Windows, where a file
+// name containing a newline cannot be created.
+//
+// Every payload below is NUL-TERMINATED, not merely NUL-separated. Git may
+// accept EOF as terminating the final record, but these tests exist to prove
+// the documented framing protocol, not a tolerance around its edge.
+// =============================================================================
+
+describe("runGit stdin option", () => {
+  it("delivers NUL-framed input intact, including a path newline framing could not carry", async () => {
+    const repo = await setupRepo();
+    try {
+      await writeFile(join(repo.repoRoot, ".gitignore"), "*.log\n");
+
+      // The middle entry contains a literal newline. Under newline framing it
+      // would arrive as two separate paths; under NUL framing it round-trips
+      // whole. This is the property the option exists to provide.
+      const weird = "we\nird.log";
+      const input = `${["a.log", weird, "keep.txt"].join("\0")}\0`;
+
+      const out = await runGitPrimitive(repo.repoRoot, ["check-ignore", "--stdin", "-z"], {
+        stdin: input,
+      });
+      const reported = out
+        .toString("utf8")
+        .split("\0")
+        .filter((entry) => entry !== "");
+
+      expect(reported).toContain(weird);
+      expect(reported).toContain("a.log");
+      expect(reported).not.toContain("keep.txt");
+      expect(reported).toHaveLength(2);
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it("still honors allowedExitCodes when stdin is supplied", async () => {
+    const repo = await setupRepo();
+    try {
+      await writeFile(join(repo.repoRoot, ".gitignore"), "*.log\n");
+
+      // Nothing matches, so check-ignore exits 1. Without the allowance that
+      // is a throw; with it, "nothing matched" is an empty answer. This is the
+      // path the exclusion-basis filter depends on for its common case.
+      const out = await runGitPrimitive(repo.repoRoot, ["check-ignore", "--stdin", "-z"], {
+        stdin: `${["keep.txt", "also-keep.md"].join("\0")}\0`,
+        allowedExitCodes: [1],
+      });
+
+      expect(out.toString("utf8")).toBe("");
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it("surfaces a non-allowed git failure as git's own error, not as a pipe error", async () => {
+    const repo = await setupRepo();
+    try {
+      // An unknown option makes git fail during argument parsing, so it may
+      // exit before draining stdin. A small input can still be fully buffered
+      // first, so this does NOT reliably force a pipe error. What it proves
+      // reliably is that once BOTH results are collected, git's own error is
+      // the one that surfaces.
+      //
+      // "git's own error" is the documented contract rather than a shape
+      // invented for this test: runGit's docblock states that a non-allowed
+      // nonzero exit "propagates the original error from execFileAsync", and
+      // the source's own catch reads that error as `{ code?: number }` and
+      // `{ stdout?: Buffer }`. This package has no GitCommandError class to
+      // assert against.
+      let caught: unknown;
+      try {
+        await runGitPrimitive(
+          repo.repoRoot,
+          ["check-ignore", "--stdin", "-z", "--no-such-option"],
+          { stdin: "keep.txt\0" },
+        );
+      } catch (err) {
+        caught = err;
+      }
+
+      expect(caught).toBeDefined();
+      // Not the one typed error runGit does raise. This is a command that
+      // FAILED, which is a different class from a missing git binary.
+      expect(caught).not.toBeInstanceOf(GitNotAvailableError);
+      // A NUMERIC code is git's exit status. A stream failure winning instead
+      // would put the string "EPIPE" here, so this pins the precedence rule.
+      const failure = caught as { code?: number; stderr?: Buffer };
+      expect(typeof failure.code).toBe("number");
+      expect(failure.code).not.toBe(0);
+      expect(String(failure.stderr ?? "")).not.toBe("");
     } finally {
       await repo.cleanup();
     }

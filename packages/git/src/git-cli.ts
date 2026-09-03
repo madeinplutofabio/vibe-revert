@@ -69,6 +69,7 @@
 import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
+import { finished } from "node:stream/promises";
 import { promisify } from "node:util";
 import { type SessionState, toIsoSecondString } from "@viberevert/session-format";
 import { GitNotAvailableError } from "./errors.js";
@@ -101,6 +102,26 @@ const GIT_PROBE_MAX_BUFFER = 1024 * 1024;
  * that updates stat-data timestamps for later optimization).
  */
 const GIT_ENV: NodeJS.ProcessEnv = { ...process.env, GIT_OPTIONAL_LOCKS: "0" };
+
+/**
+ * Options shared by `runGit` and `runGitText`. Module-private, so it carries no
+ * barrel decision; naming it keeps the two signatures from drifting apart.
+ *
+ * `stdin` exists for git subcommands that take input as a NUL-framed stream
+ * rather than as argv. `check-ignore --stdin -z` is the first. Those
+ * subcommands reject `-z` in the argument form, so argv framing would force
+ * newline-delimited, quote-escaped output, which cannot represent a path
+ * containing a newline. Writing the input keeps the exchange NUL-framed in both
+ * directions, and removes any ARG_MAX ceiling on the input size.
+ *
+ * `string` rather than `string | Buffer`: every current caller frames UTF-8
+ * paths. Widening it is reasonable later, but unused width would be untested.
+ */
+interface RunGitOptions {
+  maxBuffer?: number;
+  allowedExitCodes?: readonly number[];
+  stdin?: string;
+}
 
 /**
  * Git's commit-peel suffix. Appended to a ref/SHA argument passed to
@@ -220,17 +241,51 @@ function detail(err: unknown): string {
 export async function runGit(
   repoRoot: string,
   args: readonly string[],
-  opts: { maxBuffer?: number; allowedExitCodes?: readonly number[] } = {},
+  opts: RunGitOptions = {},
 ): Promise<Buffer> {
   await assertGitAvailable();
   try {
-    const { stdout } = (await execFileAsync("git", ["--no-pager", ...args], {
+    const pending = execFileAsync("git", ["--no-pager", ...args], {
       cwd: repoRoot,
       maxBuffer: opts.maxBuffer ?? GIT_MAX_BUFFER,
       encoding: "buffer",
       windowsHide: true,
       env: GIT_ENV,
-    })) as { stdout: Buffer; stderr: Buffer };
+    });
+    // No-stdin behavior is unchanged: nothing touches the child's streams, and
+    // the awaited result is read exactly as before.
+    if (opts.stdin === undefined) {
+      const { stdout } = (await pending) as { stdout: Buffer; stderr: Buffer };
+      return stdout;
+    }
+    const childStdin = pending.child.stdin;
+    if (childStdin === null) {
+      // Unreachable while execFile pipes stdio, but a child left running with
+      // no way to receive its input would hang the await.
+      pending.child.kill();
+      await pending.catch(() => {});
+      throw new Error("git subprocess exposed no stdin stream");
+    }
+    // BOTH the subprocess and the input write must be awaited. A partial write
+    // can leave git exiting 0 having processed only a PREFIX of the input, and
+    // reporting that truncated answer as success would be silent data loss for
+    // any caller whose result is a set derived from the input. `finished` also
+    // owns the stream's error event, so an EPIPE surfaces here as a rejection
+    // rather than as an out-of-band throw.
+    const stdinCompletion = finished(childStdin);
+    childStdin.end(opts.stdin);
+    const [processResult, inputResult] = await Promise.allSettled([pending, stdinCompletion]);
+    // Subprocess failure wins: it carries git's exit status and stderr, which
+    // explain a broken pipe better than the pipe error does. Throwing inside
+    // this `try` keeps the unchanged catch boundary in charge of normalizing
+    // both, so `allowedExitCodes` still applies to the stdin path.
+    if (processResult.status === "rejected") {
+      throw processResult.reason;
+    }
+    if (inputResult.status === "rejected") {
+      throw inputResult.reason;
+    }
+    const { stdout } = processResult.value as { stdout: Buffer; stderr: Buffer };
     return stdout;
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") {
@@ -259,7 +314,7 @@ export async function runGit(
 export async function runGitText(
   repoRoot: string,
   args: readonly string[],
-  opts: { maxBuffer?: number; allowedExitCodes?: readonly number[] } = {},
+  opts: RunGitOptions = {},
 ): Promise<string> {
   const buf = await runGit(repoRoot, args, opts);
   return buf.toString("utf8");
