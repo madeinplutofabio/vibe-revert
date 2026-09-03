@@ -38,7 +38,8 @@
 //     CommitRefNotFoundError class.
 //   - Internal (re-exported only within this package): gitDiffUnstaged,
 //     gitDiffStaged, gitListUntracked, gitListTracked, gitListTrackedDirty, gitApply,
-//     gitApplyWithIndex, gitResetHardHead, runGit, runGitText, splitNulList.
+//     gitApplyWithIndex, gitResetHardHead, runGit, runGitText, splitNulList,
+//     getGitEnvironmentVariable.
 //   The barrel (./index.ts) re-exports only the public set. The runGit /
 //   runGitText / splitNulList primitives are exposed package-internally
 //   (M C addition) so the diff.ts D56 algorithm can issue varied git
@@ -102,6 +103,23 @@ const GIT_PROBE_MAX_BUFFER = 1024 * 1024;
  * that updates stat-data timestamps for later optimization).
  */
 const GIT_ENV: NodeJS.ProcessEnv = { ...process.env, GIT_OPTIONAL_LOCKS: "0" };
+
+/**
+ * Read one variable from the environment git subprocesses actually receive.
+ *
+ * `GIT_ENV` snapshots `process.env` at module initialization. Any module that
+ * needs to reason about what git will see MUST read it through here rather than
+ * consulting live `process.env`, or the two can disagree: a caller that mutates
+ * `process.env` after this module loads would leave the reasoning describing
+ * one environment while every spawned git command runs in another. For the
+ * exclusion-basis fingerprint that divergence is a correctness bug in both
+ * directions, producing either a false refusal or a missed change.
+ *
+ * **Package-internal.** NOT re-exported from `./index.ts`.
+ */
+export function getGitEnvironmentVariable(name: string): string | undefined {
+  return GIT_ENV[name];
+}
 
 /**
  * Options shared by `runGit` and `runGitText`. Module-private, so it carries no
