@@ -20,6 +20,7 @@
 // which spawns a fresh process per case.
 
 import { execFile } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -115,6 +116,23 @@ async function commitRootIgnore(repoRoot: string, rules: string): Promise<void> 
 async function untrackedIgnorePaths(repoRoot: string): Promise<readonly string[]> {
   const basis = await captureExclusionBasis(repoRoot);
   return basis.untrackedIgnoreFiles.map((entry) => entry.path);
+}
+
+/**
+ * Canonical spelling of an existing path.
+ *
+ * `rev-parse --git-path` returns a RELATIVE path in a main repository but an
+ * ABSOLUTE, canonicalized one from a linked worktree, and `tmpdir()` hands back
+ * an alias on two platforms: `/var` for `/private/var` on macOS, and an 8.3
+ * short name such as `RUNNER~1` on Windows. Comparing raw strings therefore
+ * fails on macOS and Windows while passing on Linux, for a reason that has
+ * nothing to do with which file was resolved.
+ *
+ * `realpathSync.native` is the variant that also resolves Windows short names.
+ * The path must exist, which every call site here guarantees.
+ */
+function canonical(path: string): string {
+  return realpathSync.native(path);
 }
 
 // =============================================================================
@@ -290,7 +308,9 @@ describe("captureExclusionBasis info/exclude", () => {
       await write(repo.repoRoot, ".git/info/exclude", "*.tmp\n");
       const after = await captureExclusionBasis(repo.repoRoot);
 
-      expect(before.infoExclude?.path).toBe(resolve(repo.repoRoot, ".git", "info", "exclude"));
+      expect(canonical(before.infoExclude?.path ?? "")).toBe(
+        canonical(resolve(repo.repoRoot, ".git", "info", "exclude")),
+      );
       expect(exclusionBasisChanged(before, after)).toBe(true);
     } finally {
       await repo.cleanup();
@@ -335,8 +355,8 @@ describe("captureExclusionBasis info/exclude", () => {
       // Pins the production docblock's `$GIT_COMMON_DIR` claim directly: the
       // path resolves to the main repository's file, and editing that file is
       // what the linked worktree observes.
-      expect(before.infoExclude?.path).toBe(expected);
-      expect(after.infoExclude?.path).toBe(expected);
+      expect(canonical(before.infoExclude?.path ?? "")).toBe(canonical(expected));
+      expect(canonical(after.infoExclude?.path ?? "")).toBe(canonical(expected));
       expect(before.infoExclude?.sha256).not.toBe(after.infoExclude?.sha256);
       expect(exclusionBasisChanged(before, after)).toBe(true);
     } finally {
