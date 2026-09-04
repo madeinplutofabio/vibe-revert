@@ -650,11 +650,36 @@ describe("source invariant", () => {
       );
     }
 
-    // Neither the scheduler nor the gate is reachable from outside the package
-    // until the cli-commands orchestration lands.
+    // `runSelectiveRestoreTransaction` is the SOLE public selective-execution
+    // entry point: the transaction is exported, and every part it orders stays
+    // package-internal.
+    //
+    // Asserted on the export SPECIFIER rather than on a bare substring, for two
+    // reasons. The barrel's own documentation names several of these modules in
+    // prose, so `toContain` would report a comment as an export. And a
+    // `export type { ... } from` re-export is invisible to a runtime import of
+    // the barrel, so scanning the source is what covers type-only leakage.
     const barrel = await readFile(new URL("index.ts", srcDir), "utf8");
-    expect(barrel).not.toContain("transplant-schedule");
-    expect(barrel).not.toContain("selective-transplant-gate");
+    const barrelExports = (module: string): boolean =>
+      new RegExp(`from\\s*["']\\./${module}\\.js["']`).test(barrel);
+
+    expect(barrelExports("selective-restore-transaction")).toBe(true);
+    for (const internal of [
+      "selective-transplant-gate",
+      "transplant-schedule",
+      "transplant-obligations",
+      "checkpoint-oracle",
+      "integrity-observation",
+      "exclusion-basis",
+      "post-command-integrity",
+      "post-transplant-verification",
+      "oracle-evidence",
+      "plan-stabilization",
+      "recovery-handle",
+      "protected-domain",
+    ]) {
+      expect(barrelExports(internal), `the barrel re-exports ${internal}`).toBe(false);
+    }
   });
 
   it("11: the gate owns the accumulator, the ordering, and the catch scope", async () => {

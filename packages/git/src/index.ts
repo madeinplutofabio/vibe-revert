@@ -179,7 +179,13 @@
 //     scratch lifecycle behind `getDiffSinceCheckpoint` and
 //     `captureContribution` — a worktree at the captured HEAD with the
 //     checkpoint restored over it — not a capability callers assemble for
-//     themselves.
+//     themselves. `runSelectiveRestoreTransaction` (M 0.8.0 step 10F) is a
+//     third internal consumer, and deliberately so: the transaction lives
+//     inside this package precisely so it can compose the oracle, the evidence
+//     check, the gate, the scheduler, the observation acquisition helper, the
+//     exclusion basis and the integrity classifiers without any of them
+//     crossing the barrel. It is the SOLE public selective-execution entry
+//     point, and every part it orders stays package-internal.
 //
 //   - `diffPreparedMirrors` + `PreparedMirrorDiffEntry`, `parseNameStatus` +
 //     `NameStatusEntry` + `ParseNameStatusOptions`, and `PICOMATCH_OPTIONS`
@@ -336,3 +342,16 @@ export type { SelectiveRestorePlan } from "./restore-selective.js";
 // verified contribution it resolved selectors over. The rest of
 // `restore-selective.ts` stays package-internal.
 export { planSelectiveRestore } from "./restore-selective.js";
+
+// Inferred TypeScript types: the selective-restore transaction (M 0.8.0 step 10F).
+export type {
+  SelectiveRestoreTransactionOptions,
+  SelectiveRestoreTransactionResult,
+} from "./selective-restore-transaction.js";
+// Runtime values: the selective-restore transaction. The SOLE public entry point
+// for EXECUTING a selective restore, as distinct from planning one. Its
+// callbacks are how `@viberevert/cli-commands` supplies what it owns (creating
+// the emergency checkpoint, publishing the attempt marker, running the project's
+// verification commands) without this package depending on it, and its result
+// union is the receipt's entire input.
+export { runSelectiveRestoreTransaction } from "./selective-restore-transaction.js";
