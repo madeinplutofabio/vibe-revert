@@ -25,12 +25,15 @@ import {
   DryRunPathOutcomeSchema,
   deriveChangeGroupId,
   deriveFindingId,
+  FAILURE_SUMMARY_MESSAGE_MAX,
+  FailureSummarySchema,
   firstVerificationCompletedCleanly,
   type IntegrityAssessment,
   IntegrityAssessmentSchema,
   ROLLBACK_OUT_OF_SCOPE_NOTICE,
   SELECTIVE_ROLLBACK_RECEIPT_SCHEMA_VERSION,
   SelectiveRollbackReceiptSchema,
+  summarizeFailure,
 } from "../src/index.js";
 
 // =============================================================================
@@ -142,6 +145,11 @@ const POST_HEAD_MOVED = {
   changed_paths: [],
   topology_changed_roots: [],
   head_moved: true,
+} as const;
+
+const POST_CLASSIFICATION_FAILED = {
+  state: "classification_failed",
+  failure: { error_code: "internal", message: "comparing the two observations threw" },
 } as const;
 
 function apply(overrides: Record<string, unknown> = {}) {
@@ -1167,6 +1175,37 @@ const VERIFICATION_FAILED = {
 } as const;
 const VERIFICATION_NOT_RUN = { state: "not_run", reason: "gate_result_unavailable" } as const;
 
+/**
+ * The only per-path shape available when the verification did not complete.
+ * Without a candidate list, nothing recorded what any individual path did.
+ */
+const INDETERMINATE_RESULTS = [
+  { path: "src/a.ts", change_group_id: GROUP_A, outcome: "indeterminate" },
+] as const;
+
+/**
+ * A receipt whose first verification did not COMPLETE, in its only valid shape.
+ *
+ * Parameterized by which non-completed state it carries, because the coupling
+ * is about completion rather than about any one route to its absence. The stage
+ * skip reason is derived from that state so the fixture cannot contradict the
+ * first-verification coupling refinement.
+ */
+function withoutVerificationFacts(
+  first: typeof VERIFICATION_FAILED | typeof VERIFICATION_NOT_RUN,
+  overrides: Record<string, unknown> = {},
+) {
+  const reason = first.state === "failed" ? "first_verification_failed" : "gate_result_unavailable";
+  return apply({
+    outcome: "failed",
+    results: INDETERMINATE_RESULTS,
+    first_verification: first,
+    project_verification: { state: "skipped", reason },
+    post_command_integrity: { state: "not_run", reason },
+    ...overrides,
+  });
+}
+
 describe("first verification states", () => {
   it("derives cleanliness only from a completed verification", () => {
     expect(firstVerificationCompletedCleanly(completed(CLEAN))).toBe(true);
@@ -1176,22 +1215,20 @@ describe("first verification states", () => {
   });
 
   it("accepts a failed verification that skipped commands for THAT stage", () => {
-    expect(
-      ok(
-        apply({
-          outcome: "failed",
-          first_verification: VERIFICATION_FAILED,
-          project_verification: { state: "skipped", reason: "first_verification_failed" },
-          post_command_integrity: { state: "not_run", reason: "first_verification_failed" },
-        }),
-      ),
-    ).toBe(true);
+    expect(ok(withoutVerificationFacts(VERIFICATION_FAILED))).toBe(true);
   });
 
   it("accepts a failed verification when no commands were configured", () => {
     // Commands that do not exist were never skipped BY this stage, so
     // not_configured stays the truthful record.
-    expect(ok(apply({ outcome: "failed", first_verification: VERIFICATION_FAILED }))).toBe(true);
+    expect(
+      ok(
+        withoutVerificationFacts(VERIFICATION_FAILED, {
+          project_verification: NOT_CONFIGURED_VERIFICATION,
+          post_command_integrity: NOT_CONFIGURED_POST,
+        }),
+      ),
+    ).toBe(true);
   });
 
   it("rejects a failed verification whose skip names another stage", () => {
@@ -1224,17 +1261,9 @@ describe("first verification states", () => {
 
   it("accepts an unavailable gate result recorded as its own stage", () => {
     // A publication that may have persisted before a throw leaves no usable
-    // gate result, so the verification never ran at all.
-    expect(
-      ok(
-        apply({
-          outcome: "failed",
-          first_verification: VERIFICATION_NOT_RUN,
-          project_verification: { state: "skipped", reason: "gate_result_unavailable" },
-          post_command_integrity: { state: "not_run", reason: "gate_result_unavailable" },
-        }),
-      ),
-    ).toBe(true);
+    // gate result, so the verification never ran at all. Its results must then
+    // be indeterminate: see the coupling suite at the end of this file.
+    expect(ok(withoutVerificationFacts(VERIFICATION_NOT_RUN))).toBe(true);
   });
 
   it("rejects a stage skip reason that contradicts a completed verification", () => {
@@ -1253,6 +1282,210 @@ describe("first verification states", () => {
 
   it("rejects success when the first verification did not complete", () => {
     expect(ok(apply({ first_verification: VERIFICATION_FAILED }))).toBe(false);
-    expect(ok(apply({ first_verification: VERIFICATION_NOT_RUN }))).toBe(false);
+    // The no-facts SHAPE, so this isolates the success coupling instead of
+    // also tripping the indeterminate-results refinement.
+    expect(ok(withoutVerificationFacts(VERIFICATION_NOT_RUN, { outcome: "succeeded" }))).toBe(
+      false,
+    );
+  });
+});
+
+// =============================================================================
+// Gateless receipts and the `indeterminate` per-path outcome
+// =============================================================================
+//
+// The gate encloses the fence, the publication, AND the mutation, so a throw
+// carrying a `possibly_published` marker could have happened mid-mutation. A
+// receipt built from an inspected publication therefore knows the mutation was
+// authorized and knows nothing about any individual path. `not_attempted` would
+// claim the path was untouched, which is the assertion this vocabulary exists
+// to avoid making.
+
+const NON_COMPLETED_STATES = [
+  ["a verification that threw", VERIFICATION_FAILED],
+  ["no gate result at all", VERIFICATION_NOT_RUN],
+] as const;
+
+describe("indeterminate results are coupled to a non-completed first verification", () => {
+  it.each(NON_COMPLETED_STATES)("accepts %s with every result indeterminate", (_label, first) => {
+    expect(ok(withoutVerificationFacts(first))).toBe(true);
+  });
+
+  it.each(
+    NON_COMPLETED_STATES,
+  )("rejects %s carrying ordinary per-path outcomes", (_label, first) => {
+    // `restored` claims knowledge no candidate list exists to supply.
+    expect(
+      ok(
+        withoutVerificationFacts(first, {
+          results: [{ path: "src/a.ts", change_group_id: GROUP_A, outcome: "restored" }],
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it.each(
+    NON_COMPLETED_STATES,
+  )("rejects %s mixing indeterminate with an ordinary outcome", (_label, first) => {
+    // Partial knowledge is not reachable: the verification either produced an
+    // outcome for every selected candidate or produced none.
+    expect(
+      ok(
+        withoutVerificationFacts(first, {
+          results: [
+            { path: "src/a.ts", change_group_id: GROUP_A, outcome: "indeterminate" },
+            { path: "src/b.ts", change_group_id: GROUP_A, outcome: "not_attempted" },
+          ],
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("rejects a completed verification carrying any indeterminate result", () => {
+    // The converse direction. A completed verification supplies an outcome for
+    // every candidate, so the hedge is unavailable.
+    expect(ok(apply({ outcome: "failed", results: INDETERMINATE_RESULTS }))).toBe(false);
+  });
+
+  it("rejects outcome 'succeeded' with indeterminate results", () => {
+    // Enforced by the success conjunction, independently of the coupling above.
+    expect(ok(withoutVerificationFacts(VERIFICATION_NOT_RUN, { outcome: "succeeded" }))).toBe(
+      false,
+    );
+  });
+});
+
+// =============================================================================
+// A classification fault is a recorded outcome, not a mapping failure
+// =============================================================================
+//
+// Both observations were taken and comparing them threw. The transaction
+// reports this explicitly and the receipt records it, so a mapper meeting one
+// has not itself failed.
+//
+// Acceptance is already covered by "accepts classification_failed as distinct
+// from an unusable observation" above. What was missing is the two couplings
+// that keep the state from drifting into success or into a stage that never
+// ran.
+
+describe("post_command_integrity: classification_failed couplings", () => {
+  it("rejects outcome 'succeeded' beside it", () => {
+    // The success conjunction admits only `clean` and `not_run`, so a new
+    // integrity state cannot become silently compatible with success.
+    expect(
+      ok(
+        apply({
+          project_verification: COMPLETED_PASSED,
+          post_command_integrity: POST_CLASSIFICATION_FAILED,
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("rejects it when no commands were configured", () => {
+    // It asserts two observations were compared, which only happens once the
+    // commands were reached. `not_configured` says they never were.
+    expect(
+      ok(apply({ outcome: "failed", post_command_integrity: POST_CLASSIFICATION_FAILED })),
+    ).toBe(false);
+  });
+});
+
+// =============================================================================
+// summarizeFailure: the only producer of a FailureSummary
+// =============================================================================
+//
+// It runs on the failure path, so it must not become a second failure. Every
+// assertion below is about that: bounded output, honest classification, and
+// total behaviour against values designed to be hostile.
+
+/** Throws from `instanceof`, from any property read, and from stringification. */
+const HOSTILE = new Proxy(
+  {},
+  {
+    get() {
+      throw new Error("hostile get");
+    },
+    has() {
+      throw new Error("hostile has");
+    },
+    getPrototypeOf() {
+      throw new Error("hostile getPrototypeOf");
+    },
+  },
+);
+
+const summaryOk = (value: unknown) => FailureSummarySchema.safeParse(value).success;
+
+describe("FailureSummarySchema bounds the message", () => {
+  it("rejects a message longer than the maximum", () => {
+    // The producer truncates, but a receipt read back from disk was written by
+    // something else, so the bound has to live in the schema too.
+    expect(summaryOk({ error_code: "io", message: "x".repeat(FAILURE_SUMMARY_MESSAGE_MAX) })).toBe(
+      true,
+    );
+    expect(
+      summaryOk({ error_code: "io", message: "x".repeat(FAILURE_SUMMARY_MESSAGE_MAX + 1) }),
+    ).toBe(false);
+  });
+
+  it("still rejects a blank message", () => {
+    expect(summaryOk({ error_code: "internal", message: "   " })).toBe(false);
+  });
+});
+
+describe("summarizeFailure", () => {
+  it("truncates to EXACTLY the maximum, marker included", () => {
+    const summary = summarizeFailure(new Error("y".repeat(FAILURE_SUMMARY_MESSAGE_MAX * 2)));
+    // The marker must fit INSIDE the bound, or truncation would produce a
+    // message the schema rejects.
+    expect(summary.message).toHaveLength(FAILURE_SUMMARY_MESSAGE_MAX);
+    expect(summary.message.endsWith("... (truncated)")).toBe(true);
+    expect(summaryOk(summary)).toBe(true);
+  });
+
+  it("classifies a syscall-shaped error as io", () => {
+    const err = Object.assign(new Error("ENOENT: no such file"), {
+      errno: -4058,
+      code: "ENOENT",
+      syscall: "open",
+    });
+    expect(summarizeFailure(err).error_code).toBe("io");
+  });
+
+  it("leaves a bare `code` internal", () => {
+    // Plenty of library errors carry a `code` unrelated to the filesystem.
+    // Calling those io would send a reader hunting a disk problem.
+    const err = Object.assign(new Error("parse failed"), { code: "ERR_INVALID_ARG" });
+    expect(summarizeFailure(err).error_code).toBe("internal");
+  });
+
+  it("substitutes a non-blank message for a blank one", () => {
+    expect(summarizeFailure(new Error("   ")).message.trim()).not.toBe("");
+    expect(summaryOk(summarizeFailure(new Error("")))).toBe(true);
+  });
+
+  it("survives a value whose stringification throws", () => {
+    const unstringifiable = {
+      toString() {
+        throw new Error("nope");
+      },
+    };
+    const summary = summarizeFailure(unstringifiable);
+    expect(summary.error_code).toBe("internal");
+    expect(summaryOk(summary)).toBe(true);
+  });
+
+  it("survives a proxy that throws from instanceof and every property read", () => {
+    expect(() => summarizeFailure(HOSTILE)).not.toThrow();
+    const summary = summarizeFailure(HOSTILE);
+    expect(summary.error_code).toBe("internal");
+    expect(summaryOk(summary)).toBe(true);
+  });
+
+  it("produces a schema-valid summary for ordinary values", () => {
+    for (const cause of [new Error("boom"), "a string", 42, null, undefined]) {
+      expect(summaryOk(summarizeFailure(cause))).toBe(true);
+    }
   });
 });

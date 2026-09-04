@@ -1060,3 +1060,178 @@ describe("verifyPostTransplantState: predicates", () => {
     }
   });
 });
+
+// =============================================================================
+// Section G: the unselected-domain count
+// =============================================================================
+//
+// `unselectedCheckedCount` is the receipt's only evidence that a clean integrity
+// assessment examined a real domain rather than passing vacuously. It counts
+// PATHS adjudicated by pass 2, so it must move when the unselected membership of
+// `S` moves and at no other time.
+//
+// Every scenario below builds on `initRepo`, which commits `.gitignore` and
+// `README.md`. With `a.txt` selected those two ARE the unselected domain, which
+// is what makes the expected numbers small enough to state outright.
+
+describe("verifyPostTransplantState: unselectedCheckedCount", () => {
+  it("counts the unselected managed paths it compared", async () => {
+    const fx = await setup();
+    try {
+      const { plan, frozen, head } = await stagedScenario(fx);
+
+      // S holds the selected a.txt plus the two committed fixture files.
+      expect(frozen.states.size).toBe(3);
+
+      const result = await verify(fx, plan, stagedProgress("completed", "completed"), frozen, head);
+
+      // .gitignore and README.md. a.txt is selected, so pass 1 adjudicates it.
+      expect(result.unselectedCheckedCount).toBe(2);
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  it("excludes a path once it becomes selected", async () => {
+    const fx = await setup();
+    try {
+      await seedOracle(fx, "a.txt", BEFORE);
+      await write(fx.repo, "a.txt", AFTER);
+      await git(fx.repo, ["add", "a.txt"]);
+
+      const expectedBefore = await stateOf(fx.oracle, "a.txt");
+      const observed = await stateOf(fx.repo, "a.txt");
+      const ignoreState = await stateOf(fx.repo, ".gitignore");
+
+      // The staged scenario, except .gitignore is SELECTED. It therefore leaves
+      // the unselected domain without changing S's size, which isolates
+      // exclusion from any change in what was protected.
+      const plan = planOf({
+        classifications: [
+          classify("a.txt", "restore_required", {
+            expectedBefore,
+            expectedAfter: observed,
+            observed,
+          }),
+          classify(".gitignore", "already_at_before", {
+            expectedBefore: ignoreState,
+            expectedAfter: ignoreState,
+            observed: ignoreState,
+          }),
+        ],
+        operations: [candidateOp("a.txt", observed, expectedBefore)],
+      });
+      const frozen = await capture(fx, plan);
+      const head = await getHeadSha(fx.repo);
+
+      expect(frozen.states.size).toBe(3);
+
+      const result = await verify(fx, plan, stagedProgress("completed", "completed"), frozen, head);
+
+      // Only README.md remains unselected.
+      expect(result.unselectedCheckedCount).toBe(1);
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  it("does not vary with the execution record", async () => {
+    const fx = await setup();
+    try {
+      await seedOracle(fx, "a.txt", BEFORE);
+      await write(fx.repo, "a.txt", AFTER);
+      await git(fx.repo, ["add", "a.txt"]);
+
+      // Two EXTRA unselected paths, so every cardinality in play is distinct:
+      // 2 obligations, 1 candidate, 1 classification, 4 unselected paths. No
+      // count derived from the wrong denominator can read 4 by coincidence,
+      // which a 2-path domain could not rule out against 2 obligations.
+      await write(fx.repo, "c.txt", "c\n");
+      await write(fx.repo, "d.txt", "d\n");
+      await git(fx.repo, ["add", "c.txt", "d.txt"]);
+
+      const expectedBefore = await stateOf(fx.oracle, "a.txt");
+      const observed = await stateOf(fx.repo, "a.txt");
+      const plan = planOf({
+        classifications: [
+          classify("a.txt", "restore_required", {
+            expectedBefore,
+            expectedAfter: observed,
+            observed,
+          }),
+        ],
+        operations: [candidateOp("a.txt", observed, expectedBefore)],
+      });
+      const frozen = await capture(fx, plan);
+      const head = await getHeadSha(fx.repo);
+
+      expect(frozen.states.size).toBe(5);
+
+      // The plan and S are held fixed; only the execution record varies.
+      const afterCompletion = await verify(
+        fx,
+        plan,
+        stagedProgress("completed", "completed"),
+        frozen,
+        head,
+      );
+      const afterNothing = await verify(
+        fx,
+        plan,
+        stagedProgress("pending", "pending"),
+        frozen,
+        head,
+      );
+
+      expect(afterCompletion.unselectedCheckedCount).toBe(4);
+      expect(afterNothing.unselectedCheckedCount).toBe(4);
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  it("reports zero when every frozen path is selected", async () => {
+    const fx = await setup();
+    try {
+      await seedOracle(fx, "a.txt", BEFORE);
+      await write(fx.repo, "a.txt", AFTER);
+      await git(fx.repo, ["add", "a.txt"]);
+
+      const expectedBefore = await stateOf(fx.oracle, "a.txt");
+      const observed = await stateOf(fx.repo, "a.txt");
+      const atBefore = async (path: string) => {
+        const state = await stateOf(fx.repo, path);
+        return classify(path, "already_at_before", {
+          expectedBefore: state,
+          expectedAfter: state,
+          observed: state,
+        });
+      };
+
+      const plan = planOf({
+        classifications: [
+          classify("a.txt", "restore_required", {
+            expectedBefore,
+            expectedAfter: observed,
+            observed,
+          }),
+          await atBefore(".gitignore"),
+          await atBefore("README.md"),
+        ],
+        operations: [candidateOp("a.txt", observed, expectedBefore)],
+      });
+      const frozen = await capture(fx, plan);
+      const head = await getHeadSha(fx.repo);
+
+      const result = await verify(fx, plan, stagedProgress("completed", "completed"), frozen, head);
+
+      // Zero is a truthful report of an EMPTY unselected domain, not a signal
+      // that nothing was checked: pass 1 adjudicated all three paths.
+      expect(frozen.states.size).toBe(3);
+      expect(result.unselectedCheckedCount).toBe(0);
+      expect(result.candidates).toHaveLength(3);
+    } finally {
+      await fx.cleanup();
+    }
+  });
+});

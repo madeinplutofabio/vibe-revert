@@ -4,7 +4,7 @@
 // Unit tests for packages/cli/src/rollback-orchestration.ts (M D
 // Step 6 file 6.2 — orchestration coverage).
 //
-// Seven sections, 57 tests covering the orchestration contract:
+// Eight sections covering the orchestration contract:
 //
 //   1. ARTIFACT CONSISTENCY via collectRollbackRefusals entry —
 //      session_id mismatch (3 paths: session, manifest, existing
@@ -20,6 +20,13 @@
 //      D63 / D70 never bypassed; D64 / D61b / D61 bypassable.
 //      Dry-run never throws policy refusals; artifact-integrity throws
 //      still fire in both modes.
+//
+//  3b. evaluateRollbackRefusals: the SAME D75 policy as a pure
+//      structured decision. Covers refusal orders the collector
+//      cannot currently emit (a bypassable member ahead of a
+//      never-bypassable one), which is precisely what a sixth rule
+//      could introduce, plus the field-level identity of every error
+//      checkRefusals throws. Section 3 asserts error classes only.
 //
 //   4. resolveSessionAndCheckpoint (I/O) — uses REAL loadSession +
 //      loadCheckpoint with on-disk fixtures. SessionNotFoundError
@@ -107,10 +114,15 @@ import {
   classifyRestoreError,
   collectRollbackRefusals,
   type ExistingApplyReceipt,
+  evaluateRollbackRefusals,
+  type RefusalCheckOutcome,
+  type RefusalPolicyDecision,
   RollbackActiveSessionRefusalError,
   RollbackAlreadyAppliedError,
   RollbackDirtyTreeRefusalError,
   RollbackHeadMismatchError,
+  type RollbackRefusal,
+  type RollbackRefusalAnalysis,
   RollbackUnEndedSessionRefusalError,
   resolveSessionAndCheckpoint,
 } from "../src/rollback-orchestration.js";
@@ -713,6 +725,239 @@ describe("checkRefusals — artifact-integrity throws fire in both modes", () =>
         force: true,
       }),
     ).toThrow(/checkpoint manifest session_id/);
+  });
+});
+
+// =============================================================================
+// SECTION 3b: evaluateRollbackRefusals (pure D75 policy)
+// =============================================================================
+
+const EVAL_ACTIVE_SESSION: RollbackRefusal = {
+  kind: "active_session",
+  activeSessionId: FIXTURE_SESSION_ID,
+};
+const EVAL_ALREADY_APPLIED: RollbackRefusal = {
+  kind: "already_applied",
+  writtenAt: "2026-01-02T00:00:00Z",
+  preRollbackCheckpointId: FIXTURE_OTHER_CHECKPOINT_ID,
+};
+const EVAL_HEAD_MISMATCH: RollbackRefusal = {
+  kind: "head_mismatch",
+  expectedHead: FIXTURE_HEAD_SHA,
+  currentHead: FIXTURE_DIFFERENT_HEAD_SHA,
+};
+const EVAL_UN_ENDED: RollbackRefusal = {
+  kind: "un_ended_session",
+  sessionId: FIXTURE_SESSION_ID,
+};
+const EVAL_DIRTY_TREE: RollbackRefusal = {
+  kind: "dirty_tree",
+  unrelatedPaths: ["src/unrelated.ts"],
+};
+
+/**
+ * A synthetic analysis. The evaluator is pure and takes the analysis directly,
+ * so these tests can present refusal orders `collectRollbackRefusals` does not
+ * currently produce. That is the point of testing it separately.
+ */
+function makeAnalysis(
+  refusals: readonly RollbackRefusal[],
+  overrides: Partial<Omit<RollbackRefusalAnalysis, "refusals">> = {},
+): RollbackRefusalAnalysis {
+  return {
+    activeSessionWarning: false,
+    unEndedSessionWarning: false,
+    headMismatch: false,
+    dirtyTreeCheckOutcome: "performed",
+    unrelatedDirtyPaths: [],
+    ...overrides,
+    refusals,
+  };
+}
+
+function expectRefused(decision: RefusalPolicyDecision): RollbackRefusal {
+  if (decision.decision !== "refused") {
+    throw new Error("expected a refusal, got an admission");
+  }
+  return decision.refusal;
+}
+
+function expectAdmitted(decision: RefusalPolicyDecision): RefusalCheckOutcome {
+  if (decision.decision !== "admitted") {
+    throw new Error(`expected an admission, got refusal ${decision.refusal.kind}`);
+  }
+  return decision.outcome;
+}
+
+/** Assert the call throws an instance of `ctor` and hand it back, typed. */
+function captureThrow<T>(ctor: new (...args: never[]) => T, fn: () => unknown): T {
+  let caught: unknown;
+  try {
+    fn();
+  } catch (err) {
+    caught = err;
+  }
+  if (!(caught instanceof ctor)) {
+    throw new Error(`expected ${ctor.name}, got ${String(caught)}`);
+  }
+  return caught;
+}
+
+describe("evaluateRollbackRefusals: apply mode without --force", () => {
+  it("returns the FIRST refusal in the list, whatever its kind", () => {
+    const refusal = expectRefused(
+      evaluateRollbackRefusals(
+        makeAnalysis([EVAL_HEAD_MISMATCH, EVAL_UN_ENDED, EVAL_DIRTY_TREE]),
+        "apply",
+        false,
+      ),
+    );
+    expect(refusal).toEqual(EVAL_HEAD_MISMATCH);
+  });
+
+  it("does not reorder: D76 order is the collector's responsibility, not its own", () => {
+    const refusal = expectRefused(
+      evaluateRollbackRefusals(
+        makeAnalysis([EVAL_DIRTY_TREE, EVAL_ACTIVE_SESSION]),
+        "apply",
+        false,
+      ),
+    );
+    expect(refusal).toEqual(EVAL_DIRTY_TREE);
+  });
+});
+
+describe("evaluateRollbackRefusals: apply mode with --force", () => {
+  it("admits when every refusal is bypassable, carrying the analysis facts", () => {
+    const outcome = expectAdmitted(
+      evaluateRollbackRefusals(
+        makeAnalysis([EVAL_HEAD_MISMATCH, EVAL_UN_ENDED, EVAL_DIRTY_TREE], {
+          headMismatch: true,
+          unEndedSessionWarning: true,
+          unrelatedDirtyPaths: ["src/unrelated.ts"],
+        }),
+        "apply",
+        true,
+      ),
+    );
+    expect(outcome.allowHeadMismatch).toBe(true);
+    expect(outcome.unEndedSessionWarning).toBe(true);
+    expect(outcome.unrelatedDirtyPaths).toEqual(["src/unrelated.ts"]);
+  });
+
+  it("skips bypassable members and stops at a LATER never-bypassable one", () => {
+    // D76 currently puts both never-bypassable rules first, so the collector
+    // cannot emit this order. A sixth rule ordered ahead of them could, and the
+    // walk must not admit merely because the first member was bypassable.
+    const refusal = expectRefused(
+      evaluateRollbackRefusals(
+        makeAnalysis([EVAL_HEAD_MISMATCH, EVAL_ALREADY_APPLIED, EVAL_DIRTY_TREE]),
+        "apply",
+        true,
+      ),
+    );
+    expect(refusal).toEqual(EVAL_ALREADY_APPLIED);
+  });
+
+  it("never bypasses active_session even when it sits behind a bypassable member", () => {
+    const refusal = expectRefused(
+      evaluateRollbackRefusals(makeAnalysis([EVAL_DIRTY_TREE, EVAL_ACTIVE_SESSION]), "apply", true),
+    );
+    expect(refusal).toEqual(EVAL_ACTIVE_SESSION);
+  });
+
+  it("admits with allowHeadMismatch=false when no HEAD mismatch was detected", () => {
+    const outcome = expectAdmitted(
+      evaluateRollbackRefusals(makeAnalysis([], { headMismatch: false }), "apply", true),
+    );
+    expect(outcome.allowHeadMismatch).toBe(false);
+  });
+});
+
+describe("evaluateRollbackRefusals: dry-run mode", () => {
+  it("admits even when every never-bypassable refusal is present", () => {
+    const outcome = expectAdmitted(
+      evaluateRollbackRefusals(
+        makeAnalysis([EVAL_ACTIVE_SESSION, EVAL_ALREADY_APPLIED], { activeSessionWarning: true }),
+        "dry_run",
+        false,
+      ),
+    );
+    expect(outcome.activeSessionWarning).toBe(true);
+  });
+
+  it("keeps allowHeadMismatch=false even with --force and a detected mismatch", () => {
+    const outcome = expectAdmitted(
+      evaluateRollbackRefusals(
+        makeAnalysis([EVAL_HEAD_MISMATCH], { headMismatch: true }),
+        "dry_run",
+        true,
+      ),
+    );
+    expect(outcome.allowHeadMismatch).toBe(false);
+  });
+});
+
+describe("checkRefusals: thrown errors carry the refusal's own fields", () => {
+  it("active_session carries the active session id", () => {
+    const err = captureThrow(RollbackActiveSessionRefusalError, () =>
+      checkRefusals({
+        ...makeBasicCollectorParams({ activeLock: makeActiveLock(FIXTURE_SESSION_ID) }),
+        mode: "apply",
+        force: true,
+      }),
+    );
+    expect(err.sessionId).toBe(FIXTURE_SESSION_ID);
+  });
+
+  it("already_applied carries the target session, written_at, and checkpoint id", () => {
+    const err = captureThrow(RollbackAlreadyAppliedError, () =>
+      checkRefusals({
+        ...makeBasicCollectorParams({ existingApplyReceipt: makeApplyReceipt() }),
+        mode: "apply",
+        force: true,
+      }),
+    );
+    expect(err.sessionId).toBe(FIXTURE_SESSION_ID);
+    expect(err.writtenAt).toBe("2026-01-02T00:00:00Z");
+    expect(err.preRollbackCheckpointId).toBe(FIXTURE_OTHER_CHECKPOINT_ID);
+  });
+
+  it("head_mismatch carries both SHAs the right way round", () => {
+    const err = captureThrow(RollbackHeadMismatchError, () =>
+      checkRefusals({
+        ...makeBasicCollectorParams({ currentHeadSha: FIXTURE_DIFFERENT_HEAD_SHA }),
+        mode: "apply",
+        force: false,
+      }),
+    );
+    expect(err.expectedHead).toBe(FIXTURE_HEAD_SHA);
+    expect(err.currentHead).toBe(FIXTURE_DIFFERENT_HEAD_SHA);
+  });
+
+  it("un_ended_session carries the session id", () => {
+    const err = captureThrow(RollbackUnEndedSessionRefusalError, () =>
+      checkRefusals({
+        ...makeBasicCollectorParams({ endOfSessionSnapshot: { kind: "missing" } }),
+        mode: "apply",
+        force: false,
+      }),
+    );
+    expect(err.sessionId).toBe(FIXTURE_SESSION_ID);
+  });
+
+  it("dirty_tree carries the unrelated paths", () => {
+    const err = captureThrow(RollbackDirtyTreeRefusalError, () =>
+      checkRefusals({
+        ...makeBasicCollectorParams({
+          currentStatus: [makeStatusEntry(" M", "src/unrelated.ts")],
+          endOfSessionSnapshot: { kind: "present", paths: [] },
+        }),
+        mode: "apply",
+        force: false,
+      }),
+    );
+    expect(err.unrelatedPaths).toEqual(["src/unrelated.ts"]);
   });
 });
 

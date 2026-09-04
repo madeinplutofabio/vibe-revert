@@ -54,3 +54,63 @@ export function withRollbackLock<T>(
 ): Promise<T> {
   return withExclusiveLock(join(repoRoot, ROLLBACK_LOCK_REL), info, fn);
 }
+
+/**
+ * Whether the lock was released, and where it is if it was not.
+ *
+ * The path is carried EXPLICITLY rather than recovered from the error, because
+ * the D22 remedy is "remove this stale lock directory" and an arbitrary
+ * filesystem error is not required to name the directory it failed on.
+ */
+export type LockReleaseState =
+  | { readonly state: "released" }
+  | { readonly state: "release_failed"; readonly path: string; readonly cause: unknown };
+
+export interface LockedRun<T> {
+  readonly result: T;
+  readonly lockRelease: LockReleaseState;
+}
+
+/**
+ * Run `fn` under the rollback lock, keeping its result even if RELEASE fails.
+ *
+ * `withExclusiveLock` releases on its success path with an unguarded `rm`, so a
+ * release failure throws and `withRollbackLock` loses whatever `fn` produced.
+ * For a selective apply that is unacceptable: the receipt is written INSIDE the
+ * lock, so by the time release runs the outcome is already durably recorded,
+ * and reporting a generic lock error would tell an operator nothing happened
+ * when a restore in fact completed. A stale lock directory is a separate,
+ * manually recoverable fact.
+ *
+ * The discrimination is exact. `withExclusiveLock` rethrows a callback failure
+ * only AFTER its own cleanup, so `produced` is set exactly when the callback
+ * completed; a throw with it set can only have come from the release.
+ * Acquisition failures and callback failures still THROW, because in those
+ * cases there is no result to preserve.
+ *
+ * Not re-exported from `src/index.ts`, per the barrel guard above.
+ */
+export async function withRollbackLockCapturingRelease<T>(
+  repoRoot: string,
+  info: LockInfo,
+  fn: () => Promise<T>,
+): Promise<LockedRun<T>> {
+  const path = join(repoRoot, ROLLBACK_LOCK_REL);
+  let produced: { readonly value: T } | undefined;
+  let lockRelease: LockReleaseState = { state: "released" };
+
+  try {
+    await withExclusiveLock(path, info, async () => {
+      produced = { value: await fn() };
+    });
+  } catch (cause) {
+    if (produced === undefined) throw cause;
+    lockRelease = { state: "release_failed", path, cause };
+  }
+
+  if (produced === undefined) {
+    // Unreachable: `withExclusiveLock` resolved, so the callback completed.
+    throw new Error("the rollback lock resolved without invoking its callback");
+  }
+  return { result: produced.value, lockRelease };
+}

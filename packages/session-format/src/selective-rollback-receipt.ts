@@ -118,12 +118,37 @@ export type DryRunPathOutcome = z.infer<typeof DryRunPathOutcomeSchema>;
  * this selected path was reached. Without it, the engine would have to keep
  * mutating after a failure purely to satisfy the vocabulary, which is precisely
  * the behavior a recovery tool must not have.
+ *
+ * `indeterminate` means the mutation was AUTHORIZED and no per-path claim can
+ * be made.
+ *
+ * Per-path facts come from the post-transplant verification, whose
+ * `VerifiedCandidate.outcome` vocabulary is exactly the four members above.
+ * When that verification does not COMPLETE, no such facts exist, and there are
+ * two real routes to its absence:
+ *
+ *   - the verification ran and threw, leaving no candidate list;
+ *   - no gate result exists at all, because publication was proven only by
+ *     inspecting the invocation directory afterwards.
+ *
+ * It is NOT interchangeable with `not_attempted`. The gate encloses the fence,
+ * the publication, and the mutation, so a throw carrying a `possibly_published`
+ * marker could have occurred mid-mutation. `not_attempted` would assert the
+ * path was untouched and `failed` would assert it was tried; both would be
+ * inventions, and a receipt is evidence.
+ *
+ * The refinement below makes this a BICONDITIONAL against `first_verification`:
+ * completed means every result is projected from a candidate and none may
+ * hedge; anything else means every result is `indeterminate`. So the word can
+ * neither leak into a receipt that has candidates to answer from, nor be
+ * omitted from one that does not.
  */
 export const ApplyPathOutcomeSchema = z.enum([
   "restored",
   "already_at_before",
   "failed",
   "not_attempted",
+  "indeterminate",
 ]);
 export type ApplyPathOutcome = z.infer<typeof ApplyPathOutcomeSchema>;
 
@@ -213,11 +238,67 @@ export type ResolvedTargetKind = z.infer<typeof ResolvedTargetKindSchema>;
  * actually be determined from an unknown thrown value: a syscall error carries
  * an errno, and everything else does not.
  */
+/**
+ * Longest message a receipt will carry.
+ *
+ * Enforced by the SCHEMA, not only by the producer below: a receipt read back
+ * from disk may have been written by anything, and an unbounded message would
+ * let an arbitrary thrown value decide an audit artifact's size.
+ */
+export const FAILURE_SUMMARY_MESSAGE_MAX = 512;
+
 export const FailureSummarySchema = z.strictObject({
   error_code: z.enum(["io", "internal"]),
-  message: nonBlankString,
+  message: nonBlankString.max(FAILURE_SUMMARY_MESSAGE_MAX),
 });
 export type FailureSummary = z.infer<typeof FailureSummarySchema>;
+
+/** Kept inside the limit, so a truncated message still satisfies the schema. */
+const TRUNCATION_SUFFIX = "... (truncated)";
+
+/**
+ * Summarize an unknown thrown value, beside the schema whose rule it applies.
+ *
+ * `io` requires evidence of a SYSCALL failure, which is what `errno` and
+ * `syscall` are. A bare `code` property is not enough: many library errors
+ * carry one that has nothing to do with the filesystem, and labelling those
+ * `io` would send a reader hunting a disk problem that never happened.
+ *
+ * NEVER THROWS, and never returns a blank or over-long message, so it cannot
+ * become the reason a receipt fails to validate. Both the type test and the
+ * property reads are guarded: a hostile proxy can throw from `instanceof` via
+ * its `getPrototypeOf` trap, from a getter, and from stringification.
+ */
+export function summarizeFailure(cause: unknown): FailureSummary {
+  let isSyscall = false;
+  try {
+    if (cause instanceof Error) {
+      const errnoLike = cause as { readonly errno?: unknown; readonly syscall?: unknown };
+      isSyscall = typeof errnoLike.errno === "number" || typeof errnoLike.syscall === "string";
+    }
+  } catch {
+    // Unknown provenance is `internal`. Guessing `io` would assert a syscall.
+    isSyscall = false;
+  }
+
+  let raw: unknown;
+  try {
+    raw = cause instanceof Error ? cause.message : String(cause);
+  } catch {
+    raw = undefined;
+  }
+
+  // `typeof` rather than a cast: at runtime `message` can be anything, whatever
+  // the Error type says.
+  let message = typeof raw === "string" ? raw.trim() : "an unrepresentable thrown value";
+  if (message === "") message = "a failure carrying no message";
+  if (message.length > FAILURE_SUMMARY_MESSAGE_MAX) {
+    const head = message.slice(0, FAILURE_SUMMARY_MESSAGE_MAX - TRUNCATION_SUFFIX.length);
+    message = `${head}${TRUNCATION_SUFFIX}`;
+  }
+
+  return { error_code: isSyscall ? "io" : "internal", message };
+}
 
 /** One configured command's outcome. Mirrors the runner's own result surface. */
 export const VerifyCommandResultSchema = z.discriminatedUnion("outcome", [
@@ -731,6 +812,25 @@ export const SelectiveRollbackReceiptSchema = z
       message:
         "a 'transplant_failed' or 'transplant_not_clean' skip requires mutation or the first integrity assessment to have failed",
       path: ["project_verification"],
+    },
+  )
+  // Per-path facts come from the post-transplant verification. A completed one
+  // supplies an outcome for every selected candidate, so no result may hedge; a
+  // verification that failed or never ran supplies none, so every result must.
+  // Stated as a biconditional because both directions are lies worth blocking:
+  // hedging beside real evidence hides it, and claiming an outcome without
+  // evidence invents it.
+  .refine(
+    (r) => {
+      if (r.mode !== "apply") return true;
+      return r.first_verification.state === "completed"
+        ? !r.results.some((x) => x.outcome === "indeterminate")
+        : r.results.every((x) => x.outcome === "indeterminate");
+    },
+    {
+      message:
+        "'indeterminate' path outcomes appear exactly when first_verification did not complete, and then on every result",
+      path: ["results"],
     },
   )
   // Success is the conjunction of every guarantee the operation claims.

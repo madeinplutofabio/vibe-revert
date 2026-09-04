@@ -226,6 +226,19 @@ export interface PostTransplantVerificationResult {
   readonly candidates: readonly VerifiedCandidate[];
   readonly violations: readonly VerificationViolation[];
   readonly observedHeadSha: string;
+  /**
+   * How many UNSELECTED managed paths this verification actually compared.
+   *
+   * Evidence about the size of the compared domain, not a pass/fail signal. A
+   * receipt reporting no unselected violations means little without it, because
+   * "nothing moved" and "nothing was looked at" would otherwise read alike.
+   *
+   * Produced by pass 2, which walks `S`'s own path set and skips the plan's
+   * classifications. So it counts PATHS: `S` is keyed by path, obligations and
+   * candidates never enter it, and a selected path cannot be counted however
+   * many obligations it carries.
+   */
+  readonly unselectedCheckedCount: number;
 }
 
 export interface PostTransplantVerificationOptions {
@@ -573,8 +586,15 @@ export async function verifyPostTransplantState(
   // planned-effect rule; everything else must be untouched. Mutually exclusive
   // branches over one loop are what make "exactly one treatment per frozen path"
   // structural rather than a rule to re-check.
+  //
+  // This loop is also where `unselectedCheckedCount` comes from, incremented
+  // for every path it adjudicates. Counting HERE rather than deriving a size
+  // afterwards is the point: the reported number is what was compared, and
+  // cannot drift from it.
+  let unselectedCheckedCount = 0;
   for (const [path, frozenState] of frozenSnapshot.states) {
     if (classificationPaths.has(path)) continue;
+    unselectedCheckedCount += 1;
 
     const live = observed.states.get(path);
     if (live === undefined) {
@@ -686,5 +706,5 @@ export async function verifyPostTransplantState(
     );
   }
 
-  return { candidates, violations, observedHeadSha };
+  return { candidates, violations, observedHeadSha, unselectedCheckedCount };
 }

@@ -2,8 +2,8 @@
 // Copyright 2026 Fabio Marcello Salvadori
 
 // Tests for the package-private atomic-rename helper in
-// packages/cli/src/atomic.ts. NOT exported from any public CLI surface,
-// so we import it directly via the source path.
+// packages/cli-commands/src/atomic.ts. NOT exported from any public CLI
+// surface, so we import it directly via the source path.
 //
 // What's load-bearing here:
 //   - renameDirAtomic must perform the rename and preserve contents
@@ -26,10 +26,16 @@
 //     neither outcome would prove anything about the code's actual
 //     contract.
 //
-// The CLI helper has only `renameDirAtomic` (no `writeFileAtomic`)
-// per D17c — see the header comment in src/atomic.ts. The two tests
-// here are a strict subset of packages/core/test/atomic.test.ts's
-// renameDirAtomic block.
+// The CLI atomic surface has THREE helpers per D17c: `renameDirAtomic`,
+// `writeFileAtomic` (added in M C), and `writeFileExclusiveAtomic` (added in
+// M 0.8.0). See the header comment in src/atomic.ts. This file covers
+// `renameDirAtomic` only, and its two tests are a strict subset of
+// packages/core/test/atomic.test.ts's renameDirAtomic block.
+//
+// `writeFileExclusiveAtomic` is covered in test/atomic-exclusive-write.test.ts,
+// kept separate because it mocks `node:fs/promises` and `node:crypto` to force
+// a cleanup failure and a temp-path collision. Neither mock may sit over the
+// real-IO tests here.
 
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";

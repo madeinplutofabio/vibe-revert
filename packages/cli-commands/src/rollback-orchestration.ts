@@ -11,10 +11,12 @@
 // It DOES own:
 //   - The 6 typed error classes the rollback command emits for
 //     refusals and missing-artifact failures.
-//   - The TWO-LAYER refusal pipeline: `collectRollbackRefusals`
+//   - The THREE-LAYER refusal pipeline: `collectRollbackRefusals`
 //     (pure) computes the analysis facts including the D76-ordered
-//     refusals list; `checkRefusals` (wrapper) applies mode/force
-//     policy and throws or returns the outcome.
+//     refusals list; `evaluateRollbackRefusals` (pure) applies the
+//     D75 mode/force policy and returns the structured decision;
+//     `checkRefusals` (wrapper) maps that decision onto the
+//     throwing API the CLI already consumes.
 //   - `resolveSessionAndCheckpoint` — the I/O helper that loads
 //     the session + inner checkpoint manifest, wrapping core's
 //     SessionNotFoundError unchanged + mapping git's
@@ -33,9 +35,20 @@
 //
 //   1. **D76 locked refusal order, single source of truth.**
 //      `collectRollbackRefusals` is the ONE place that walks the
-//      rules in D63 → D70 → D64 → D61b → D61 order. `checkRefusals`
-//      walks the resulting list and applies mode/force policy
-//      without re-deriving the order.
+//      rules in D63 → D70 → D64 → D61b → D61 order.
+//      `evaluateRollbackRefusals` walks the resulting list and
+//      applies mode/force policy without re-deriving the order.
+//      `checkRefusals` re-derives neither.
+//
+//      D75 bypassability lives in exactly one function,
+//      `bypassableByForce`, whose switch is exhaustiveness-checked
+//      against `RollbackRefusal`. A sixth refusal kind is a COMPILE
+//      error there and in `refusalError`, which is the point: a new
+//      rule must state its force policy and its error shape before
+//      it can ship. Consumers outside this module take the
+//      STRUCTURED decision rather than inferring a refusal backwards
+//      from a thrown error class, so they need no update when a kind
+//      is added and can never mistake a new kind for an anomaly.
 //
 //   2. **`collectRollbackRefusals` is PURE.** No I/O, no
 //      Date.now(), no Math.random(). All inputs are pre-loaded
@@ -281,6 +294,19 @@ export interface RefusalCheckOutcome {
   readonly dirtyTreeCheckOutcome: "performed" | "skipped_no_after_state";
   readonly unrelatedDirtyPaths: readonly string[];
 }
+
+/**
+ * The D75 policy decision as a value.
+ *
+ * Exists so a caller can obtain the exact refusal without catching an
+ * exception and inferring the kind backwards from its error class. That
+ * inference would place a second copy of the class-to-kind correspondence
+ * outside this module, where a newly added refusal kind would be silently
+ * misread as a non-policy anomaly.
+ */
+export type RefusalPolicyDecision =
+  | { readonly decision: "admitted"; readonly outcome: RefusalCheckOutcome }
+  | { readonly decision: "refused"; readonly refusal: RollbackRefusal };
 
 export interface CollectRollbackRefusalsParams {
   readonly targetSessionId: string;
@@ -548,67 +574,122 @@ export function collectRollbackRefusals(
 }
 
 // =============================================================================
-// checkRefusals (wraps collectRollbackRefusals; applies mode/force)
+// evaluateRollbackRefusals (PURE) + checkRefusals (throwing adapter)
 // =============================================================================
 
 /**
- * Apply D75 force policy to the collector's analysis and either
- * throw the first applicable refusal (apply mode) or return the
- * outcome with warnings populated (dry-run mode).
+ * D75 bypassability, in one place.
  *
- * Dry-run mode never throws policy refusals. Corrupted or
- * mismatched pre-loaded artifacts still throw before policy
- * evaluation, via `collectRollbackRefusals`'s artifact-consistency
- * guard.
+ * The switch is exhaustiveness-checked: a sixth `RollbackRefusal` kind fails
+ * to compile here until its force policy is stated. That is deliberate. A new
+ * rule defaulting silently to bypassable would weaken rollback safety, and one
+ * defaulting silently to non-bypassable would strand users, so neither default
+ * is acceptable and the compiler asks instead.
  */
-export function checkRefusals(params: CheckRefusalsParams): RefusalCheckOutcome {
-  const analysis = collectRollbackRefusals(params);
-
-  if (params.mode === "dry_run") {
-    return {
-      activeSessionWarning: analysis.activeSessionWarning,
-      unEndedSessionWarning: analysis.unEndedSessionWarning,
-      allowHeadMismatch: false,
-      dirtyTreeCheckOutcome: analysis.dirtyTreeCheckOutcome,
-      unrelatedDirtyPaths: analysis.unrelatedDirtyPaths,
-    };
-  }
-
-  for (const refusal of analysis.refusals) {
-    switch (refusal.kind) {
-      case "active_session":
-        throw new RollbackActiveSessionRefusalError(refusal.activeSessionId);
-      case "already_applied":
-        throw new RollbackAlreadyAppliedError(
-          params.targetSessionId,
-          refusal.writtenAt,
-          refusal.preRollbackCheckpointId,
-        );
-      case "head_mismatch":
-        if (!params.force) {
-          throw new RollbackHeadMismatchError(refusal.expectedHead, refusal.currentHead);
-        }
-        break;
-      case "un_ended_session":
-        if (!params.force) {
-          throw new RollbackUnEndedSessionRefusalError(refusal.sessionId);
-        }
-        break;
-      case "dirty_tree":
-        if (!params.force) {
-          throw new RollbackDirtyTreeRefusalError(refusal.unrelatedPaths);
-        }
-        break;
+function bypassableByForce(refusal: RollbackRefusal): boolean {
+  switch (refusal.kind) {
+    // D63 state-machine invariant and D70 idempotency: never bypassed.
+    case "active_session":
+    case "already_applied":
+      return false;
+    case "head_mismatch":
+    case "un_ended_session":
+    case "dirty_tree":
+      return true;
+    default: {
+      const unhandled: never = refusal;
+      return unhandled;
     }
   }
+}
 
+/**
+ * The typed error a refusal becomes at the throwing boundary.
+ *
+ * Exhaustiveness-checked for the same reason as `bypassableByForce`: a refusal
+ * with no error shape cannot be surfaced to a user.
+ */
+function refusalError(targetSessionId: string, refusal: RollbackRefusal): Error {
+  switch (refusal.kind) {
+    case "active_session":
+      return new RollbackActiveSessionRefusalError(refusal.activeSessionId);
+    case "already_applied":
+      return new RollbackAlreadyAppliedError(
+        targetSessionId,
+        refusal.writtenAt,
+        refusal.preRollbackCheckpointId,
+      );
+    case "head_mismatch":
+      return new RollbackHeadMismatchError(refusal.expectedHead, refusal.currentHead);
+    case "un_ended_session":
+      return new RollbackUnEndedSessionRefusalError(refusal.sessionId);
+    case "dirty_tree":
+      return new RollbackDirtyTreeRefusalError(refusal.unrelatedPaths);
+    default: {
+      const unhandled: never = refusal;
+      return unhandled;
+    }
+  }
+}
+
+function outcomeOf(
+  analysis: RollbackRefusalAnalysis,
+  allowHeadMismatch: boolean,
+): RefusalCheckOutcome {
   return {
     activeSessionWarning: analysis.activeSessionWarning,
     unEndedSessionWarning: analysis.unEndedSessionWarning,
-    allowHeadMismatch: analysis.headMismatch && params.force,
+    allowHeadMismatch,
     dirtyTreeCheckOutcome: analysis.dirtyTreeCheckOutcome,
     unrelatedDirtyPaths: analysis.unrelatedDirtyPaths,
   };
+}
+
+/**
+ * Apply D75 force policy to a collected analysis and return the STRUCTURED
+ * decision. PURE: no I/O, and it never throws.
+ *
+ * Dry-run mode admits unconditionally, evaluating no policy refusal, so its
+ * outcome carries `allowHeadMismatch: false` regardless of `force`.
+ *
+ * Callers needing the refusal as a value use this directly; `checkRefusals`
+ * wraps it for callers wanting the throwing API.
+ */
+export function evaluateRollbackRefusals(
+  analysis: RollbackRefusalAnalysis,
+  mode: "apply" | "dry_run",
+  force: boolean,
+): RefusalPolicyDecision {
+  if (mode === "dry_run") {
+    return { decision: "admitted", outcome: outcomeOf(analysis, false) };
+  }
+
+  // Without `--force` the first refusal in D76 order stops the walk whatever
+  // its kind; with it, the first non-bypassable one does.
+  for (const refusal of analysis.refusals) {
+    if (!force || !bypassableByForce(refusal)) {
+      return { decision: "refused", refusal };
+    }
+  }
+
+  return { decision: "admitted", outcome: outcomeOf(analysis, analysis.headMismatch && force) };
+}
+
+/**
+ * Collect, evaluate, and either throw the first applicable refusal (apply
+ * mode) or return the outcome with warnings populated (dry-run mode).
+ *
+ * Dry-run mode never throws policy refusals. Corrupted or mismatched
+ * pre-loaded artifacts still throw before policy evaluation, via
+ * `collectRollbackRefusals`'s artifact-consistency guard.
+ */
+export function checkRefusals(params: CheckRefusalsParams): RefusalCheckOutcome {
+  const analysis = collectRollbackRefusals(params);
+  const decision = evaluateRollbackRefusals(analysis, params.mode, params.force);
+  if (decision.decision === "admitted") {
+    return decision.outcome;
+  }
+  throw refusalError(params.targetSessionId, decision.refusal);
 }
 
 // =============================================================================

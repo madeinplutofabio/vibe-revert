@@ -42,6 +42,14 @@
 // helpers for those artifacts; this file is the SOLE atomic surface the
 // CLI orchestration layer needs.
 //
+// M 0.8.0 adds `writeFileExclusiveAtomic`, which is atomic AND no-overwrite.
+// It exists because the selective-rollback receipt is recovery EVIDENCE:
+// silently replacing one destroys the record of what a prior invocation
+// actually did. `writeFileAtomic` cannot serve that case, since its `wx` flag
+// protects only the temp path while the final `rename()` overwrites an existing
+// destination on POSIX. The new helper is CLI-only and is deliberately outside
+// the byte-identical set described below.
+//
 // Drift warning: the body of `writeFileAtomic` below is BYTE-IDENTICAL
 // to the version in `packages/core/src/atomic.ts`, and per D17c
 // must remain byte-identical to
@@ -57,7 +65,7 @@
 // intentional; drift is the failure mode.
 
 import { randomBytes } from "node:crypto";
-import { lstat, rename, writeFile } from "node:fs/promises";
+import { link, lstat, rename, unlink, writeFile } from "node:fs/promises";
 
 /**
  * Atomically write `data` to `targetPath`.
@@ -140,4 +148,79 @@ export async function renameDirAtomic(tmpDir: string, finalDir: string): Promise
     throw new Error(`renameDirAtomic: destination already exists: ${finalDir}`);
   }
   await rename(tmpDir, finalDir);
+}
+
+/**
+ * Write `data` to `targetPath` atomically AND exclusively: the destination is
+ * created only if it does not already exist, and readers never see a partial
+ * file.
+ *
+ * `writeFileAtomic` above provides only the first half. Its `wx` flag protects
+ * the TEMP path, and the final `rename()` overwrites an existing destination on
+ * POSIX, per the cross-platform note on `renameDirAtomic`. For an artifact that
+ * is evidence rather than a cache, a silent replacement destroys the record of
+ * what happened, so `rename` is not usable here and there is deliberately NO
+ * fallback to it. On a filesystem without hard links this helper fails loudly
+ * instead of quietly degrading to overwrite semantics.
+ *
+ * The sequence:
+ *
+ *   1. write the temp file with `wx`, as a SIBLING of the destination so the
+ *      link cannot fail with EXDEV;
+ *   2. `link(tempPath, targetPath)`, which fails with EEXIST when the
+ *      destination exists and is atomic when it does not;
+ *   3. remove the temp path, best effort.
+ *
+ * Cleanup on failure, per step, because "whose file is it" differs:
+ *
+ *   - step 1 EEXIST: the temp path was NOT created by this call, so it belongs
+ *     to a concurrent writer and is left ALONE. Removing it would destroy a
+ *     peer's in-flight write.
+ *   - step 1, any other error: this call may have created a partial file at the
+ *     temp path, so it is removed best effort.
+ *   - step 2, any error: the temp file is this call's and nothing was
+ *     published, so it is removed best effort.
+ *
+ * In every case the ORIGINAL error is rethrown with its `code` intact. `EEXIST`
+ * from step 2 means the DESTINATION already existed and was left untouched,
+ * which is the refusal this helper exists to provide.
+ *
+ * Step 3 is best effort BY CONTRACT. Once the link succeeds the destination IS
+ * published; a failure to unlink the temp path leaves a `.tmp.<hex>` sibling and
+ * nothing else. Reporting that as a write failure would tell the caller the
+ * artifact is missing when it is present, which for a recovery receipt is the
+ * dangerous direction for the error to point.
+ *
+ * Windows note: hard links require NTFS. Not a durability primitive: like every
+ * other helper here it does not fsync, matching the project's existing
+ * persistence model.
+ *
+ * DELIBERATELY NOT part of the three-way byte-identical set described in the
+ * drift warning above. `@viberevert/core` and `@viberevert/git` do not
+ * implement it and must not have it copied into them speculatively.
+ */
+export async function writeFileExclusiveAtomic(
+  targetPath: string,
+  data: Buffer | string,
+): Promise<void> {
+  const suffix = randomBytes(8).toString("hex");
+  const tempPath = `${targetPath}.tmp.${suffix}`;
+
+  try {
+    await writeFile(tempPath, data, { flag: "wx" });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") {
+      await unlink(tempPath).catch(() => {});
+    }
+    throw err;
+  }
+
+  try {
+    await link(tempPath, targetPath);
+  } catch (err) {
+    await unlink(tempPath).catch(() => {});
+    throw err;
+  }
+
+  await unlink(tempPath).catch(() => {});
 }

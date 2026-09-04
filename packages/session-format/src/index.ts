@@ -227,6 +227,7 @@ export {
   DryRunEligibilitySchema,
   DryRunPathOutcomeSchema,
   DryRunPathResultSchema,
+  FAILURE_SUMMARY_MESSAGE_MAX,
   FailureSummarySchema,
   FirstVerificationSchema,
   firstVerificationCompletedCleanly,
@@ -238,6 +239,7 @@ export {
   ResolvedTargetKindSchema,
   SELECTIVE_ROLLBACK_RECEIPT_SCHEMA_VERSION,
   SelectiveRollbackReceiptSchema,
+  summarizeFailure,
   VerifyCommandRecordSchema,
   VerifyCommandResultSchema,
 } from "./selective-rollback-receipt.js";
