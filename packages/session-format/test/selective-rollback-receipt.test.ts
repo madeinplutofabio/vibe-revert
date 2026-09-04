@@ -89,6 +89,55 @@ function dryRun(overrides: Record<string, unknown> = {}) {
   };
 }
 
+// ---- project verification / post-command integrity fixtures ----------------
+//
+// The two are ORTHOGONAL but coupled by state: commands that never started
+// pair with `not_run` carrying the same reason, while commands that were
+// reached pair with a real observation, including when the runner faulted.
+
+const NOT_CONFIGURED_VERIFICATION = { state: "not_configured" } as const;
+const NOT_CONFIGURED_POST = { state: "not_run", reason: "commands_not_configured" } as const;
+
+const PASSING_COMMAND = {
+  command: "npm",
+  args: ["test"],
+  result: { outcome: "exited", exit_code: 0 },
+} as const;
+const FAILING_COMMAND = {
+  command: "npm",
+  args: ["test"],
+  result: { outcome: "exited", exit_code: 1 },
+} as const;
+const NOT_RUN_COMMAND = {
+  command: "npm",
+  args: ["lint"],
+  result: { outcome: "not_run", reason: "earlier_command_did_not_pass" },
+} as const;
+
+const COMPLETED_PASSED = { state: "completed", commands: [PASSING_COMMAND] } as const;
+const CLEAN_POST = { state: "clean" } as const;
+
+const SKIPPED_TRANSPLANT_FAILED = { state: "skipped", reason: "transplant_failed" } as const;
+const NOT_RUN_TRANSPLANT_FAILED = { state: "not_run", reason: "transplant_failed" } as const;
+
+const COMPLETED_FAILED = { state: "completed", commands: [FAILING_COMMAND] } as const;
+const POST_MUTATED = {
+  state: "project_mutated",
+  added_paths: [],
+  removed_paths: [],
+  changed_paths: ["src/other.ts"],
+  topology_changed_roots: [],
+  head_moved: false,
+} as const;
+const POST_HEAD_MOVED = {
+  state: "project_mutated",
+  added_paths: [],
+  removed_paths: [],
+  changed_paths: [],
+  topology_changed_roots: [],
+  head_moved: true,
+} as const;
+
 function apply(overrides: Record<string, unknown> = {}) {
   return {
     schema_version: SELECTIVE_ROLLBACK_RECEIPT_SCHEMA_VERSION,
@@ -103,7 +152,8 @@ function apply(overrides: Record<string, unknown> = {}) {
     results: [{ path: "src/a.ts", change_group_id: GROUP_A, outcome: "restored" }],
     outcome: "succeeded",
     integrity: CLEAN,
-    project_verification: "not_configured",
+    project_verification: NOT_CONFIGURED_VERIFICATION,
+    post_command_integrity: NOT_CONFIGURED_POST,
     written_at: WHEN,
     out_of_scope_notice: ROLLBACK_OUT_OF_SCOPE_NOTICE,
     ...overrides,
@@ -135,7 +185,7 @@ describe("mode discrimination", () => {
     expect(ok(dryRun({ outcome: "succeeded" }))).toBe(false);
     expect(ok(dryRun({ integrity: CLEAN }))).toBe(false);
     expect(ok(dryRun({ pre_rollback_checkpoint_id: EMERGENCY }))).toBe(false);
-    expect(ok(dryRun({ project_verification: "not_configured" }))).toBe(false);
+    expect(ok(dryRun({ project_verification: NOT_CONFIGURED_VERIFICATION }))).toBe(false);
   });
 
   it("rejects eligibility on an apply", () => {
@@ -197,6 +247,7 @@ describe("required fields", () => {
     "outcome",
     "integrity",
     "project_verification",
+    "post_command_integrity",
     "written_at",
     "out_of_scope_notice",
   ])("apply requires %s", (field) => {
@@ -540,29 +591,31 @@ describe("project verification is coupled to a second integrity pass", () => {
 
   it("rejects not_configured carrying a second pass", () => {
     // No commands ran, so there is nothing for a post-command pass to be about.
-    expect(ok(apply({ post_command_integrity: CLEAN }))).toBe(false);
+    expect(ok(apply({ post_command_integrity: CLEAN_POST }))).toBe(false);
   });
 
   it("accepts passed with a second pass", () => {
-    expect(ok(apply({ project_verification: "passed", post_command_integrity: CLEAN }))).toBe(true);
+    expect(
+      ok(apply({ project_verification: COMPLETED_PASSED, post_command_integrity: CLEAN_POST })),
+    ).toBe(true);
   });
 
   it("rejects passed without a second pass", () => {
     // Commands ran, so the tree must have been re-examined afterwards. This is
     // the rule that makes VERIFICATION_COMMAND_MUTATED_PROJECT detectable at all.
-    expect(ok(apply({ project_verification: "passed", outcome: "failed" }))).toBe(false);
+    expect(ok(apply({ project_verification: COMPLETED_PASSED, outcome: "failed" }))).toBe(false);
   });
 
   it("rejects failed without a second pass", () => {
-    expect(ok(apply({ project_verification: "failed", outcome: "failed" }))).toBe(false);
+    expect(ok(apply({ project_verification: COMPLETED_FAILED, outcome: "failed" }))).toBe(false);
   });
 
   it("rejects not_run carrying a second pass", () => {
     expect(
       ok(
         apply({
-          project_verification: "not_run",
-          post_command_integrity: CLEAN,
+          project_verification: SKIPPED_TRANSPLANT_FAILED,
+          post_command_integrity: CLEAN_POST,
           integrity: SELECTED_UNVERIFIED,
           outcome: "failed",
         }),
@@ -580,8 +633,8 @@ describe("pipeline order, forward: commands are reachable only after a clean sta
         apply({
           results: [{ path: "src/a.ts", change_group_id: GROUP_A, outcome: "failed" }],
           outcome: "failed",
-          project_verification: "passed",
-          post_command_integrity: CLEAN,
+          project_verification: COMPLETED_PASSED,
+          post_command_integrity: CLEAN_POST,
         }),
       ),
     ).toBe(false);
@@ -593,8 +646,8 @@ describe("pipeline order, forward: commands are reachable only after a clean sta
         apply({
           integrity: SELECTED_UNVERIFIED,
           outcome: "failed",
-          project_verification: "passed",
-          post_command_integrity: CLEAN,
+          project_verification: COMPLETED_PASSED,
+          post_command_integrity: CLEAN_POST,
         }),
       ),
     ).toBe(false);
@@ -606,8 +659,8 @@ describe("pipeline order, forward: commands are reachable only after a clean sta
         apply({
           integrity: COLLATERAL,
           outcome: "failed",
-          project_verification: "passed",
-          post_command_integrity: CLEAN,
+          project_verification: COMPLETED_PASSED,
+          post_command_integrity: CLEAN_POST,
         }),
       ),
     ).toBe(false);
@@ -619,8 +672,8 @@ describe("pipeline order, forward: commands are reachable only after a clean sta
         apply({
           integrity: HEAD_MOVED,
           outcome: "failed",
-          project_verification: "passed",
-          post_command_integrity: CLEAN,
+          project_verification: COMPLETED_PASSED,
+          post_command_integrity: CLEAN_POST,
         }),
       ),
     ).toBe(false);
@@ -636,8 +689,8 @@ describe("pipeline order, forward: commands are reachable only after a clean sta
             { path: "src/b.ts", change_group_id: GROUP_B, outcome: "not_attempted" },
           ],
           outcome: "failed",
-          project_verification: "passed",
-          post_command_integrity: CLEAN,
+          project_verification: COMPLETED_PASSED,
+          post_command_integrity: CLEAN_POST,
         }),
       ),
     ).toBe(false);
@@ -650,7 +703,15 @@ describe("pipeline order, inverse: not_run asserts the earlier stage failed", ()
     // integrity while still claiming its configured commands were unreachable.
     // Nothing in the artifact would contradict it, and a reader would conclude
     // the project was verified when it never was.
-    expect(ok(apply({ project_verification: "not_run", outcome: "failed" }))).toBe(false);
+    expect(
+      ok(
+        apply({
+          project_verification: SKIPPED_TRANSPLANT_FAILED,
+          post_command_integrity: NOT_RUN_TRANSPLANT_FAILED,
+          outcome: "failed",
+        }),
+      ),
+    ).toBe(false);
   });
 
   it("accepts not_run after a failed transplant", () => {
@@ -659,7 +720,8 @@ describe("pipeline order, inverse: not_run asserts the earlier stage failed", ()
         apply({
           results: [{ path: "src/a.ts", change_group_id: GROUP_A, outcome: "failed" }],
           outcome: "failed",
-          project_verification: "not_run",
+          project_verification: SKIPPED_TRANSPLANT_FAILED,
+          post_command_integrity: NOT_RUN_TRANSPLANT_FAILED,
         }),
       ),
     ).toBe(true);
@@ -674,7 +736,8 @@ describe("pipeline order, inverse: not_run asserts the earlier stage failed", ()
         apply({
           integrity: SELECTED_UNVERIFIED,
           outcome: "failed",
-          project_verification: "not_run",
+          project_verification: SKIPPED_TRANSPLANT_FAILED,
+          post_command_integrity: NOT_RUN_TRANSPLANT_FAILED,
         }),
       ),
     ).toBe(true);
@@ -704,7 +767,9 @@ describe("outcome 'succeeded'", () => {
   });
 
   it("accepts a fully clean apply whose commands passed", () => {
-    expect(ok(apply({ project_verification: "passed", post_command_integrity: CLEAN }))).toBe(true);
+    expect(
+      ok(apply({ project_verification: COMPLETED_PASSED, post_command_integrity: CLEAN_POST })),
+    ).toBe(true);
   });
 
   it("rejects success with a failed path", () => {
@@ -738,24 +803,26 @@ describe("outcome 'succeeded'", () => {
   });
 
   it("rejects success when the verification commands failed", () => {
-    expect(ok(apply({ project_verification: "failed", post_command_integrity: CLEAN }))).toBe(
-      false,
-    );
+    expect(
+      ok(apply({ project_verification: COMPLETED_FAILED, post_command_integrity: CLEAN_POST })),
+    ).toBe(false);
   });
 
   it("rejects success when the post-command pass found damage", () => {
     // A command that mutated the project cannot be reported as a successful
     // recovery even though every earlier stage was clean.
-    expect(ok(apply({ project_verification: "passed", post_command_integrity: COLLATERAL }))).toBe(
-      false,
-    );
+    expect(
+      ok(apply({ project_verification: COMPLETED_PASSED, post_command_integrity: POST_MUTATED })),
+    ).toBe(false);
   });
 
   it("rejects success when a command moved HEAD", () => {
     // The `git commit` case: file bytes can look acceptable while history moved.
-    expect(ok(apply({ project_verification: "passed", post_command_integrity: HEAD_MOVED }))).toBe(
-      false,
-    );
+    expect(
+      ok(
+        apply({ project_verification: COMPLETED_PASSED, post_command_integrity: POST_HEAD_MOVED }),
+      ),
+    ).toBe(false);
   });
 
   it("allows outcome 'failed' even when every modeled dimension looks clean", () => {
@@ -769,8 +836,8 @@ describe("outcome 'succeeded'", () => {
       ok(
         apply({
           outcome: "failed",
-          project_verification: "passed",
-          post_command_integrity: CLEAN,
+          project_verification: COMPLETED_PASSED,
+          post_command_integrity: CLEAN_POST,
         }),
       ),
     ).toBe(true);
@@ -843,5 +910,239 @@ describe("per-path results", () => {
         }),
       ),
     ).toBe(false);
+  });
+});
+
+// =============================================================================
+// Project verification and post-command integrity, as discriminated records
+//
+// These arms exist because the transaction produces outcomes the original
+// four-state enum could not express without asserting something that was never
+// observed: "the runner broke" is not "your tests failed", a moved exclusion
+// basis is not a failed verification, and an observation that could not be
+// taken is not an observation that was clean.
+// =============================================================================
+
+describe("project verification records", () => {
+  it("keeps a runner fault distinct from a command failure", () => {
+    // Both are non-success, and collapsing them would tell a reader their tests
+    // failed when the runner never got to ask.
+    const runnerFailed = {
+      state: "runner_failed",
+      failure: { error_code: "io", message: "spawn ENOENT" },
+    };
+    // A runner fault is never a success, whatever the observation showed.
+    expect(
+      ok(apply({ project_verification: runnerFailed, post_command_integrity: CLEAN_POST })),
+    ).toBe(false);
+    expect(
+      ok(
+        apply({
+          outcome: "failed",
+          project_verification: runnerFailed,
+          post_command_integrity: CLEAN_POST,
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it("still observes the repository after a runner fault", () => {
+    // ORTHOGONAL axes: the runner faulting says nothing about what the commands
+    // already did to the tree, so the post-command observation still applies.
+    expect(
+      ok(
+        apply({
+          outcome: "failed",
+          project_verification: {
+            state: "runner_failed",
+            failure: { error_code: "internal", message: "unexpected" },
+          },
+          post_command_integrity: POST_MUTATED,
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it("accepts fail-fast records: not_run only after the first non-passing command", () => {
+    expect(
+      ok(
+        apply({
+          outcome: "failed",
+          project_verification: {
+            state: "completed",
+            commands: [FAILING_COMMAND, NOT_RUN_COMMAND],
+          },
+          post_command_integrity: CLEAN_POST,
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it("rejects a not_run record before any command failed", () => {
+    // The runner stops at the first non-passing command, so a not_run following
+    // a pass describes a sequence it could not have produced.
+    expect(
+      ok(
+        apply({
+          outcome: "failed",
+          project_verification: {
+            state: "completed",
+            commands: [PASSING_COMMAND, NOT_RUN_COMMAND, PASSING_COMMAND],
+          },
+          post_command_integrity: CLEAN_POST,
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("rejects a passing command recorded after a failure", () => {
+    expect(
+      ok(
+        apply({
+          outcome: "failed",
+          project_verification: {
+            state: "completed",
+            commands: [FAILING_COMMAND, PASSING_COMMAND],
+          },
+          post_command_integrity: CLEAN_POST,
+        }),
+      ),
+    ).toBe(false);
+  });
+});
+
+describe("post-command integrity records", () => {
+  it("requires the not_run reason to match the skip's own reason", () => {
+    expect(
+      ok(
+        apply({
+          results: [{ path: "src/a.ts", change_group_id: GROUP_A, outcome: "failed" }],
+          outcome: "failed",
+          project_verification: SKIPPED_TRANSPLANT_FAILED,
+          post_command_integrity: { state: "not_run", reason: "transplant_not_clean" },
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("records an unusable pre-command observation as an observation, not as not_run", () => {
+    // The transplant WAS clean here; what failed was looking at it. Saying
+    // "not_run" would describe a failure to observe as a decision not to.
+    const base = {
+      outcome: "failed",
+      project_verification: { state: "skipped", reason: "pre_command_observation_unusable" },
+    };
+    expect(
+      ok(
+        apply({
+          ...base,
+          post_command_integrity: {
+            state: "observation_failed",
+            side: "before_commands",
+            failure: { error_code: "io", message: "EACCES" },
+          },
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      ok(
+        apply({
+          ...base,
+          post_command_integrity: { state: "not_run", reason: "transplant_failed" },
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("accepts basis_changed as its own state", () => {
+    // The ignore rules moved, so the domain comparison is not interpretable.
+    // Recording it as a failed verification would assert a failure never seen.
+    expect(
+      ok(
+        apply({
+          outcome: "failed",
+          project_verification: COMPLETED_PASSED,
+          post_command_integrity: { state: "basis_changed" },
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it("rejects project_mutated that names nothing", () => {
+    expect(
+      ok(
+        apply({
+          outcome: "failed",
+          project_verification: COMPLETED_PASSED,
+          post_command_integrity: { ...POST_MUTATED, changed_paths: [], head_moved: false },
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("accepts project_mutated naming only HEAD movement", () => {
+    // A command that commits leaves every managed path as verified.
+    expect(
+      ok(
+        apply({
+          outcome: "failed",
+          project_verification: COMPLETED_PASSED,
+          post_command_integrity: POST_HEAD_MOVED,
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  const torn = (overrides: Record<string, unknown>) => ({
+    state: "observation_torn",
+    side: "after_commands",
+    basis_moved: false,
+    head_moved: false,
+    domain_status: "moved",
+    ...overrides,
+  });
+
+  const tornReceipt = (overrides: Record<string, unknown>) =>
+    apply({
+      outcome: "failed",
+      project_verification: COMPLETED_PASSED,
+      post_command_integrity: torn(overrides),
+    });
+
+  it("accepts a torn sample whose axes agree with the acquisition rule", () => {
+    expect(ok(tornReceipt({}))).toBe(true);
+    expect(ok(tornReceipt({ basis_moved: true, domain_status: "not_comparable" }))).toBe(true);
+    expect(ok(tornReceipt({ head_moved: true, domain_status: "unchanged" }))).toBe(true);
+  });
+
+  it("rejects a moved basis that still claims a comparable domain", () => {
+    expect(ok(tornReceipt({ basis_moved: true, domain_status: "moved" }))).toBe(false);
+    expect(ok(tornReceipt({ basis_moved: true, domain_status: "unchanged" }))).toBe(false);
+  });
+
+  it("rejects not_comparable without a moved basis", () => {
+    expect(ok(tornReceipt({ basis_moved: false, domain_status: "not_comparable" }))).toBe(false);
+  });
+
+  it("rejects a torn sample in which nothing actually moved", () => {
+    // A stable basis, a steady HEAD and an unchanged domain describe a COHERENT
+    // sample, which would never have been reported as torn.
+    expect(ok(tornReceipt({ head_moved: false, domain_status: "unchanged" }))).toBe(false);
+  });
+
+  it("accepts classification_failed as distinct from an unusable observation", () => {
+    // Both observations were coherent; only comparing them faulted.
+    expect(
+      ok(
+        apply({
+          outcome: "failed",
+          project_verification: COMPLETED_PASSED,
+          post_command_integrity: {
+            state: "classification_failed",
+            failure: { error_code: "internal", message: "comparator threw" },
+          },
+        }),
+      ),
+    ).toBe(true);
   });
 });

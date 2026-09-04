@@ -146,6 +146,7 @@ describe("root shape", () => {
         "mode",
         "out_of_scope_notice",
         "outcome",
+        "post_command_integrity",
         "pre_rollback_checkpoint_id",
         "project_verification",
         "resolved_change_group_ids",

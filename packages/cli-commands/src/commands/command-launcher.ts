@@ -51,6 +51,7 @@
  */
 
 import { posix as posixPath, win32 as winPath } from "node:path";
+import type { ResolvedTargetKind } from "@viberevert/session-format";
 
 /** Windows extensions treated as directly spawnable native executables. */
 const WINDOWS_NATIVE_EXTS = new Set([".exe", ".com"]);
@@ -62,15 +63,13 @@ const CMD_REJECTED_METACHARS = new Set(['"', "%", "!"]);
  * What a resolved Windows target is, so callers/tests get structured
  * classification instead of a stringly-typed extension. v1 launches `native`
  * directly and mediates `cmd-shim`; every other kind is `unsupported-target`.
+ *
+ * DEFINED IN `@viberevert/session-format`, not here, because a selective
+ * rollback receipt persists it: a kind this module could produce but the
+ * receipt could not record would be a silent gap. One definition beats two
+ * enums plus an invariant asserting they still agree.
  */
-export type ResolvedTargetKind =
-  | "native"
-  | "cmd-shim"
-  | "batch-file"
-  | "powershell-script"
-  | "script"
-  | "extensionless"
-  | "unknown";
+export type { ResolvedTargetKind };
 
 export type CommandLaunchPlan =
   | {

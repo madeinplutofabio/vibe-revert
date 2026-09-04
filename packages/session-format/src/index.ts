@@ -203,25 +203,40 @@ export {
 export type {
   ApplyPathOutcome,
   ApplyPathResult,
+  CommandsSkippedReason,
   DryRunEligibility,
   DryRunPathOutcome,
   DryRunPathResult,
+  FailureSummary,
   IntegrityAssessment,
-  ProjectVerificationState,
+  PostCommandIntegrity,
+  PostCommandIntegrityNotRunReason,
+  ProjectVerification,
+  ResolvedTargetKind,
   SelectiveRollbackReceipt,
   SelectiveRollbackReceiptSchemaVersion,
+  VerifyCommandRecord,
+  VerifyCommandResult,
 } from "./selective-rollback-receipt.js";
 // Runtime zod schema values.
 export {
   ApplyPathOutcomeSchema,
   ApplyPathResultSchema,
+  CommandsSkippedReasonSchema,
   DryRunEligibilitySchema,
   DryRunPathOutcomeSchema,
   DryRunPathResultSchema,
+  FailureSummarySchema,
   IntegrityAssessmentSchema,
-  ProjectVerificationStateSchema,
+  PostCommandIntegrityNotRunReasonSchema,
+  PostCommandIntegritySchema,
+  ProjectVerificationSchema,
+  projectVerificationPassed,
+  ResolvedTargetKindSchema,
   SELECTIVE_ROLLBACK_RECEIPT_SCHEMA_VERSION,
   SelectiveRollbackReceiptSchema,
+  VerifyCommandRecordSchema,
+  VerifyCommandResultSchema,
 } from "./selective-rollback-receipt.js";
 
 export { VIBEREVERT_TEST_FIXED_NOW, VIBEREVERT_TEST_FIXED_ULID_SEED } from "./test-env-names.js";

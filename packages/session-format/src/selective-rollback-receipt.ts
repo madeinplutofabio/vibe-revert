@@ -185,30 +185,245 @@ function isIntegrityClean(i: IntegrityAssessment): boolean {
 }
 
 /**
- * Project verification state.
+ * How a resolved launch target was classified.
  *
- *   not_configured  the session-start snapshot configured no commands
- *   not_run         commands were configured but never reached, because
- *                   mutation or the first integrity pass failed first
- *   passed / failed  at least one configured command actually executed
- *
- * `not_run` is why three states are insufficient: without it, a receipt would
- * have to claim commands passed, failed, or were never configured, none of
- * which is true when they were configured and skipped.
- *
- * No command list is persisted here. The authoritative sequence already lives
- * in `session.evaluation_snapshot.verify_commands`, and a list carrying no
- * execution state would be ambiguous about whether those commands ran. Optional
- * per-command execution records land once exit-code and output-truncation
- * semantics are designed.
+ * OWNED HERE because it is persisted. The CLI's launcher imports this type
+ * rather than declaring a parallel one: two enums plus a synchronization
+ * invariant would be strictly worse than one definition, and a kind the
+ * launcher could produce but the receipt could not record would be a silent
+ * gap rather than a loud failure.
  */
-export const ProjectVerificationStateSchema = z.enum([
-  "not_configured",
-  "not_run",
-  "passed",
-  "failed",
+export const ResolvedTargetKindSchema = z.enum([
+  "native",
+  "cmd-shim",
+  "batch-file",
+  "powershell-script",
+  "script",
+  "extensionless",
+  "unknown",
 ]);
-export type ProjectVerificationState = z.infer<typeof ProjectVerificationStateSchema>;
+export type ResolvedTargetKind = z.infer<typeof ResolvedTargetKindSchema>;
+
+/**
+ * A rendered summary of an INFRASTRUCTURE failure.
+ *
+ * Deliberately not `RollbackFailureSchema`: that carries `affected_paths`,
+ * which is meaningful for a restore failure and meaningless for a runner,
+ * observation, or classification fault. The codes are limited to what can
+ * actually be determined from an unknown thrown value: a syscall error carries
+ * an errno, and everything else does not.
+ */
+export const FailureSummarySchema = z.strictObject({
+  error_code: z.enum(["io", "internal"]),
+  message: nonBlankString,
+});
+export type FailureSummary = z.infer<typeof FailureSummarySchema>;
+
+/** One configured command's outcome. Mirrors the runner's own result surface. */
+export const VerifyCommandResultSchema = z.discriminatedUnion("outcome", [
+  z.strictObject({ outcome: z.literal("exited"), exit_code: z.int() }),
+  z.strictObject({ outcome: z.literal("signalled"), signal: nonBlankString }),
+  /** The name resolved to nothing. No spawn was attempted. */
+  z.strictObject({ outcome: z.literal("unresolved") }),
+  /** Resolved, but not native. No spawn was attempted. */
+  z.strictObject({
+    outcome: z.literal("unsupported_target"),
+    resolved_target: nonBlankString,
+    kind: ResolvedTargetKindSchema,
+  }),
+  z.strictObject({
+    outcome: z.literal("not_run"),
+    reason: z.literal("earlier_command_did_not_pass"),
+  }),
+]);
+export type VerifyCommandResult = z.infer<typeof VerifyCommandResultSchema>;
+
+/**
+ * The command as configured, beside what it did.
+ *
+ * The argv is echoed rather than referenced, because a reader holding only the
+ * receipt must be able to see what ran without resolving the session's
+ * evaluation snapshot, and because a snapshot recovered later could disagree.
+ */
+export const VerifyCommandRecordSchema = z.strictObject({
+  command: nonBlankString,
+  args: z.array(z.string()),
+  result: VerifyCommandResultSchema,
+});
+export type VerifyCommandRecord = z.infer<typeof VerifyCommandRecordSchema>;
+
+/** Why configured commands never ran. */
+export const CommandsSkippedReasonSchema = z.enum([
+  "transplant_failed",
+  "transplant_not_clean",
+  "pre_command_observation_unusable",
+]);
+export type CommandsSkippedReason = z.infer<typeof CommandsSkippedReasonSchema>;
+
+const ProjectVerificationVariantSchema = z.discriminatedUnion("state", [
+  z.strictObject({ state: z.literal("not_configured") }),
+  z.strictObject({ state: z.literal("skipped"), reason: CommandsSkippedReasonSchema }),
+  z.strictObject({
+    state: z.literal("completed"),
+    commands: z.array(VerifyCommandRecordSchema),
+  }),
+  /** The runner itself faulted. NOT a command reporting failure. */
+  z.strictObject({ state: z.literal("runner_failed"), failure: FailureSummarySchema }),
+]);
+
+const commandPassed = (record: VerifyCommandRecord): boolean =>
+  record.result.outcome === "exited" && record.result.exit_code === 0;
+
+/**
+ * Project verification.
+ *
+ * No `all_passed` field: it is derivable from `commands`, and a stored copy
+ * could contradict the records it summarizes. `projectVerificationPassed`
+ * derives it, mirroring `isIntegrityClean`.
+ *
+ * The refinement encodes the runner's fail-fast contract, so a record set that
+ * could not have been produced is rejected at the persistence boundary:
+ * `not_run` may appear only AFTER the first non-passing command, the
+ * non-passing command itself is never `not_run`, and once one appears every
+ * later record is `not_run` too.
+ */
+export const ProjectVerificationSchema = ProjectVerificationVariantSchema.refine(
+  (v) => {
+    if (v.state !== "completed") {
+      return true;
+    }
+    const firstNonPassing = v.commands.findIndex((record) => !commandPassed(record));
+    if (firstNonPassing === -1) {
+      return v.commands.every((record) => record.result.outcome !== "not_run");
+    }
+    if (v.commands[firstNonPassing]?.result.outcome === "not_run") {
+      return false;
+    }
+    return v.commands
+      .slice(firstNonPassing + 1)
+      .every((record) => record.result.outcome === "not_run");
+  },
+  {
+    message:
+      "not_run records may appear only after the first non-passing command, which is itself never not_run, and every later record must also be not_run",
+    path: ["commands"],
+  },
+);
+export type ProjectVerification = z.infer<typeof ProjectVerificationSchema>;
+
+/** True iff commands ran and every one of them exited zero. */
+export function projectVerificationPassed(verification: ProjectVerification): boolean {
+  return verification.state === "completed" && verification.commands.every(commandPassed);
+}
+
+/**
+ * Why the post-command comparison never ran.
+ *
+ * Deliberately NOT sharing `CommandsSkippedReasonSchema`. A pre-command
+ * observation that could not be taken is recorded as `observation_failed` or
+ * `observation_torn`, which says what actually happened; folding it into
+ * `not_run` would describe a failure to observe as a decision not to.
+ */
+export const PostCommandIntegrityNotRunReasonSchema = z.enum([
+  "commands_not_configured",
+  "transplant_failed",
+  "transplant_not_clean",
+]);
+export type PostCommandIntegrityNotRunReason = z.infer<
+  typeof PostCommandIntegrityNotRunReasonSchema
+>;
+
+const PostCommandIntegrityVariantSchema = z.discriminatedUnion("state", [
+  z.strictObject({
+    state: z.literal("not_run"),
+    reason: PostCommandIntegrityNotRunReasonSchema,
+  }),
+  z.strictObject({ state: z.literal("clean") }),
+  z.strictObject({
+    state: z.literal("project_mutated"),
+    added_paths: sortedUniquePathArray.default([]),
+    removed_paths: sortedUniquePathArray.default([]),
+    changed_paths: sortedUniquePathArray.default([]),
+    topology_changed_roots: sortedUniquePathArray.default([]),
+    head_moved: z.boolean(),
+  }),
+  /** The ignore rules moved, so the domain comparison is not interpretable. */
+  z.strictObject({ state: z.literal("basis_changed") }),
+  z.strictObject({
+    state: z.literal("observation_failed"),
+    side: z.enum(["before_commands", "after_commands"]),
+    failure: FailureSummarySchema,
+  }),
+  z.strictObject({
+    state: z.literal("observation_torn"),
+    side: z.enum(["before_commands", "after_commands"]),
+    basis_moved: z.boolean(),
+    head_moved: z.boolean(),
+    domain_status: z.enum(["not_comparable", "unchanged", "moved"]),
+  }),
+  /** Both observations were coherent; comparing them faulted. */
+  z.strictObject({ state: z.literal("classification_failed"), failure: FailureSummarySchema }),
+]);
+
+/**
+ * Post-command integrity. REQUIRED on an apply receipt.
+ *
+ * Optionality would be ambiguous exactly where precision matters: an absent
+ * field could mean "never run" or "could not be observed", and those are
+ * different facts with different recovery advice.
+ *
+ * The refinements reject records that could not have been produced.
+ * `project_mutated` must name something, or it asserts a mutation it cannot
+ * point at. `observation_torn` must agree with the acquisition rule it reports:
+ * a moved basis makes the domain not comparable, a stable basis makes it
+ * comparable, and with a stable basis something must actually have moved, or
+ * the sample was coherent and would not be torn at all.
+ */
+export const PostCommandIntegritySchema = PostCommandIntegrityVariantSchema.superRefine(
+  (value, ctx) => {
+    if (value.state === "project_mutated") {
+      const named =
+        value.added_paths.length +
+        value.removed_paths.length +
+        value.changed_paths.length +
+        value.topology_changed_roots.length;
+      if (named === 0 && !value.head_moved) {
+        ctx.addIssue({
+          code: "custom",
+          message:
+            "project_mutated must name at least one changed path or root, or report head_moved",
+          path: ["head_moved"],
+        });
+      }
+      return;
+    }
+    if (value.state !== "observation_torn") {
+      return;
+    }
+    if (value.basis_moved && value.domain_status !== "not_comparable") {
+      ctx.addIssue({
+        code: "custom",
+        message: "a moved basis makes the domain comparison not_comparable",
+        path: ["domain_status"],
+      });
+    }
+    if (!value.basis_moved && value.domain_status === "not_comparable") {
+      ctx.addIssue({
+        code: "custom",
+        message: "not_comparable requires a moved basis",
+        path: ["domain_status"],
+      });
+    }
+    if (!value.basis_moved && !value.head_moved && value.domain_status !== "moved") {
+      ctx.addIssue({
+        code: "custom",
+        message: "a torn sample with a stable basis requires a moved HEAD or a moved domain",
+        path: ["domain_status"],
+      });
+    }
+  },
+);
+export type PostCommandIntegrity = z.infer<typeof PostCommandIntegritySchema>;
 
 // =============================================================================
 // Resolved selection
@@ -270,8 +485,8 @@ const ApplyBranchSchema = z.strictObject({
   results: z.array(ApplyPathResultSchema),
   outcome: z.enum(["succeeded", "failed"]),
   integrity: IntegrityAssessmentSchema,
-  project_verification: ProjectVerificationStateSchema,
-  post_command_integrity: IntegrityAssessmentSchema.optional(),
+  project_verification: ProjectVerificationSchema,
+  post_command_integrity: PostCommandIntegritySchema,
   written_at: z.iso.datetime({ offset: true, precision: 0 }),
   out_of_scope_notice: z.literal(ROLLBACK_OUT_OF_SCOPE_NOTICE),
 });
@@ -371,16 +586,42 @@ export const SelectiveRollbackReceiptSchema = z
       path: ["eligibility"],
     },
   )
-  // Project verification coupling: a second integrity pass exists exactly when
-  // commands actually ran.
+  // Command / integrity coupling. `post_command_integrity` is REQUIRED, so the
+  // rule is about which STATE it holds, not whether it is present.
+  //
+  // The post-command observation is taken whenever the commands were REACHED,
+  // including when the runner itself faulted: what the commands did to the
+  // repository is a different question from whether the runner survived asking.
+  // So `not_run` belongs exactly to the cases where commands never started, and
+  // its reason must name the same cause the skip did.
+  //
+  // The exception is a pre-command observation that could not be taken. There
+  // the commands were skipped AND there is an observation to report, so the
+  // integrity record says what happened rather than claiming nothing ran.
   .refine(
-    (r) =>
-      r.mode !== "apply" ||
-      (r.project_verification === "passed" || r.project_verification === "failed") ===
-        (r.post_command_integrity !== undefined),
+    (r) => {
+      if (r.mode !== "apply") return true;
+      const verification = r.project_verification;
+      const integrity = r.post_command_integrity;
+      if (verification.state === "not_configured") {
+        return integrity.state === "not_run" && integrity.reason === "commands_not_configured";
+      }
+      if (verification.state === "skipped") {
+        if (verification.reason === "pre_command_observation_unusable") {
+          return (
+            (integrity.state === "observation_failed" || integrity.state === "observation_torn") &&
+            integrity.side === "before_commands"
+          );
+        }
+        return integrity.state === "not_run" && integrity.reason === verification.reason;
+      }
+      // completed or runner_failed: the commands were reached, so an
+      // observation was attempted and `not_run` would be false.
+      return integrity.state !== "not_run";
+    },
     {
       message:
-        "post_command_integrity is present if and only if project_verification is 'passed' or 'failed'",
+        "post_command_integrity must be 'not_run' with the skip's own reason when commands never started, a before_commands observation record when the pre-command observation was unusable, and anything else once commands were reached",
       path: ["post_command_integrity"],
     },
   )
@@ -388,12 +629,14 @@ export const SelectiveRollbackReceiptSchema = z
   // mutation and the first integrity pass both succeeded.
   .refine(
     (r) => {
-      if (
-        r.mode !== "apply" ||
-        (r.project_verification !== "passed" && r.project_verification !== "failed")
-      ) {
-        return true;
-      }
+      if (r.mode !== "apply") return true;
+      const state = r.project_verification.state;
+      const reached =
+        state === "completed" ||
+        state === "runner_failed" ||
+        (state === "skipped" &&
+          r.project_verification.reason === "pre_command_observation_unusable");
+      if (!reached) return true;
       const pathsOk = r.results.every(
         (x) => x.outcome === "restored" || x.outcome === "already_at_before",
       );
@@ -401,17 +644,17 @@ export const SelectiveRollbackReceiptSchema = z
     },
     {
       message:
-        "project verification can run only after all selected paths were restored / already_at_before and the first integrity assessment was clean",
+        "commands become reachable only after all selected paths were restored / already_at_before and the first integrity assessment was clean",
       path: ["project_verification"],
     },
   )
-  // Pipeline order, inverse direction: `not_run` asserts the commands were
-  // configured but unreachable, so the pre-command stage MUST have failed.
-  // Without this, a receipt could report a clean transplant and clean integrity
-  // while still claiming its configured commands were never reached.
+  // Pipeline order, inverse direction: a skip for a transplant reason asserts
+  // the pre-command stage FAILED, so a receipt cannot report a clean transplant
+  // and clean integrity while claiming its configured commands were unreachable.
   .refine(
     (r) => {
-      if (r.mode !== "apply" || r.project_verification !== "not_run") return true;
+      if (r.mode !== "apply" || r.project_verification.state !== "skipped") return true;
+      if (r.project_verification.reason === "pre_command_observation_unusable") return true;
       const pathsOk = r.results.every(
         (x) => x.outcome === "restored" || x.outcome === "already_at_before",
       );
@@ -419,7 +662,7 @@ export const SelectiveRollbackReceiptSchema = z
     },
     {
       message:
-        "project_verification 'not_run' requires mutation or the first integrity assessment to have failed before commands were reachable",
+        "a 'transplant_failed' or 'transplant_not_clean' skip requires mutation or the first integrity assessment to have failed",
       path: ["project_verification"],
     },
   )
@@ -431,14 +674,18 @@ export const SelectiveRollbackReceiptSchema = z
         (x) => x.outcome === "restored" || x.outcome === "already_at_before",
       );
       const verifyOk =
-        r.project_verification === "not_configured" || r.project_verification === "passed";
+        r.project_verification.state === "not_configured" ||
+        projectVerificationPassed(r.project_verification);
+      // `not_run` is clean here only because it is reachable under success
+      // solely via not_configured; every other route to it requires a failed
+      // transplant, which the path and integrity checks already reject.
       const postOk =
-        r.post_command_integrity === undefined || isIntegrityClean(r.post_command_integrity);
+        r.post_command_integrity.state === "clean" || r.post_command_integrity.state === "not_run";
       return pathsOk && isIntegrityClean(r.integrity) && verifyOk && postOk;
     },
     {
       message:
-        "outcome 'succeeded' requires all results restored / already_at_before, clean integrity, project verification not_configured or passed, and clean post-command integrity when present",
+        "outcome 'succeeded' requires all results restored / already_at_before, clean integrity, project verification not_configured or every command passing, and clean post-command integrity",
       path: ["outcome"],
     },
   );
