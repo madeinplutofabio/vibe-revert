@@ -337,7 +337,11 @@ describe("Architectural invariants -- git invocation single-owner (D17c)", () =>
     // shape is separately locked by D102.M.3. shell.ts is the D103.M.1
     // carve-out (M G3): `viberevert shell`'s guarded REPL spawns each
     // accepted command as one child; its spawn shape is separately
-    // locked by D103.M.3. No other CLI source file may import
+    // locked by D103.M.3. verify-commands.ts is the D104.M.1 carve-out
+    // (M 0.8.0): running the project's OWN verification commands after a
+    // selective transplant is, like run and shell, a purpose whose whole
+    // point is launching a child; its spawn shape is separately locked by
+    // D104.M.3. No other CLI source file may import
     // child_process -- the rest of the CLI is forbidden to spawn
     // subprocesses, and any subprocess need (git or otherwise) goes
     // through the appropriate package's public API. Regex matches both
@@ -347,7 +351,12 @@ describe("Architectural invariants -- git invocation single-owner (D17c)", () =>
     // Node import specifiers).
     const cliSrcDir = join(REPO_ROOT, "packages/cli-commands/src");
     const allTs = findTsFiles(cliSrcDir);
-    const CARVE_OUTS = new Set(["commands/doctor.ts", "commands/run.ts", "commands/shell.ts"]);
+    const CARVE_OUTS = new Set([
+      "commands/doctor.ts",
+      "commands/run.ts",
+      "commands/shell.ts",
+      "verify-commands.ts",
+    ]);
     const targets = allTs.filter(
       (p) => !CARVE_OUTS.has(relative(cliSrcDir, p).replace(/\\/g, "/")),
     );
@@ -357,9 +366,40 @@ describe("Architectural invariants -- git invocation single-owner (D17c)", () =>
       const offenders = findOffenders(source, childProcessImport);
       expect(
         offenders,
-        `${relative(REPO_ROOT, file).replace(/\\/g, "/")} must not import child_process -- only doctor.ts (D17c), run.ts (D102.M.1), and shell.ts (D103.M.1) are allowed. Matches: ${JSON.stringify(offenders)}`,
+        `${relative(REPO_ROOT, file).replace(/\\/g, "/")} must not import child_process -- only doctor.ts (D17c), run.ts (D102.M.1), shell.ts (D103.M.1), and verify-commands.ts (D104.M.1) are allowed. Matches: ${JSON.stringify(offenders)}`,
       ).toEqual([]);
     }
+  });
+});
+
+// D104.M -- the verification-command runner (M 0.8.0).
+//
+//   - D104.M.1 -- verify-commands.ts may spawn structured project verification
+//     commands, after exact-path resolution and native-target classification.
+//     Enforced by the child_process carve-out above.
+//   - D104.M.3 -- its launch shape is locked to the RESOLVED target,
+//     `shell: false`, and `stdio: ["ignore", "inherit", "inherit"]`.
+
+describe("Architectural invariants -- M 0.8.0 verification-command runner (D104.M)", () => {
+  const VERIFY_COMMANDS_REL = "packages/cli-commands/src/verify-commands.ts";
+
+  it("D104.M.3: spawns the resolved target, shell-less, with stdin NOT inherited", () => {
+    const stripped = stripTsComments(readSource(VERIFY_COMMANDS_REL));
+
+    expect(
+      stripped.includes('stdio: ["ignore", "inherit", "inherit"]'),
+      `${VERIFY_COMMANDS_REL} must spawn with stdio: ["ignore", "inherit", "inherit"]. These are batch checks, not the interactive child that run launches: inheriting stdin would let a verification command consume the user's keystrokes mid-rollback, or block forever, since the schema carries no timeout contract to end it. This is locked HERE because it cannot be tested behaviorally -- a test runner's own stdin is already not a TTY, so a regression to "inherit" would change nothing observable.`,
+    ).toBe(true);
+
+    expect(
+      stripped.includes("shell: false"),
+      `${VERIFY_COMMANDS_REL} must spawn with shell: false (ADR 0005 no-shell-interpretation lock).`,
+    ).toBe(true);
+
+    expect(
+      stripped.includes("spawn(resolvedTarget,"),
+      `${VERIFY_COMMANDS_REL} must spawn the RESOLVED target, never a bare command name, so the OS never re-resolves it (ADR 0005 resolve-then-launch).`,
+    ).toBe(true);
   });
 });
 
