@@ -25,6 +25,8 @@ import {
   DryRunPathOutcomeSchema,
   deriveChangeGroupId,
   deriveFindingId,
+  firstVerificationCompletedCleanly,
+  type IntegrityAssessment,
   IntegrityAssessmentSchema,
   ROLLBACK_OUT_OF_SCOPE_NOTICE,
   SELECTIVE_ROLLBACK_RECEIPT_SCHEMA_VERSION,
@@ -70,6 +72,10 @@ const COLLATERAL = {
 
 /** Clean except that HEAD moved: the `git commit` in a verify command case. */
 const HEAD_MOVED = { ...CLEAN, head_unchanged: false };
+
+/** The first verification ran and reported `assessment`. */
+const completed = (assessment: IntegrityAssessment) =>
+  ({ state: "completed", assessment }) as const;
 
 function dryRun(overrides: Record<string, unknown> = {}) {
   return {
@@ -151,7 +157,7 @@ function apply(overrides: Record<string, unknown> = {}) {
     resolved_change_group_ids: [GROUP_A],
     results: [{ path: "src/a.ts", change_group_id: GROUP_A, outcome: "restored" }],
     outcome: "succeeded",
-    integrity: CLEAN,
+    first_verification: completed(CLEAN),
     project_verification: NOT_CONFIGURED_VERIFICATION,
     post_command_integrity: NOT_CONFIGURED_POST,
     written_at: WHEN,
@@ -183,7 +189,7 @@ describe("mode discrimination", () => {
     // A dry-run mutates nothing, so an outcome, an integrity assessment, or an
     // emergency checkpoint would each describe work that did not happen.
     expect(ok(dryRun({ outcome: "succeeded" }))).toBe(false);
-    expect(ok(dryRun({ integrity: CLEAN }))).toBe(false);
+    expect(ok(dryRun({ first_verification: completed(CLEAN) }))).toBe(false);
     expect(ok(dryRun({ pre_rollback_checkpoint_id: EMERGENCY }))).toBe(false);
     expect(ok(dryRun({ project_verification: NOT_CONFIGURED_VERIFICATION }))).toBe(false);
   });
@@ -245,7 +251,7 @@ describe("required fields", () => {
     "resolved_change_group_ids",
     "results",
     "outcome",
-    "integrity",
+    "first_verification",
     "project_verification",
     "post_command_integrity",
     "written_at",
@@ -616,7 +622,7 @@ describe("project verification is coupled to a second integrity pass", () => {
         apply({
           project_verification: SKIPPED_TRANSPLANT_FAILED,
           post_command_integrity: CLEAN_POST,
-          integrity: SELECTED_UNVERIFIED,
+          first_verification: completed(SELECTED_UNVERIFIED),
           outcome: "failed",
         }),
       ),
@@ -644,7 +650,7 @@ describe("pipeline order, forward: commands are reachable only after a clean sta
     expect(
       ok(
         apply({
-          integrity: SELECTED_UNVERIFIED,
+          first_verification: completed(SELECTED_UNVERIFIED),
           outcome: "failed",
           project_verification: COMPLETED_PASSED,
           post_command_integrity: CLEAN_POST,
@@ -657,7 +663,7 @@ describe("pipeline order, forward: commands are reachable only after a clean sta
     expect(
       ok(
         apply({
-          integrity: COLLATERAL,
+          first_verification: completed(COLLATERAL),
           outcome: "failed",
           project_verification: COMPLETED_PASSED,
           post_command_integrity: CLEAN_POST,
@@ -670,7 +676,7 @@ describe("pipeline order, forward: commands are reachable only after a clean sta
     expect(
       ok(
         apply({
-          integrity: HEAD_MOVED,
+          first_verification: completed(HEAD_MOVED),
           outcome: "failed",
           project_verification: COMPLETED_PASSED,
           post_command_integrity: CLEAN_POST,
@@ -734,7 +740,7 @@ describe("pipeline order, inverse: not_run asserts the earlier stage failed", ()
     expect(
       ok(
         apply({
-          integrity: SELECTED_UNVERIFIED,
+          first_verification: completed(SELECTED_UNVERIFIED),
           outcome: "failed",
           project_verification: SKIPPED_TRANSPLANT_FAILED,
           post_command_integrity: NOT_RUN_TRANSPLANT_FAILED,
@@ -789,17 +795,17 @@ describe("outcome 'succeeded'", () => {
   });
 
   it("rejects success with an unverified selected set", () => {
-    expect(ok(apply({ integrity: SELECTED_UNVERIFIED }))).toBe(false);
+    expect(ok(apply({ first_verification: completed(SELECTED_UNVERIFIED) }))).toBe(false);
   });
 
   it("rejects success with collateral damage to an unselected path", () => {
     // The whole promise of surgical recovery: everything not selected is
     // provably untouched.
-    expect(ok(apply({ integrity: COLLATERAL }))).toBe(false);
+    expect(ok(apply({ first_verification: completed(COLLATERAL) }))).toBe(false);
   });
 
   it("rejects success with HEAD moved", () => {
-    expect(ok(apply({ integrity: HEAD_MOVED }))).toBe(false);
+    expect(ok(apply({ first_verification: completed(HEAD_MOVED) }))).toBe(false);
   });
 
   it("rejects success when the verification commands failed", () => {
@@ -1144,5 +1150,109 @@ describe("post-command integrity records", () => {
         }),
       ),
     ).toBe(true);
+  });
+});
+
+// =============================================================================
+// The first verification as a three-state record
+//
+// "It ran and said this", "it started and threw", and "it never ran" are
+// different facts. The assessment itself is unchanged: when the verification
+// completed, what it found is exactly the IntegrityAssessment it always was.
+// =============================================================================
+
+const VERIFICATION_FAILED = {
+  state: "failed",
+  failure: { error_code: "internal", message: "verifier threw" },
+} as const;
+const VERIFICATION_NOT_RUN = { state: "not_run", reason: "gate_result_unavailable" } as const;
+
+describe("first verification states", () => {
+  it("derives cleanliness only from a completed verification", () => {
+    expect(firstVerificationCompletedCleanly(completed(CLEAN))).toBe(true);
+    expect(firstVerificationCompletedCleanly(completed(SELECTED_UNVERIFIED))).toBe(false);
+    expect(firstVerificationCompletedCleanly(VERIFICATION_FAILED)).toBe(false);
+    expect(firstVerificationCompletedCleanly(VERIFICATION_NOT_RUN)).toBe(false);
+  });
+
+  it("accepts a failed verification that skipped commands for THAT stage", () => {
+    expect(
+      ok(
+        apply({
+          outcome: "failed",
+          first_verification: VERIFICATION_FAILED,
+          project_verification: { state: "skipped", reason: "first_verification_failed" },
+          post_command_integrity: { state: "not_run", reason: "first_verification_failed" },
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it("accepts a failed verification when no commands were configured", () => {
+    // Commands that do not exist were never skipped BY this stage, so
+    // not_configured stays the truthful record.
+    expect(ok(apply({ outcome: "failed", first_verification: VERIFICATION_FAILED }))).toBe(true);
+  });
+
+  it("rejects a failed verification whose skip names another stage", () => {
+    // Borrowing `transplant_failed` would attribute the stop to a stage that
+    // did not stop it, and the receipt is what a human reads afterwards.
+    expect(
+      ok(
+        apply({
+          outcome: "failed",
+          first_verification: VERIFICATION_FAILED,
+          project_verification: SKIPPED_TRANSPLANT_FAILED,
+          post_command_integrity: NOT_RUN_TRANSPLANT_FAILED,
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("rejects commands that ran despite a failed verification", () => {
+    expect(
+      ok(
+        apply({
+          outcome: "failed",
+          first_verification: VERIFICATION_FAILED,
+          project_verification: COMPLETED_PASSED,
+          post_command_integrity: CLEAN_POST,
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("accepts an unavailable gate result recorded as its own stage", () => {
+    // A publication that may have persisted before a throw leaves no usable
+    // gate result, so the verification never ran at all.
+    expect(
+      ok(
+        apply({
+          outcome: "failed",
+          first_verification: VERIFICATION_NOT_RUN,
+          project_verification: { state: "skipped", reason: "gate_result_unavailable" },
+          post_command_integrity: { state: "not_run", reason: "gate_result_unavailable" },
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it("rejects a stage skip reason that contradicts a completed verification", () => {
+    // The converse direction: these reasons ASSERT a first-verification state,
+    // so they cannot appear beside one that completed.
+    expect(
+      ok(
+        apply({
+          outcome: "failed",
+          project_verification: { state: "skipped", reason: "first_verification_failed" },
+          post_command_integrity: { state: "not_run", reason: "first_verification_failed" },
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("rejects success when the first verification did not complete", () => {
+    expect(ok(apply({ first_verification: VERIFICATION_FAILED }))).toBe(false);
+    expect(ok(apply({ first_verification: VERIFICATION_NOT_RUN }))).toBe(false);
   });
 });

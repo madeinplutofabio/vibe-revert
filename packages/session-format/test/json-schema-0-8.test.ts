@@ -119,8 +119,9 @@ describe("root shape", () => {
 
   it("the two branches carry their full required sets", () => {
     // The exact sets, not their cardinality: a count would stay green if one
-    // required field vanished and a wrong one took its place. `apply` omits
-    // `post_command_integrity`, its one optional member.
+    // required field vanished and a wrong one took its place. Every apply
+    // member is required: an absent post-command record would be ambiguous
+    // between "never run" and "could not be observed".
     expect([...required(branchFor("dry_run"))].sort()).toEqual(
       [
         "checkpoint_id",
@@ -142,7 +143,7 @@ describe("root shape", () => {
       [
         "checkpoint_id",
         "contribution_sha256",
-        "integrity",
+        "first_verification",
         "mode",
         "out_of_scope_notice",
         "outcome",

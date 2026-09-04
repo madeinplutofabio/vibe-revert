@@ -84,11 +84,14 @@ function receipt(overrides: ReceiptOverrides = {}): Record<string, unknown> {
     resolved_change_group_ids: [GROUP],
     results: [{ path: "src/a.ts", change_group_id: GROUP, outcome: "restored" }],
     outcome: "succeeded",
-    integrity: {
-      selected_verified: true,
-      unselected_checked_count: 4,
-      unselected_violations: [],
-      head_unchanged: true,
+    first_verification: {
+      state: "completed",
+      assessment: {
+        selected_verified: true,
+        unselected_checked_count: 4,
+        unselected_violations: [],
+        head_unchanged: true,
+      },
     },
     project_verification: { state: "not_configured" },
     post_command_integrity: { state: "not_run", reason: "commands_not_configured" },

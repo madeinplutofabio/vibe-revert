@@ -252,10 +252,42 @@ export const VerifyCommandRecordSchema = z.strictObject({
 });
 export type VerifyCommandRecord = z.infer<typeof VerifyCommandRecordSchema>;
 
-/** Why configured commands never ran. */
+/**
+ * The first post-transplant verification.
+ *
+ * Three states, because "it ran and said this", "it started and threw", and "it
+ * never ran" are different facts. The assessment itself is UNCHANGED: when the
+ * verification completed, what it found is exactly the `IntegrityAssessment`
+ * it always was. Only the surrounding record is new.
+ *
+ * `not_run` has exactly one cause. Both post-marker gate outcomes run the
+ * verification, so the only way to skip it is for the gate result itself to be
+ * unavailable, which happens when publication may have persisted before a
+ * throw.
+ */
+export const FirstVerificationSchema = z.discriminatedUnion("state", [
+  z.strictObject({ state: z.literal("completed"), assessment: IntegrityAssessmentSchema }),
+  z.strictObject({ state: z.literal("failed"), failure: FailureSummarySchema }),
+  z.strictObject({ state: z.literal("not_run"), reason: z.literal("gate_result_unavailable") }),
+]);
+export type FirstVerification = z.infer<typeof FirstVerificationSchema>;
+
+/** True iff the first verification ran AND every invariant held. */
+export function firstVerificationCompletedCleanly(verification: FirstVerification): boolean {
+  return verification.state === "completed" && isIntegrityClean(verification.assessment);
+}
+
+/**
+ * Why configured commands never ran.
+ *
+ * Each member names a DISTINCT stage that stopped them, so a receipt never has
+ * to describe one failure with another's vocabulary.
+ */
 export const CommandsSkippedReasonSchema = z.enum([
   "transplant_failed",
   "transplant_not_clean",
+  "first_verification_failed",
+  "gate_result_unavailable",
   "pre_command_observation_unusable",
 ]);
 export type CommandsSkippedReason = z.infer<typeof CommandsSkippedReasonSchema>;
@@ -328,6 +360,8 @@ export const PostCommandIntegrityNotRunReasonSchema = z.enum([
   "commands_not_configured",
   "transplant_failed",
   "transplant_not_clean",
+  "first_verification_failed",
+  "gate_result_unavailable",
 ]);
 export type PostCommandIntegrityNotRunReason = z.infer<
   typeof PostCommandIntegrityNotRunReasonSchema
@@ -484,7 +518,7 @@ const ApplyBranchSchema = z.strictObject({
   resolved_change_group_ids: NonEmptyChangeGroupIdSetSchema,
   results: z.array(ApplyPathResultSchema),
   outcome: z.enum(["succeeded", "failed"]),
-  integrity: IntegrityAssessmentSchema,
+  first_verification: FirstVerificationSchema,
   project_verification: ProjectVerificationSchema,
   post_command_integrity: PostCommandIntegritySchema,
   written_at: z.iso.datetime({ offset: true, precision: 0 }),
@@ -625,6 +659,39 @@ export const SelectiveRollbackReceiptSchema = z
       path: ["post_command_integrity"],
     },
   )
+  // First-verification coupling. A verification that failed or never ran cannot
+  // coexist with commands that were reached, and when it stops them the skip
+  // must name THAT stage rather than borrowing another one's reason. The
+  // converse holds too: those two reasons assert a first-verification state, so
+  // they cannot appear alongside one that completed.
+  .refine(
+    (r) => {
+      if (r.mode !== "apply") return true;
+      const verification = r.project_verification;
+      const stageReasons: readonly string[] = [
+        "first_verification_failed",
+        "gate_result_unavailable",
+      ];
+      if (r.first_verification.state === "completed") {
+        return !(verification.state === "skipped" && stageReasons.includes(verification.reason));
+      }
+      const expected =
+        r.first_verification.state === "failed"
+          ? "first_verification_failed"
+          : "gate_result_unavailable";
+      // Commands that do not exist were never skipped BY this stage, so
+      // not_configured stays truthful whatever the verification did.
+      return (
+        verification.state === "not_configured" ||
+        (verification.state === "skipped" && verification.reason === expected)
+      );
+    },
+    {
+      message:
+        "a failed or unavailable first verification requires project_verification to be not_configured or skipped naming that same stage, and those skip reasons cannot appear when the first verification completed",
+      path: ["project_verification"],
+    },
+  )
   // Pipeline order, forward direction: commands are reachable only after
   // mutation and the first integrity pass both succeeded.
   .refine(
@@ -640,7 +707,7 @@ export const SelectiveRollbackReceiptSchema = z
       const pathsOk = r.results.every(
         (x) => x.outcome === "restored" || x.outcome === "already_at_before",
       );
-      return pathsOk && isIntegrityClean(r.integrity);
+      return pathsOk && firstVerificationCompletedCleanly(r.first_verification);
     },
     {
       message:
@@ -658,7 +725,7 @@ export const SelectiveRollbackReceiptSchema = z
       const pathsOk = r.results.every(
         (x) => x.outcome === "restored" || x.outcome === "already_at_before",
       );
-      return !pathsOk || !isIntegrityClean(r.integrity);
+      return !pathsOk || !firstVerificationCompletedCleanly(r.first_verification);
     },
     {
       message:
@@ -681,7 +748,9 @@ export const SelectiveRollbackReceiptSchema = z
       // transplant, which the path and integrity checks already reject.
       const postOk =
         r.post_command_integrity.state === "clean" || r.post_command_integrity.state === "not_run";
-      return pathsOk && isIntegrityClean(r.integrity) && verifyOk && postOk;
+      return (
+        pathsOk && firstVerificationCompletedCleanly(r.first_verification) && verifyOk && postOk
+      );
     },
     {
       message:
