@@ -12,6 +12,7 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { generateRollbackId, publishRollbackAttempt } from "@viberevert/core";
 import {
   ROLLBACK_ATTEMPT_SCHEMA_VERSION,
   ROLLBACK_OUT_OF_SCOPE_NOTICE,
@@ -19,7 +20,11 @@ import {
 } from "@viberevert/session-format";
 import { describe, expect, it } from "vitest";
 
-import { primaryBlocker, scanSelectiveRollbackHistory } from "../src/rollback-history.js";
+import {
+  inspectPublication,
+  primaryBlocker,
+  scanSelectiveRollbackHistory,
+} from "../src/rollback-history.js";
 
 const SESSION = "sess_01ARZ3NDEKTSV4RRFFQ69G5FAV";
 const OTHER_SESSION = "sess_01ARZ3NDEKTSV4RRFFQ69G5FAW";
@@ -419,6 +424,134 @@ describe("scanSelectiveRollbackHistory blockers", () => {
       // not depend on which directory the filesystem listed first.
       if (scan.outcome !== "readable") throw new Error("expected readable");
       expect(scan.report.blocking.map((b) => b.rollbackId)).toEqual([RB_EARLY_ID, RB_LATE_ID]);
+    } finally {
+      await f.cleanup();
+    }
+  });
+});
+
+// =============================================================================
+// Publication outcome after a throw
+//
+// The id is preallocated precisely so this inspection is possible: a
+// publication that throws before returning would otherwise leave nothing to
+// name, and "possibly published somewhere" is not a state a recovery tool can
+// act on.
+// =============================================================================
+
+const BINDING = {
+  sessionId: SESSION,
+  contributionSha256: DIGEST,
+  preRollbackCheckpointId: EMERGENCY_A,
+  selection: SELECTION,
+};
+
+async function sessionTree(): Promise<{ repoRoot: string; cleanup: () => Promise<void> }> {
+  const repoRoot = await mkdtemp(join(tmpdir(), "viberevert-publish-"));
+  await mkdir(join(repoRoot, ".viberevert", "sessions", SESSION), { recursive: true });
+  return { repoRoot, cleanup: () => rm(repoRoot, { recursive: true, force: true }) };
+}
+
+describe("inspectPublication", () => {
+  it("reports a real publication of the preallocated id as published", async () => {
+    const f = await sessionTree();
+    try {
+      const rollbackId = generateRollbackId();
+      const published = await publishRollbackAttempt({
+        repoRoot: f.repoRoot,
+        rollbackId,
+        ...BINDING,
+      });
+
+      const inspection = await inspectPublication(f.repoRoot, rollbackId, BINDING);
+
+      expect(inspection.outcome).toBe("published");
+      if (inspection.outcome !== "published") throw new Error("expected published");
+      expect(inspection.rollbackDir).toBe(published.rollbackDir);
+      expect(inspection.attempt).toEqual(published.attempt);
+    } finally {
+      await f.cleanup();
+    }
+  });
+
+  it("reports an absent invocation as not published", async () => {
+    const f = await sessionTree();
+    try {
+      const inspection = await inspectPublication(f.repoRoot, RB_EARLY_ID, BINDING);
+
+      expect(inspection.outcome).toBe("not_published");
+    } finally {
+      await f.cleanup();
+    }
+  });
+
+  it("reports an EMPTY invocation directory as not published", async () => {
+    const f = await sessionTree();
+    try {
+      await mkdir(join(f.repoRoot, ".viberevert", "sessions", SESSION, "rollbacks", RB_EARLY_ID), {
+        recursive: true,
+      });
+
+      const inspection = await inspectPublication(f.repoRoot, RB_EARLY_ID, BINDING);
+
+      // Consistent with the scan: the marker precedes any mutation, so without
+      // it nothing was authorized to run.
+      expect(inspection.outcome).toBe("not_published");
+    } finally {
+      await f.cleanup();
+    }
+  });
+
+  it("reports a marker that does not match the attempted binding as indeterminate", async () => {
+    const f = await sessionTree();
+    try {
+      const dir = join(f.repoRoot, ".viberevert", "sessions", SESSION, "rollbacks", RB_EARLY_ID);
+      await mkdir(dir, { recursive: true });
+      // A well-formed marker for a DIFFERENT attempt: an id collision or an
+      // artifact left by an earlier run must never be read as "mine, published".
+      await writeJson(
+        join(dir, "attempt.json"),
+        attempt({ pre_rollback_checkpoint_id: EMERGENCY_B }),
+      );
+
+      const inspection = await inspectPublication(f.repoRoot, RB_EARLY_ID, BINDING);
+
+      expect(inspection.outcome).toBe("indeterminate");
+      if (inspection.outcome !== "indeterminate") throw new Error("expected indeterminate");
+      expect(inspection.detail).toContain("pre_rollback_checkpoint_id");
+    } finally {
+      await f.cleanup();
+    }
+  });
+
+  it("reports an unreadable marker as indeterminate, never as absent", async () => {
+    const f = await sessionTree();
+    try {
+      const dir = join(f.repoRoot, ".viberevert", "sessions", SESSION, "rollbacks", RB_EARLY_ID);
+      await mkdir(dir, { recursive: true });
+      await writeFile(join(dir, "attempt.json"), "{ not json", "utf8");
+
+      const inspection = await inspectPublication(f.repoRoot, RB_EARLY_ID, BINDING);
+
+      expect(inspection.outcome).toBe("indeterminate");
+    } finally {
+      await f.cleanup();
+    }
+  });
+
+  it("reports a pre-existing receipt as indeterminate rather than reusing the directory", async () => {
+    const f = await sessionTree();
+    try {
+      const dir = join(f.repoRoot, ".viberevert", "sessions", SESSION, "rollbacks", RB_EARLY_ID);
+      await mkdir(dir, { recursive: true });
+      await writeJson(join(dir, "attempt.json"), attempt());
+      await writeJson(join(dir, "receipt.json"), receipt());
+
+      const inspection = await inspectPublication(f.repoRoot, RB_EARLY_ID, BINDING);
+
+      // Publication writes no receipt, so one here belongs to something else.
+      // Reusing the directory would overwrite another invocation's record.
+      expect(inspection.outcome).toBe("indeterminate");
     } finally {
       await f.cleanup();
     }

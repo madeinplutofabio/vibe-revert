@@ -25,9 +25,11 @@ import {
   type RollbackSelection,
 } from "@viberevert/session-format";
 import { describe, expect, it } from "vitest";
+import { generateRollbackId } from "../src/ids.js";
 import {
   type PublishRollbackAttemptOpts,
   publishRollbackAttempt,
+  rollbackInvocationDir,
   rollbackInvocationPaths,
   sessionRollbacksDir,
 } from "../src/rollback-attempt.js";
@@ -72,6 +74,9 @@ async function setup(withSession = true): Promise<Fixture> {
 const validOpts = (fx: Fixture): PublishRollbackAttemptOpts => ({
   repoRoot: fx.repoRoot,
   sessionId: SESSION_ID,
+  // Preallocated by the caller, so a publication that throws still leaves the
+  // caller able to name the exact invocation it attempted.
+  rollbackId: generateRollbackId(),
   contributionSha256: CONTRIBUTION_SHA,
   preRollbackCheckpointId: CHECKPOINT_ID,
   selection: SELECTION,
@@ -529,9 +534,11 @@ describe("selective rollback invocation layout", () => {
     try {
       const sessionId = "sess_01ARZ3NDEKTSV4RRFFQ69G5FAV";
       await mkdir(join(tmp, ".viberevert", "sessions", sessionId), { recursive: true });
+      const rollbackId = generateRollbackId();
       const published = await publishRollbackAttempt({
         repoRoot: tmp,
         sessionId,
+        rollbackId,
         contributionSha256: "a".repeat(64),
         preRollbackCheckpointId: "cp_01ARZ3NDEKTSV4RRFFQ69G5FAV",
         selection: {
@@ -540,9 +547,9 @@ describe("selective rollback invocation layout", () => {
         } satisfies RollbackSelection,
       });
 
-      expect(published.rollbackDir).toBe(
-        join(sessionRollbacksDir(tmp, sessionId), published.rollbackId),
-      );
+      expect(published.rollbackId).toBe(rollbackId);
+      expect(published.rollbackDir).toBe(rollbackInvocationDir(tmp, sessionId, rollbackId));
+      expect(published.rollbackDir).toBe(join(sessionRollbacksDir(tmp, sessionId), rollbackId));
       const { attemptPath } = rollbackInvocationPaths(published.rollbackDir);
       await expect(readFile(attemptPath, "utf8")).resolves.toContain(published.rollbackId);
     } finally {

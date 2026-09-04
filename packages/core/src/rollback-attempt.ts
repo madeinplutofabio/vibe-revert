@@ -149,7 +149,6 @@ import {
 } from "@viberevert/session-format";
 
 import { writeFileAtomic } from "./atomic.js";
-import { generateRollbackId } from "./ids.js";
 import { sessionDir, sessionsDir, viberevertDir } from "./paths.js";
 import { SESSION_DIR_NAME_RE } from "./session.js";
 
@@ -180,6 +179,24 @@ export function sessionRollbacksDir(repoRoot: string, sessionId: string): string
  * the sibling receipt finalizes it. A helper that returned one at a time would
  * invite a consumer to check for the marker and forget the sibling.
  */
+/**
+ * `<repoRoot>/.viberevert/sessions/<sessionId>/rollbacks/<rollbackId>`. Pure
+ * path-join; existence unchecked.
+ *
+ * Exists so a caller that PREALLOCATES a rollback id can name the invocation it
+ * is about to publish, and can inspect exactly that one afterwards if the
+ * publication throws. The caller supplies the id and nothing else: the location
+ * is still derived here from the repository and session, so preallocation stays
+ * a storage-layout affordance rather than a path-authority expansion.
+ */
+export function rollbackInvocationDir(
+  repoRoot: string,
+  sessionId: string,
+  rollbackId: string,
+): string {
+  return join(sessionRollbacksDir(repoRoot, sessionId), rollbackId);
+}
+
 export function rollbackInvocationPaths(rollbackDir: string): {
   readonly attemptPath: string;
   readonly receiptPath: string;
@@ -194,6 +211,19 @@ export interface PublishRollbackAttemptOpts {
   readonly repoRoot: string;
   /** The session whose contribution is being selectively restored. */
   readonly sessionId: string;
+  /**
+   * PREALLOCATED by the caller, via `generateRollbackId`.
+   *
+   * Required rather than generated here, because a publication that throws
+   * leaves the caller needing to inspect the exact invocation it attempted. If
+   * the id were minted inside, a throw before the return would leave the caller
+   * with no name for what it may have created, and "possibly published
+   * somewhere" is not a state a recovery tool can act on.
+   *
+   * The DIRECTORY is still derived here from `repoRoot` and `sessionId`; the
+   * caller supplies an identity, never a location.
+   */
+  readonly rollbackId: string;
   /** Digest of the exact contribution bytes the selection was resolved against. */
   readonly contributionSha256: string;
   /** The recovery handle: the emergency checkpoint created before the fence. */
@@ -202,7 +232,7 @@ export interface PublishRollbackAttemptOpts {
 }
 
 export interface PublishedRollbackAttempt {
-  /** The freshly allocated `rb_<ULID>`. */
+  /** Echoed back: the caller's preallocated `rb_<ULID>`. */
   readonly rollbackId: string;
   /** Exactly what was persisted. */
   readonly attempt: RollbackAttempt;
@@ -259,6 +289,8 @@ export async function publishRollbackAttempt(
     opts.preRollbackCheckpointId,
   );
   const selection = RollbackSelectionSchema.parse(opts.selection);
+  // The caller's identity, validated against the same shape the marker records.
+  const rollbackId = RollbackAttemptSchema.shape.rollback_id.parse(opts.rollbackId);
 
   // Every component real, not merely the last one.
   const sessionDirAbs = sessionDir(opts.repoRoot, opts.sessionId);
@@ -267,8 +299,7 @@ export async function publishRollbackAttempt(
   await requireRealDirectory(sessionDirAbs, "the session directory");
 
   const rollbacksDirAbs = join(sessionDirAbs, ROLLBACKS_SUBDIR);
-  const rollbackId = generateRollbackId();
-  const rollbackDir = join(rollbacksDirAbs, rollbackId);
+  const rollbackDir = rollbackInvocationDir(opts.repoRoot, opts.sessionId, rollbackId);
 
   // Non-recursive so an existing entry is INSPECTED rather than traversed. A
   // symlinked `rollbacks/` would otherwise place the rollback outside the store.

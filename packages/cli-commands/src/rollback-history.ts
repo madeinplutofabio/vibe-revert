@@ -29,10 +29,15 @@
 
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { rollbackInvocationPaths, sessionRollbacksDir } from "@viberevert/core";
+import {
+  rollbackInvocationDir,
+  rollbackInvocationPaths,
+  sessionRollbacksDir,
+} from "@viberevert/core";
 import {
   type RollbackAttempt,
   RollbackAttemptSchema,
+  type RollbackSelection,
   type SelectiveRollbackReceipt,
   SelectiveRollbackReceiptSchema,
 } from "@viberevert/session-format";
@@ -125,21 +130,28 @@ async function readOptional(path: string): Promise<string | null> {
   }
 }
 
+function selectionsEqual(a: RollbackSelection, b: RollbackSelection): boolean {
+  const left = a.resolved_change_group_ids;
+  const right = b.resolved_change_group_ids;
+  if (left.length !== right.length) {
+    return false;
+  }
+  for (let i = 0; i < left.length; i += 1) {
+    if (left[i] !== right[i]) {
+      return false;
+    }
+  }
+  return JSON.stringify(a.selectors) === JSON.stringify(b.selectors);
+}
+
 function selectionMatches(attempt: RollbackAttempt, receipt: SelectiveRollbackReceipt): boolean {
   if (receipt.mode !== "apply") {
     return false;
   }
-  const attemptGroups = attempt.selection.resolved_change_group_ids;
-  const receiptGroups = receipt.resolved_change_group_ids;
-  if (attemptGroups.length !== receiptGroups.length) {
-    return false;
-  }
-  for (let i = 0; i < attemptGroups.length; i += 1) {
-    if (attemptGroups[i] !== receiptGroups[i]) {
-      return false;
-    }
-  }
-  return JSON.stringify(attempt.selection.selectors) === JSON.stringify(receipt.selectors);
+  return selectionsEqual(attempt.selection, {
+    selectors: receipt.selectors,
+    resolved_change_group_ids: receipt.resolved_change_group_ids,
+  });
 }
 
 /**
@@ -328,4 +340,116 @@ export async function scanSelectiveRollbackHistory(
   );
 
   return { outcome: "readable", report: { invocations, blocking } };
+}
+
+// =============================================================================
+// Publication outcome after a throw
+// =============================================================================
+
+/**
+ * Exactly what was handed to `publishRollbackAttempt`.
+ *
+ * The inspection compares against THIS, not merely against a well-formed
+ * marker. A rollback id collision or an artifact left by an earlier run could
+ * otherwise be mistaken for the attempt that just threw, and "someone else's
+ * marker" would be read as "mine, published".
+ */
+export interface PublicationBinding {
+  readonly sessionId: string;
+  readonly contributionSha256: string;
+  readonly preRollbackCheckpointId: string;
+  readonly selection: RollbackSelection;
+}
+
+export type PublicationInspection =
+  /** A marker exists and describes exactly this attempt. */
+  | {
+      readonly outcome: "published";
+      readonly rollbackDir: string;
+      readonly attempt: RollbackAttempt;
+    }
+  /** No marker, so nothing was ever authorized to mutate. */
+  | { readonly outcome: "not_published"; readonly rollbackDir: string }
+  /** Something is there, and it cannot be shown to be this attempt's. */
+  | {
+      readonly outcome: "indeterminate";
+      readonly rollbackDir: string;
+      readonly path: string;
+      readonly detail: string;
+    };
+
+/**
+ * Decide whether a publication that THREW actually published.
+ *
+ * Runs under the same lock as the publication attempt, and inspects ONLY the
+ * preallocated invocation. That is why the id is allocated by the caller: a
+ * publication that throws before returning would otherwise leave nothing to
+ * name, and "possibly published somewhere" is not a state a recovery tool can
+ * act on.
+ *
+ * Fails closed in the same shape as the history scan. An unreadable or
+ * unmatched marker is never read as absence, because "no mutation was
+ * authorized" and "a mutation may have started" call for opposite responses.
+ */
+export async function inspectPublication(
+  repoRoot: string,
+  rollbackId: string,
+  binding: PublicationBinding,
+): Promise<PublicationInspection> {
+  const rollbackDir = rollbackInvocationDir(repoRoot, binding.sessionId, rollbackId);
+  const { attemptPath, receiptPath } = rollbackInvocationPaths(rollbackDir);
+
+  let attemptRaw: string | null;
+  let receiptRaw: string | null;
+  try {
+    attemptRaw = await readOptional(attemptPath);
+    receiptRaw = await readOptional(receiptPath);
+  } catch (err) {
+    return { outcome: "indeterminate", rollbackDir, path: rollbackDir, detail: messageOf(err) };
+  }
+
+  if (receiptRaw !== null) {
+    // Publication writes no receipt, so one here belongs to something else.
+    // Reusing the directory would overwrite another invocation's record.
+    return {
+      outcome: "indeterminate",
+      rollbackDir,
+      path: receiptPath,
+      detail: "a receipt already exists in the invocation this attempt was publishing",
+    };
+  }
+
+  if (attemptRaw === null) {
+    // An empty directory is still `never_authorized`: the marker precedes any
+    // mutation, so without it nothing was authorized to run.
+    return { outcome: "not_published", rollbackDir };
+  }
+
+  let attempt: RollbackAttempt;
+  try {
+    attempt = RollbackAttemptSchema.parse(JSON.parse(attemptRaw));
+  } catch (err) {
+    return { outcome: "indeterminate", rollbackDir, path: attemptPath, detail: messageOf(err) };
+  }
+
+  const mismatch = ((): string | null => {
+    if (attempt.rollback_id !== rollbackId) return "rollback_id";
+    if (attempt.session_id !== binding.sessionId) return "session_id";
+    if (attempt.contribution_sha256 !== binding.contributionSha256) return "contribution_sha256";
+    if (attempt.pre_rollback_checkpoint_id !== binding.preRollbackCheckpointId) {
+      return "pre_rollback_checkpoint_id";
+    }
+    if (!selectionsEqual(attempt.selection, binding.selection)) return "selection";
+    return null;
+  })();
+  if (mismatch !== null) {
+    return {
+      outcome: "indeterminate",
+      rollbackDir,
+      path: attemptPath,
+      detail: `the marker's ${mismatch} does not match the attempt that was being published`,
+    };
+  }
+
+  return { outcome: "published", rollbackDir, attempt };
 }
