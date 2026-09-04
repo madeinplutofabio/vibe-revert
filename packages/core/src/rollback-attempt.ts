@@ -155,6 +155,40 @@ import { SESSION_DIR_NAME_RE } from "./session.js";
 
 const ROLLBACKS_SUBDIR = "rollbacks";
 const ATTEMPT_FILENAME = "attempt.json";
+/** The sibling whose presence finalizes an invocation (see the header). */
+const RECEIPT_FILENAME = "receipt.json";
+
+/**
+ * `<repoRoot>/.viberevert/sessions/<sessionId>/rollbacks`. Pure path-join;
+ * existence unchecked.
+ *
+ * `publishRollbackAttempt` returns `rollbackDir` precisely so a caller never
+ * reconstructs this layout, but a SCAN has no prior publication to return one,
+ * so the convention has to be nameable. The storage names themselves stay
+ * private: consumers ask for a directory or an invocation's artifacts, never
+ * for a filename, so core can rename either without touching them.
+ */
+export function sessionRollbacksDir(repoRoot: string, sessionId: string): string {
+  return join(sessionDir(repoRoot, sessionId), ROLLBACKS_SUBDIR);
+}
+
+/**
+ * Both artifact paths for one invocation directory.
+ *
+ * Returned together because the pair is what the state machine reads: the
+ * marker alone means "mutation may have started and did not finalize", and only
+ * the sibling receipt finalizes it. A helper that returned one at a time would
+ * invite a consumer to check for the marker and forget the sibling.
+ */
+export function rollbackInvocationPaths(rollbackDir: string): {
+  readonly attemptPath: string;
+  readonly receiptPath: string;
+} {
+  return {
+    attemptPath: join(rollbackDir, ATTEMPT_FILENAME),
+    receiptPath: join(rollbackDir, RECEIPT_FILENAME),
+  };
+}
 
 export interface PublishRollbackAttemptOpts {
   readonly repoRoot: string;

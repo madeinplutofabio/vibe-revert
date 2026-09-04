@@ -28,6 +28,8 @@ import { describe, expect, it } from "vitest";
 import {
   type PublishRollbackAttemptOpts,
   publishRollbackAttempt,
+  rollbackInvocationPaths,
+  sessionRollbacksDir,
 } from "../src/rollback-attempt.js";
 
 // =============================================================================
@@ -483,5 +485,68 @@ describe("source invariants", () => {
     // feeding `toIsoSecondString(opts.now ?? new Date())` would leave both case
     // 6 and the interface check green while reintroducing the override.
     expect(source).toContain("const writtenAt = toIsoSecondString(new Date());");
+  });
+});
+
+// =============================================================================
+// E. the invocation layout helpers (M 0.8.0)
+//
+// A publication returns its own `rollbackDir`, so a publisher never
+// reconstructs the layout. A SCAN has no prior publication to return one, which
+// is why the convention has to be nameable at all. These helpers are the only
+// public way to name it: the storage filenames stay private, so core can rename
+// either artifact without touching a consumer.
+// =============================================================================
+
+describe("selective rollback invocation layout", () => {
+  it("18: sessionRollbacksDir names the session's rollbacks directory", () => {
+    const repoRoot = join("/repo");
+    const sessionId = "sess_01ARZ3NDEKTSV4RRFFQ69G5FAV";
+
+    expect(sessionRollbacksDir(repoRoot, sessionId)).toBe(
+      join(repoRoot, ".viberevert", "sessions", sessionId, "rollbacks"),
+    );
+  });
+
+  it("19: rollbackInvocationPaths returns BOTH artifacts of one invocation", () => {
+    const rollbackDir = join("/repo", ".viberevert", "x", "rb_01ARZ3NDEKTSV4RRFFQ69G5FAV");
+
+    const paths = rollbackInvocationPaths(rollbackDir);
+
+    // Returned together because the pair is what the state machine reads: the
+    // marker alone means "may have started and did not finalize", and only the
+    // sibling finalizes it. A one-at-a-time helper would invite a consumer to
+    // check the marker and forget the sibling.
+    expect(paths.attemptPath).toBe(join(rollbackDir, "attempt.json"));
+    expect(paths.receiptPath).toBe(join(rollbackDir, "receipt.json"));
+  });
+
+  it("20: the two helpers compose into the path a publication would produce", async () => {
+    // Composition is the actual contract: a scanner enumerates the directory
+    // from the first helper and reads artifacts with the second, and must land
+    // exactly where `publishRollbackAttempt` wrote them.
+    const tmp = await mkdtemp(join(tmpdir(), "viberevert-layout-"));
+    try {
+      const sessionId = "sess_01ARZ3NDEKTSV4RRFFQ69G5FAV";
+      await mkdir(join(tmp, ".viberevert", "sessions", sessionId), { recursive: true });
+      const published = await publishRollbackAttempt({
+        repoRoot: tmp,
+        sessionId,
+        contributionSha256: "a".repeat(64),
+        preRollbackCheckpointId: "cp_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        selection: {
+          selectors: { only: ["**"] },
+          resolved_change_group_ids: [`cg_${"0".repeat(63)}1`],
+        } satisfies RollbackSelection,
+      });
+
+      expect(published.rollbackDir).toBe(
+        join(sessionRollbacksDir(tmp, sessionId), published.rollbackId),
+      );
+      const { attemptPath } = rollbackInvocationPaths(published.rollbackDir);
+      await expect(readFile(attemptPath, "utf8")).resolves.toContain(published.rollbackId);
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
   });
 });

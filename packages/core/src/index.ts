@@ -186,6 +186,10 @@ export {
 } from "./policy-resolve.js";
 // Redaction (stub for v0.7.0-beta; reserved for future cloud-sync seam).
 export { redact, SECRET_PATTERN_COUNT } from "./redact.js";
+// Selective rollback invocation layout (M 0.8.0). Semantic path helpers only:
+// the storage filenames stay private to core, so a consumer asks for a
+// directory or for an invocation's artifacts and never for a filename.
+export { rollbackInvocationPaths, sessionRollbacksDir } from "./rollback-attempt.js";
 export type {
   AppendCommandsLogEntryOpts,
   EndSessionOpts,
