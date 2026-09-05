@@ -8,13 +8,13 @@
     "url": "https://github.com/madeinplutofabio/vibe-revert",
     "source": "github"
   },
-  "version": "0.7.1-beta.4",
+  "version": "0.8.0-beta.0",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "viberevert",
-      "version": "0.7.1-beta.4",
+      "version": "0.8.0-beta.0",
       "transport": {
         "type": "stdio"
       },

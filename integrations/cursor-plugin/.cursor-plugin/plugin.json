@@ -2,7 +2,7 @@
   "name": "viberevert",
   "displayName": "VibeRevert",
   "description": "Deterministic risk checks and session recovery for AI coding agents. Run /viberevert-setup in a project to enable it there.",
-  "version": "0.7.1-beta.4",
+  "version": "0.8.0-beta.0",
   "author": {
     "name": "Fabio Marcello Salvadori"
   },

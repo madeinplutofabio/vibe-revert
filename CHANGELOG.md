@@ -8,6 +8,106 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.0-beta.0] - 2026-09-05
+
+Surgical recovery. A session stops being an all-or-nothing rollback unit and
+becomes a selectively reversible one, and what a session contributed becomes a
+durable, addressable object rather than something that evaporates at `end`.
+
+Nothing breaks and nothing needs migrating. Every new schema field is optional,
+every existing artifact stays valid, and whole-session rollback is unchanged.
+See [MIGRATIONS.md](MIGRATIONS.md) for which capabilities an older session does
+and does not gain after upgrading.
+
+### Added
+
+- **Selective rollback.** `viberevert rollback <session>` gains `--only`,
+  `--except`, `--risk` and `--finding`. Supplying any of them, including
+  `--except` on its own, restores only the change groups the selectors resolve
+  to and leaves every other managed path provably untouched. Positive selector
+  families intersect, `--except` subtracts last, exclusion is group-atomic, and
+  `--risk` is an at-or-above threshold. Path selectors match a renamed file
+  through its whole alias set. Dry run remains the default. See the
+  [rollback contract](docs/rollback-contract.md).
+- **The session contribution.** `viberevert end` writes
+  `.viberevert/sessions/<id>/contribution.json`, a durable record of what the
+  session changed: one entry per path with its complete two-axis `PathState`
+  before and after, the operation, its change-group id, and the content delta.
+  Content is stored content-addressed under `.viberevert/objects/`.
+  `session.json` records the contribution's path and a digest over its exact
+  bytes, and every consumer walks that chain before acting.
+- **Session-start evaluation snapshot.** `viberevert start` records the resolved
+  `checks`, risk thresholds, frameworks, `rollback.exclude` and
+  `verify.commands` into `session.json`. Session-bound evaluation reads this
+  snapshot rather than live config, because `.viberevert.yml` is a file an agent
+  can rewrite during its own session.
+- **Project verification commands now execute.** `verify.commands` was parsed
+  and validated but never run. A selective rollback apply now runs it, after a
+  clean transplant, using the session-start snapshot. Two integrity passes
+  bracket the commands, and the second compares HEAD as well, so a command that
+  commits is caught even when file bytes look acceptable. It executes nowhere
+  else: not on whole-session rollback, not on a selective dry run, and not on
+  `check`, `end`, `run` or `shell`. See [configuration](docs/config.md).
+- **Crash-recovery attempt marker.** Before the first mutation a selective apply
+  publishes an immutable `attempt.json` beside where its receipt will go. A
+  marker without its sibling receipt means mutation may have started and did not
+  finalize, and fails every later apply closed rather than assuming nothing
+  happened.
+- **Selective rollback receipts**, rendered in terminal, JSON and Markdown. The
+  preview receipt is session-scoped and regenerable; an apply receipt is
+  per-invocation and immutable.
+- **Finding identity.** Check findings carry `finding_id` and a complete
+  machine-readable `affected_paths`, which is what `--finding` and `--risk`
+  resolve against. Risk is aggregated per path before clustering, so a cluster
+  cannot promote a lower-risk member. See the
+  [risk taxonomy](docs/risk-taxonomy.md).
+- `MIGRATIONS.md`, and [docs/performance.md](docs/performance.md) recording
+  measured end-of-session latency.
+
+### Changed
+
+- `viberevert end` captures the contribution under a lock, as one transaction.
+  A concurrent `end` is refused immediately rather than doing duplicate work,
+  and a working tree that moves during capture raises
+  `EndStateChangedDuringCapture` with the session left active, rather than
+  persisting incoherent evidence.
+- `viberevert end` is measurably slower on larger repositories, because it
+  inventories every present tracked regular file. Measured at 3.4 s for 200
+  files and 24 s for 4000 on the reference machine. This is characterized rather
+  than fixed; see [docs/performance.md](docs/performance.md).
+
+### Known limitations
+
+- Sessions ended before 0.8.0 have no contribution and cannot be back-filled;
+  their after-state is gone. Selective rollback refuses on them and
+  whole-session rollback keeps working.
+- `--finding` accepts full `fnd_<64 hex>` ids only. Short prefixes are refused
+  for now, because the attempt marker must persist a resolved id.
+- Selective rollback refuses drift rather than reconciling it. A selected path
+  changed since the session ended is refused, and `--force` does not override
+  it.
+- `contribution_sha256` is not comparable across operating systems, by design:
+  a file's executable bit is a real boolean on POSIX and unreportable on
+  Windows.
+
+## [0.7.1-beta.4] - 2026-08-19
+
+No entry was written for this release at the time. Recorded here from the
+commit range for completeness rather than reconstructed in detail, since the
+changes were confined to distribution surfaces and carried no behavior change
+to the CLI itself.
+
+### Added
+
+- `server.json` for the official MCP Registry, with
+  `com.viberevert/viberevert` locked as the canonical MCP identity.
+
+### Changed
+
+- MCP server reports its real package version.
+- npm package page and README reworked as acquisition surfaces; expanded
+  package keywords for search discoverability.
+
 ## [0.7.1-beta.3] - 2026-08-15
 
 ### Added
@@ -267,7 +367,9 @@ locks.
 - ASCII-only at byte level across MCP source (D99.M.13) and per-tool
   hook scripts (D98.M.4).
 
-[Unreleased]: https://github.com/madeinplutofabio/vibe-revert/compare/v0.7.1-beta.3...HEAD
+[Unreleased]: https://github.com/madeinplutofabio/vibe-revert/compare/v0.8.0-beta.0...HEAD
+[0.8.0-beta.0]: https://github.com/madeinplutofabio/vibe-revert/compare/v0.7.1-beta.4...v0.8.0-beta.0
+[0.7.1-beta.4]: https://github.com/madeinplutofabio/vibe-revert/compare/v0.7.1-beta.3...v0.7.1-beta.4
 [0.7.1-beta.3]: https://github.com/madeinplutofabio/vibe-revert/compare/v0.7.1-beta.1...v0.7.1-beta.3
 [0.7.1-beta.1]: https://github.com/madeinplutofabio/vibe-revert/releases/tag/v0.7.1-beta.1
 [0.7.0-beta.0]: https://github.com/madeinplutofabio/vibe-revert/releases/tag/v0.7.0-beta.0

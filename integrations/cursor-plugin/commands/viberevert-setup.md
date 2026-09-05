@@ -12,7 +12,7 @@ Set up VibeRevert for the repository that is currently open, then confirm it wor
 Run this exact command in the root of the current project:
 
 ```
-npx -y viberevert@0.7.1-beta.4 install --cursor
+npx -y viberevert@0.8.0-beta.0 install --cursor
 ```
 
 On success it prints a line beginning with `[applied: Cursor:`.

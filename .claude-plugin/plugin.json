@@ -13,7 +13,7 @@
   "mcpServers": {
     "viberevert": {
       "command": "npx",
-      "args": ["-y", "viberevert@0.7.1-beta.4", "mcp", "serve"]
+      "args": ["-y", "viberevert@0.8.0-beta.0", "mcp", "serve"]
     }
   }
 }
