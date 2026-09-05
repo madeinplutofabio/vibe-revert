@@ -126,6 +126,30 @@ interface ReceiptFixtureSetup {
   rollback_invocation: {
     mode: "dry_run" | "apply";
     force: boolean;
+
+    /**
+     * OPTIONAL. M 0.8.0 selectors. Supplying ANY of them puts the
+     * invocation into SELECTIVE mode, which changes both the engine
+     * under test and the artifact it writes. The harness DERIVES the
+     * receipt path from this field rather than taking a second
+     * declaration, so a fixture cannot claim one mode and be verified
+     * against the other's artifact.
+     *
+     * Each array must be non-empty when present; omit the field
+     * instead. That mirrors the attempt marker's schema, where absence
+     * is the only spelling of "family not used", and it stops a fixture
+     * from looking selective in the setup file while running as a
+     * legacy full rollback.
+     *
+     * `finding` entries must be FULL `fnd_<64 lowercase hex>` ids, which
+     * is what the command accepts and what the marker persists. The
+     * validator rejects a prefix here so the fixture's own error is
+     * named, rather than surfacing later as an unexpected exit code.
+     */
+    only?: string[];
+    except?: string[];
+    finding?: string[];
+    risk?: "low" | "medium" | "high" | "critical";
   };
 
   /**
@@ -159,12 +183,40 @@ rules:
    requires `expected_rollback_exit_code: 0` per D66 (successful
    dry-run always exits 0).
 
-## The 5 mandatory fixtures
+## Where a receipt lands, per cell
 
-These five scenarios are locked by `REQUIRED_RECEIPT_FIXTURE_NAMES`
+The four operation cells write four different artifacts, and the harness
+asserts both that the right one exists and that every other one is
+absent. That absence check is what makes the split enforceable: a
+selective run that wrote a legacy receipt, or a preview that reserved an
+invocation directory, fails here rather than passing on the file it did
+produce.
+
+| Cell | Artifact |
+|---|---|
+| full / dry run | `sessions/<id>/rollback-dry-run-receipt.json` |
+| full / apply | `sessions/<id>/rollback-receipt.json` |
+| selective / dry run | `sessions/<id>/selective-rollback-dry-run-receipt.json` |
+| selective / apply | `sessions/<id>/rollbacks/<rb_ULID>/receipt.json` |
+
+The selective apply receipt sits inside a per-invocation directory whose
+`rb_<ULID>` name is not known before the run, so the harness DISCOVERS
+it and requires exactly one such directory. More than one would mean the
+scenario ran the engine twice, and the goldens would silently describe
+whichever the sort put first.
+
+A refusal scenario writes none of the four, and reserves no invocation
+directory at all. The last part matters most: an invocation holding a
+marker with no receipt is what the history scan treats as a blocker, so
+a refusal that left one behind would taint every later apply on that
+session.
+
+## The 8 mandatory fixtures
+
+These scenarios are locked by `REQUIRED_RECEIPT_FIXTURE_NAMES`
 in `packages/cli/test/golden-receipts.test.ts`. Deletion of any
 required name fails the "all required scenarios exist" test loudly;
-adding NEW scenarios beyond these 5 is permitted (superset-tolerant).
+adding NEW scenarios beyond these is permitted (superset-tolerant).
 
 ### 1. `clean-dry-run/`
 
@@ -233,6 +285,57 @@ paths and never fires. The fixture isolates the intended contract:
 clean preconditions → restore reaches extraction → structured
 `extraction_conflict` failure → apply receipt persists per Lock #16.
 D75 `--force` coverage lives in the `force-apply` fixture.
+
+### 6. `selective-dry-run/`
+
+`{ mode: "dry_run", force: false, only: ["src/**"] }` → exit 0,
+selective preview receipt written. The selective half of the dry-run
+cell. The session modifies BOTH `src/app.ts` and `docs/guide.md`; the
+selector matches only the first, so the receipt's single result and
+single resolved change group are the proof that selection actually
+narrowed the operation rather than the run happening to touch one file.
+
+Receipt has `mode: "dry_run"`, `eligibility: "eligible"`, and no
+`pre_rollback_checkpoint_id` field at all — a preview publishes no
+marker and reserves no invocation, which is also why the artifact lives
+beside the session rather than under `rollbacks/`.
+
+### 7. `selective-apply/`
+
+`{ mode: "apply", force: false, only: ["src/**"] }` → exit 0, an
+invocation's `receipt.json` written. The same two-file session as
+above, applied. Proves the whole transplant path end to end: the
+emergency checkpoint is created, the attempt marker is published, only
+the selected path is restored, and `first_verification` reports the
+UNSELECTED domain was checked and found clean. That last number is what
+distinguishes a selective restore from a whole-tree one.
+
+Receipt has `outcome: "succeeded"`, a non-null
+`pre_rollback_checkpoint_id`, `project_verification: not_configured`
+(the fixture configures no `verify.commands`), and
+`post_command_integrity: not_run` with reason `commands_not_configured`.
+
+### 8. `selective-empty-apply-refuse/`
+
+`{ mode: "apply", force: false, only: ["nothing/matches/**"] }` →
+exit 1, **no receipt**, **no invocation directory**. **No `expected/`
+directory.**
+
+The one place the two modes deliberately diverge. A dry run RECORDS an
+empty resolution as `eligibility: "empty_selection"`; an apply refuses
+it, because there is nothing to authorize and the attempt marker's
+schema cannot express a selection resolving to no change group. Required
+rather than optional because a regression that started reserving an
+invocation here would leave a marker with no receipt, and that is
+exactly what the history scan treats as a blocker for every later apply
+on the session.
+
+**Not covered by a fixture, deliberately** — `--risk` and `--finding`
+resolve against a session report, which means the fixture would have to
+run `viberevert check --since` and pin finding ids into `setup.json`,
+coupling these goldens to the checks engine's output. Their resolution
+algebra is covered by `selection-resolver.test.ts` and their CLI
+validation by `rollback-selective-command.test.ts`.
 
 ## How to regen / verify
 

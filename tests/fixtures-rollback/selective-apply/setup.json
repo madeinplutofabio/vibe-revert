@@ -1,0 +1,27 @@
+{
+  "files": [
+    {
+      "path": "README.md",
+      "content": "# Test\n\nInitial baseline for the selective apply receipt fixture.\n"
+    },
+    {
+      "path": "src/app.ts",
+      "content": "export const app = \"before\";\n"
+    },
+    {
+      "path": "docs/guide.md",
+      "content": "Guide, before the session.\n"
+    }
+  ],
+  "git_init": true,
+  "session": {
+    "task": "M 0.8.0 rung 8 selective apply scenario",
+    "modifications": [
+      { "path": "src/app.ts", "content": "export const app = \"after\";\n" },
+      { "path": "docs/guide.md", "content": "Guide, after the session.\n" }
+    ]
+  },
+  "rollback_invocation": { "mode": "apply", "force": false, "only": ["src/**"] },
+  "expected_rollback_exit_code": 0,
+  "expected_receipt": true
+}

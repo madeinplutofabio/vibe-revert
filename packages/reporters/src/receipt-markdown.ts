@@ -140,140 +140,19 @@
 
 import type { ReceiptFile, RollbackFailure, RollbackFileResult } from "@viberevert/session-format";
 
+import { bracketToken, inlineCode, inlineMarkdown, schemaToken } from "./markdown-escape.js";
 import type { ReceiptRenderInput } from "./receipt-types.js";
 
 // =============================================================================
 // Escaping helpers
 // =============================================================================
-
-/**
- * Escape a string for safe inline placement inside a markdown
- * paragraph, bullet, heading, blockquote, or emphasis context.
- * Handles:
- *   - Newlines → space (prevents paragraph splits + block-level
- *     re-parsing on subsequent lines).
- *   - Backslash → `\\` (MUST be escaped first; later escapes add
- *     backslashes that must not be doubled).
- *   - Backtick, asterisk, underscore, brackets → backslash-prefixed
- *     (prevents inline code, emphasis, and link formation).
- *   - `<` / `>` → HTML entities (prevents raw-HTML injection per
- *     the no-HTML D45 lock; also keeps `>` from accidentally
- *     starting a blockquote when escaped content lands at
- *     start-of-line).
- *
- * Known limitation: does NOT escape leading block-level characters
- * (`#`, `-`, `>`, `+`, `1.`, etc.). When the escaped value is
- * placed mid-line (e.g., after `**Label:**`), this is fine — block
- * constructs only trigger at line start. The out-of-scope notice
- * paragraph is the one place where escaped content sits at
- * start-of-line; the locked notice text begins with a capital "V"
- * (no block-trigger char), so the risk is moot for the current
- * schema literal. A future literal change starting with `#`/`-`/`>`
- * would need additional escaping here.
- *
- * Locked BYTE-IDENTICAL to markdown.ts's `inlineMarkdown`. If you
- * change one, mirror the change to the other.
- *
- * DO NOT compose with `inlineCode`. Code-span content does NOT
- * honor backslash escapes per CommonMark §6.1; passing
- * `inlineMarkdown(x)` to `inlineCode(x)` would render the
- * backslash escapes as literal text inside the code span. Use
- * the two helpers independently on RAW input depending on
- * destination context.
- *
- * For schema-controlled enum values, prefer `schemaToken` over
- * this helper — `inlineMarkdown` escapes underscores, polluting
- * snake_case tokens with backslashes in the rendered source.
- */
-function inlineMarkdown(text: string): string {
-  return text
-    .replace(/\r?\n/g, " ")
-    .replace(/\\/g, "\\\\")
-    .replace(/`/g, "\\`")
-    .replace(/\*/g, "\\*")
-    .replace(/_/g, "\\_")
-    .replace(/\[/g, "\\[")
-    .replace(/\]/g, "\\]")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-
-/**
- * Wrap `text` in an inline code span using a dynamic-length
- * backtick fence per CommonMark §6.1, so embedded backticks
- * cannot break out of the span.
- *
- * The fence is chosen to be one character longer than the longest
- * run of consecutive backticks in the (newline-normalized) input.
- * Per CommonMark §6.1, when the content begins OR ends with a
- * backtick OR begins/ends with a space, the content is padded
- * with a single leading and trailing space; the renderer strips
- * one leading and one trailing space iff BOTH boundaries have a
- * space AND the content is not entirely whitespace. The padding
- * rule preserves the user's literal leading/trailing backticks
- * and prevents the fence from being miscounted.
- *
- * Newlines in `text` are collapsed to spaces (same convention as
- * `inlineMarkdown`'s first replacement) so a code span doesn't
- * accidentally close at a line break — code spans are a single-
- * line construct per CommonMark.
- *
- * Pass RAW input. Do NOT compose with `inlineMarkdown` (see
- * that helper's docstring for why).
- */
-function inlineCode(text: string): string {
-  const normalized = text.replace(/\r?\n/g, " ");
-  const longestBacktickRun = Math.max(
-    0,
-    ...Array.from(normalized.matchAll(/`+/g), (m) => m[0].length),
-  );
-  const fence = "`".repeat(longestBacktickRun + 1);
-  const needsPadding =
-    normalized.startsWith("`") ||
-    normalized.endsWith("`") ||
-    normalized.startsWith(" ") ||
-    normalized.endsWith(" ");
-  const content = needsPadding ? ` ${normalized} ` : normalized;
-  return `${fence}${content}${fence}`;
-}
-
-/**
- * Emit a schema-controlled enum value as raw text when it matches
- * the safe alphanumeric-and-underscore shape (the shape every
- * current ReceiptFile schema enum satisfies); fall back to
- * `inlineMarkdown` escaping otherwise.
- *
- * The safe-shape gate preserves snake_case grep-ability:
- * `inlineMarkdown(value)` would escape every underscore as `\_`,
- * polluting the rendered source bytes with backslashes (e.g.,
- * "TRACKED_RESTORED" → "TRACKED\_RESTORED") and contradicting the
- * layout lock that says tokens stay grep-able as single words.
- * For today's locked schema (where every enum value is `[a-z_]+`
- * or `[a-z]+`), the gate emits the value verbatim.
- *
- * Defense-in-depth fallback: a future schema bump introducing
- * a markdown-active character (`*`, `_` at a word boundary,
- * backtick, `[`/`]`, `<`/`>`) in any enum value would automatically
- * route through `inlineMarkdown` rather than emitting unsafe
- * markdown. No renderer touch-up required.
- */
-function schemaToken(text: string): string {
-  return /^[A-Za-z0-9_]+$/.test(text) ? text : inlineMarkdown(text);
-}
-
-/**
- * Format a schema enum value as a bracketed token in bold-emphasis
- * context: `[<UPPERCASE_VALUE>]`. Composes `schemaToken` over
- * `.toUpperCase()` so the value is uppercased BEFORE the
- * safe-shape gate runs (uppercasing is a safe transformation
- * on alphanumeric+underscore input — never introduces unsafe
- * characters). The bold wrapping (`**...**`) is applied at the
- * call site, not here, so this helper composes naturally with
- * any emphasis context.
- */
-function bracketToken(token: string): string {
-  return `[${schemaToken(token.toUpperCase())}]`;
-}
+//
+// M 0.8.0 step 12: the four helpers below MOVED to `markdown-escape.ts`,
+// byte-for-byte, and are imported above. They were duplicated here and in
+// `markdown.ts`, each with a comment telling the reader to mirror any change
+// into the other, which is the shape where a fix lands in one renderer and the
+// other keeps emitting unsafe output with nothing failing. The goldens are the
+// proof this move changed no output.
 
 // =============================================================================
 // Section builders

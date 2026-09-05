@@ -1,0 +1,20 @@
+{
+  "files": [
+    {
+      "path": "README.md",
+      "content": "# Test\n\nInitial baseline for the selective empty-selection refusal fixture.\n"
+    },
+    {
+      "path": "src/app.ts",
+      "content": "export const app = \"before\";\n"
+    }
+  ],
+  "git_init": true,
+  "session": {
+    "task": "M 0.8.0 rung 8 empty selective apply scenario",
+    "modifications": [{ "path": "src/app.ts", "content": "export const app = \"after\";\n" }]
+  },
+  "rollback_invocation": { "mode": "apply", "force": false, "only": ["nothing/matches/**"] },
+  "expected_rollback_exit_code": 1,
+  "expected_receipt": false
+}

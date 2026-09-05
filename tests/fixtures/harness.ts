@@ -1110,9 +1110,34 @@ export interface ReceiptFixtureSetup {
   readonly rollback_invocation: {
     readonly mode: "dry_run" | "apply";
     readonly force: boolean;
+    /**
+     * M 0.8.0 selectors. Supplying ANY of them puts the invocation in
+     * SELECTIVE mode, which changes both the engine under test and the
+     * artifact it writes: a selective dry run persists the session-scoped
+     * preview receipt, and a selective apply persists an invocation's
+     * `receipt.json` under `rollbacks/`. The harness derives the receipt path
+     * from this field rather than taking a second declaration, so a fixture
+     * cannot claim one mode and be verified against the other's artifact.
+     */
+    readonly only?: readonly string[];
+    readonly except?: readonly string[];
+    readonly finding?: readonly string[];
+    readonly risk?: "low" | "medium" | "high" | "critical";
   };
   readonly expected_rollback_exit_code: 0 | 1;
   readonly expected_receipt: boolean;
+}
+
+/** True iff any selector was supplied, which is exactly the selective-mode rule. */
+export function isSelectiveInvocation(
+  invocation: ReceiptFixtureSetup["rollback_invocation"],
+): boolean {
+  return (
+    (invocation.only?.length ?? 0) > 0 ||
+    (invocation.except?.length ?? 0) > 0 ||
+    (invocation.finding?.length ?? 0) > 0 ||
+    invocation.risk !== undefined
+  );
 }
 
 export interface RunReceiptFixtureOptions {
@@ -1242,23 +1267,23 @@ async function runRefusalReceiptScenario(args: {
       );
     }
 
-    const dryRunPath = join(
-      repoRoot,
-      ".viberevert",
-      "sessions",
-      sessionId,
-      "rollback-dry-run-receipt.json",
-    );
-    const applyPath = join(repoRoot, ".viberevert", "sessions", sessionId, "rollback-receipt.json");
-    if (await pathExists(dryRunPath)) {
-      throw new Error(
-        `Refusal scenario should produce NO dry-run receipt, but found one at ${dryRunPath}`,
-      );
-    }
-    if (await pathExists(applyPath)) {
-      throw new Error(
-        `Refusal scenario should produce NO apply receipt, but found one at ${applyPath}`,
-      );
+    // A refusal writes NOTHING, on any of the four surfaces, and reserves no
+    // invocation directory. The last one matters most: an invocation holding a
+    // marker with no receipt is what the history scan treats as a blocker, so
+    // a refusal that left one behind would taint every later apply on the
+    // session.
+    const sessionDir = join(repoRoot, ".viberevert", "sessions", sessionId);
+    for (const [label, path] of [
+      ["legacy dry-run", join(sessionDir, "rollback-dry-run-receipt.json")],
+      ["legacy apply", join(sessionDir, "rollback-receipt.json")],
+      ["selective preview", join(sessionDir, "selective-rollback-dry-run-receipt.json")],
+      ["selective invocation", join(sessionDir, "rollbacks")],
+    ] as const) {
+      if (await pathExists(path)) {
+        throw new Error(
+          `Refusal scenario should produce NO ${label} artifact, but found one at ${path}`,
+        );
+      }
     }
 
     // Post-check: re-assert the fixture's own expected/ directory
@@ -1329,41 +1354,29 @@ async function runOneReceiptProducingScenario(args: {
       );
     }
 
-    const receiptFilename =
-      args.setup.rollback_invocation.mode === "apply"
-        ? "rollback-receipt.json"
-        : "rollback-dry-run-receipt.json";
-    const receiptPath = join(repoRoot, ".viberevert", "sessions", sessionId, receiptFilename);
+    const { receiptPath, absent } = await resolveReceiptLocation({
+      repoRoot,
+      sessionId,
+      invocation: args.setup.rollback_invocation,
+    });
     const persistedBytes = await readFile(receiptPath, "utf8").catch((err) => {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") {
         throw new Error(
-          `Receipt-producing scenario should have written ${receiptFilename}, but it is missing at ${receiptPath}`,
+          `Receipt-producing scenario should have written a receipt, but it is missing at ${receiptPath}`,
         );
       }
       throw err;
     });
 
-    // Lock #6 D68 path-split discipline: the WRONG path must be ABSENT.
-    // Dry-run must NOT create the apply path; apply must NOT touch
-    // the dry-run path (apply may PRESERVE an existing dry-run receipt
-    // byte-identically per rollback.test.ts F-2, but a fresh-setup
-    // receipt-producing scenario starts from no dry-run receipt at
-    // all, so the absence assertion holds in this harness).
-    const wrongReceiptFilename =
-      args.setup.rollback_invocation.mode === "apply"
-        ? "rollback-dry-run-receipt.json"
-        : "rollback-receipt.json";
-    const wrongReceiptPath = join(
-      repoRoot,
-      ".viberevert",
-      "sessions",
-      sessionId,
-      wrongReceiptFilename,
-    );
-    if (await pathExists(wrongReceiptPath)) {
-      throw new Error(
-        `Receipt-producing scenario wrote the wrong D68 receipt path: ${wrongReceiptPath}`,
-      );
+    // D68 path-split discipline, now across FOUR cells rather than two. Every
+    // path this invocation must not have written stays absent: a selective run
+    // never touches a legacy receipt, a legacy run never writes a selective
+    // one, and a preview never reserves an invocation directory. A fresh setup
+    // starts with none of them, so absence is the honest assertion.
+    for (const wrongPath of absent) {
+      if (await pathExists(wrongPath)) {
+        throw new Error(`Receipt-producing scenario wrote the wrong receipt path: ${wrongPath}`);
+      }
     }
 
     if (args.format === "json" && result.stdout !== persistedBytes) {
@@ -1476,15 +1489,77 @@ function extractSessionIdFromStdout(stdout: string): string {
 
 function buildRollbackArgs(args: {
   readonly sessionId: string;
-  readonly invocation: { readonly mode: "dry_run" | "apply"; readonly force: boolean };
+  readonly invocation: ReceiptFixtureSetup["rollback_invocation"];
   readonly format: ReceiptFormat;
 }): string[] {
   const result = ["rollback", args.sessionId];
+  // Selectors first, matching the order the command declares them, so the
+  // recorded argv reads the same way a user would have typed it.
+  for (const value of args.invocation.only ?? []) result.push("--only", value);
+  for (const value of args.invocation.except ?? []) result.push("--except", value);
+  for (const value of args.invocation.finding ?? []) result.push("--finding", value);
+  if (args.invocation.risk !== undefined) result.push("--risk", args.invocation.risk);
   if (args.invocation.mode === "apply") result.push("--apply");
   if (args.invocation.force) result.push("--force");
   if (args.format === "json") result.push("--json");
   else if (args.format === "markdown") result.push("--markdown");
   return result;
+}
+
+/**
+ * Where this invocation's receipt must land, and which paths must stay empty.
+ *
+ * Four cells, four answers. Derived from the invocation rather than declared,
+ * so a fixture cannot assert one engine and be verified against the other's
+ * artifact. The `absent` list is what makes the D68 split enforceable: a
+ * selective run that wrote a legacy receipt, or a legacy run that wrote a
+ * selective one, fails here rather than passing on the file it did produce.
+ *
+ * The selective APPLY receipt lives inside a per-invocation directory whose
+ * `rb_<ULID>` name is not known before the run, so it is DISCOVERED. Exactly
+ * one invocation directory must exist: more than one would mean the fixture
+ * ran the engine twice, and the goldens would silently describe whichever the
+ * sort happened to put first.
+ */
+async function resolveReceiptLocation(args: {
+  readonly repoRoot: string;
+  readonly sessionId: string;
+  readonly invocation: ReceiptFixtureSetup["rollback_invocation"];
+}): Promise<{ readonly receiptPath: string; readonly absent: readonly string[] }> {
+  const sessionDir = join(args.repoRoot, ".viberevert", "sessions", args.sessionId);
+  const legacyDryRun = join(sessionDir, "rollback-dry-run-receipt.json");
+  const legacyApply = join(sessionDir, "rollback-receipt.json");
+  const selectiveDryRun = join(sessionDir, "selective-rollback-dry-run-receipt.json");
+
+  if (!isSelectiveInvocation(args.invocation)) {
+    return args.invocation.mode === "apply"
+      ? { receiptPath: legacyApply, absent: [legacyDryRun, selectiveDryRun] }
+      : { receiptPath: legacyDryRun, absent: [legacyApply, selectiveDryRun] };
+  }
+
+  if (args.invocation.mode === "dry_run") {
+    return { receiptPath: selectiveDryRun, absent: [legacyDryRun, legacyApply] };
+  }
+
+  const rollbacksDir = join(sessionDir, "rollbacks");
+  const entries = await readdir(rollbacksDir).catch((err: NodeJS.ErrnoException) => {
+    throw new Error(
+      err.code === "ENOENT"
+        ? `Selective apply should have reserved an invocation directory under ${rollbacksDir}, but it does not exist`
+        : `Could not read ${rollbacksDir}: ${err.message}`,
+    );
+  });
+  const invocations = [...entries].sort();
+  if (invocations.length !== 1) {
+    throw new Error(
+      `Selective apply should reserve exactly one invocation directory, found ${invocations.length}: ${JSON.stringify(invocations)}`,
+    );
+  }
+  const invocationDir = join(rollbacksDir, invocations[0] as string);
+  return {
+    receiptPath: join(invocationDir, "receipt.json"),
+    absent: [legacyDryRun, legacyApply, selectiveDryRun],
+  };
 }
 
 async function applyPostEndTransformations(
@@ -1595,6 +1670,32 @@ interface RawPostEndTransformations {
 interface RawRollbackInvocation {
   mode?: unknown;
   force?: unknown;
+  only?: unknown;
+  except?: unknown;
+  finding?: unknown;
+  risk?: unknown;
+}
+
+const RISK_LEVELS = ["low", "medium", "high", "critical"] as const;
+
+/** A selector family: absent, or a non-empty array of non-blank strings. */
+function validateSelectorFamily(value: unknown, source: string): readonly string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) {
+    throw new Error(`${source} must be an array of strings when present`);
+  }
+  if (value.length === 0) {
+    // Mirrors the marker schema, where absence is the only spelling of "not
+    // used". An empty array here would make a fixture look selective in the
+    // setup file and run as a legacy full rollback.
+    throw new Error(`${source} must not be empty; omit the field instead`);
+  }
+  for (const entry of value) {
+    if (typeof entry !== "string" || entry.trim().length === 0) {
+      throw new Error(`${source} entries must be non-blank strings`);
+    }
+  }
+  return value as readonly string[];
 }
 
 function validateReceiptFixtureSetup(parsed: unknown, sourcePath: string): ReceiptFixtureSetup {
@@ -1851,5 +1952,37 @@ function validateRollbackInvocation(
     throw new Error(`${source}.force must be boolean`);
   }
 
-  return { mode: modeValue, force: forceValue };
+  const only = validateSelectorFamily(obj.only, `${source}.only`);
+  const except = validateSelectorFamily(obj.except, `${source}.except`);
+  const finding = validateSelectorFamily(obj.finding, `${source}.finding`);
+
+  let risk: ReceiptFixtureSetup["rollback_invocation"]["risk"];
+  if (obj.risk !== undefined) {
+    if (
+      typeof obj.risk !== "string" ||
+      !RISK_LEVELS.includes(obj.risk as (typeof RISK_LEVELS)[number])
+    ) {
+      throw new Error(`${source}.risk must be one of: ${RISK_LEVELS.join(", ")}`);
+    }
+    risk = obj.risk as (typeof RISK_LEVELS)[number];
+  }
+
+  // The finding selector takes FULL ids, which is what the command accepts
+  // and what the attempt marker persists. Catching a prefix here names the
+  // fixture's own error rather than letting it surface as a CLI refusal the
+  // scenario then reports as an unexpected exit code.
+  for (const id of finding ?? []) {
+    if (!/^fnd_[0-9a-f]{64}$/.test(id)) {
+      throw new Error(`${source}.finding entries must be full fnd_<64 lowercase hex> ids`);
+    }
+  }
+
+  return {
+    mode: modeValue,
+    force: forceValue,
+    ...(only !== undefined ? { only } : {}),
+    ...(except !== undefined ? { except } : {}),
+    ...(finding !== undefined ? { finding } : {}),
+    ...(risk !== undefined ? { risk } : {}),
+  };
 }

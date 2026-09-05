@@ -100,6 +100,18 @@ const REQUIRED_RECEIPT_FIXTURE_NAMES = [
   "dirty-refuse-fresh-session",
   "force-apply",
   "partial-failure-extraction-conflict",
+  // M 0.8.0 rung 8. The first two are the SELECTIVE half of the four operation
+  // cells, whose full half is `clean-dry-run` and `clean-apply`. Together they
+  // pin that one command drives two engines and that each writes only its own
+  // artifact: a selective run never touches a legacy receipt path, and a
+  // selective apply reserves exactly one invocation directory.
+  "selective-dry-run",
+  "selective-apply",
+  // An empty resolution under --apply refuses with no marker and no receipt.
+  // Required rather than optional because it is the one place the two modes
+  // deliberately diverge, and a regression that started writing a marker here
+  // would taint every later apply on the session.
+  "selective-empty-apply-refuse",
 ] as const;
 
 /**

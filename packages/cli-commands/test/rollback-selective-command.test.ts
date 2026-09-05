@@ -434,7 +434,10 @@ describe("selective rollback against a session with no contribution", () => {
     const result = await runRollback([SESSION_ID, "--only", "src/**"]);
 
     expect(result.exitCode).toBe(1);
-    expect(result.stderr).toContain("CONTRIBUTION_REQUIRED");
+    // Prose, not a reason code: the user cannot act on `CONTRIBUTION_REQUIRED`,
+    // and the one thing that still works for them is the whole-session path.
+    expect(result.stderr).toContain("no durable contribution");
+    expect(result.stderr).toContain("re-run without any selector");
     expect(result.stdout).toBe("");
   });
 
@@ -483,7 +486,10 @@ describe("selective rollback against a session with no contribution", () => {
     const result = await runRollback([SESSION_ID, "--risk", "high"]);
 
     expect(result.exitCode).toBe(1);
-    expect(result.stderr).toContain("CONTRIBUTION_REQUIRED");
+    expect(result.stderr).toContain("no durable contribution");
+    // NOT the report refusal: without a contribution there is nothing for a
+    // report to be stale against.
+    expect(result.stderr).not.toContain("viberevert check --since");
   });
 });
 
@@ -568,9 +574,14 @@ describe("a selection that resolves to nothing", () => {
     expect(receipt.eligibility).not.toBe("empty_selection");
     expect(receipt.results.map((r) => r.path)).toEqual(["src/a.ts"]);
     expect(receipt.resolved_change_group_ids).toHaveLength(1);
-    // Both halves of the coupling the schema enforces: a non-empty selection
-    // has results AND resolved groups, and it went through the same file.
-    expect(result.stdout).toContain('"mode": "dry_run"');
+    // Rendered for a human by default, exactly as the legacy dry run is. The
+    // JSON form is opt-in via --json, and the golden fixtures pin all three.
+    expect(result.stdout).toContain("VibeRevert Selective Rollback Receipt (DRY-RUN)");
+    // Taken FROM the receipt rather than hardcoded, so this asserts the real
+    // invariant: what the artifact records is what the human output shows.
+    const only = receipt.results[0];
+    if (only === undefined) throw new Error("expected one result");
+    expect(result.stdout).toContain(`[${only.outcome.toUpperCase()}]  ${only.path}`);
   });
 
   it("writes both kinds to the SAME session-scoped path, so a preview replaces a preview", async () => {

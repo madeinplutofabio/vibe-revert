@@ -3,7 +3,7 @@
 
 // `viberevert rollback <session-id> [--only|--except|--finding|--risk]
 //                                   [--apply] [--force] [--json|--markdown]`
-// — restore a session's pre-session captured state per M D D59, in whole or in
+// Restores a session's pre-session captured state per M D D59, in whole or in
 // part.
 //
 // =============================================================================
@@ -266,14 +266,21 @@ import {
   SessionNotFoundError,
 } from "@viberevert/core";
 import { GitNotAvailableError } from "@viberevert/git";
-import { type ReceiptRenderInput, renderReceipt } from "@viberevert/reporters";
+import {
+  type ReceiptRenderInput,
+  renderReceipt,
+  renderSelectiveReceipt,
+  type SelectiveReceiptRenderInput,
+} from "@viberevert/reporters";
 import {
   type RiskLevel,
   RiskLevelSchema,
   ROLLBACK_OUT_OF_SCOPE_NOTICE,
+  type SelectiveRollbackReceipt,
 } from "@viberevert/session-format";
 import { Command, Option } from "clipanion";
 
+import type { BoundSelectionInvalidReason } from "../bound-selective-restore.js";
 import { CollisionExitSentinel } from "../checkpoint-helpers.js";
 import { RollbackEmergencyCheckpointError } from "../emergency-checkpoint.js";
 import { ConcurrentOperationError, type LockInfo } from "../locks.js";
@@ -303,6 +310,8 @@ import {
   resolveProductVersionForReport,
 } from "../runtime-env.js";
 import type { SelectionSelectors } from "../selection-resolver.js";
+import type { SelectiveApplyOutcome } from "../selective-apply-result.js";
+import type { VerifyCommandsResult } from "../verify-commands.js";
 
 // =============================================================================
 // Constants
@@ -394,6 +403,180 @@ function describeSelectiveHistoryRefusal(
       );
     default: {
       const unhandled: never = refusal;
+      return unhandled;
+    }
+  }
+}
+
+/** Cleanup warnings are advisory: they never change the exit status. */
+function writeCleanupWarnings(
+  stderr: { write(s: string): unknown },
+  warnings: readonly string[],
+): void {
+  for (const warning of warnings) {
+    stderr.write(`  cleanup: ${warning}\n`);
+  }
+}
+
+const messageOf = (cause: unknown): string =>
+  cause instanceof Error ? cause.message : String(cause);
+
+/**
+ * Why the selectors could not be resolved.
+ *
+ * Exhaustive over the resolver's reasons plus the one the composer owns. Each
+ * says what to do next, because every member here is a user-fixable condition
+ * rather than a repository fault.
+ */
+function describeSelectionInvalid(reason: BoundSelectionInvalidReason): string {
+  switch (reason.code) {
+    case "CONTRIBUTION_REQUIRED":
+      return (
+        "This session has no durable contribution, so there is nothing to select from.\n" +
+        "Only sessions ended by VibeRevert 0.8.0 or later record one; an earlier session's\n" +
+        "after-state is physically gone and cannot be reconstructed.\n" +
+        "Whole-session rollback still works: re-run without any selector.\n"
+      );
+    case "REPORT_REQUIRED":
+      return (
+        "--risk and --finding are resolved against a session report, and none was supplied.\n" +
+        "Run `viberevert check --since <session>` first, then re-run this rollback.\n"
+      );
+    case "FINDING_NOT_FOUND":
+      return (
+        `No finding in this session's report has the id ${JSON.stringify(reason.selector)}.\n` +
+        "List the available ids with `viberevert check --since <session> --json`.\n"
+      );
+    case "FINDING_PREFIX_AMBIGUOUS":
+      return (
+        `The finding id ${JSON.stringify(reason.selector)} matches more than one finding:\n` +
+        `${reason.matches.map((id) => `  ${id}\n`).join("")}` +
+        "Supply the full id.\n"
+      );
+    case "FINDING_HAS_NO_RESTORABLE_PATH":
+      return (
+        `Finding ${reason.findingId} names no changed file, so it selects nothing to restore.\n` +
+        "Advisory findings, such as a suggestion to add a test, have no path to roll back.\n"
+      );
+    case "STALE_OR_MISSING_REPORT":
+      return (
+        `The report cannot be used for this session: ${reason.detail}\n` +
+        "Re-run `viberevert check --since <session>` to produce one bound to the current\n" +
+        "contribution, then re-run this rollback.\n"
+      );
+    default: {
+      const unhandled: never = reason;
+      return unhandled;
+    }
+  }
+}
+
+/**
+ * Why the preview produced no receipt.
+ *
+ * The three phases are different facts and get different copy. Only `preview`
+ * means the classification never completed; the other two mean the answer
+ * exists and could not be recorded, which is a strictly smaller problem.
+ */
+function describePreviewFailure(
+  phase: "preview" | "map_receipt" | "write_receipt",
+  cause: unknown,
+): string {
+  const detail = messageOf(cause);
+  switch (phase) {
+    case "preview":
+      return (
+        `The selective preview could not classify this session's selected paths: ${detail}\n` +
+        "Nothing was mutated. The session checkpoint is materialized in a scratch worktree\n" +
+        "to answer this, so a failure here usually means that checkpoint is unreadable.\n"
+      );
+    case "map_receipt":
+      return (
+        `The preview completed, but its result cannot be expressed as a receipt: ${detail}\n` +
+        "Nothing was mutated. This is a defect rather than a repository problem; the\n" +
+        "message above states which invariant the result violated.\n"
+      );
+    case "write_receipt":
+      return (
+        `The preview completed, but its receipt could not be written: ${detail}\n` +
+        "Nothing was mutated. Fix the underlying filesystem problem and re-run.\n"
+      );
+    default: {
+      const unhandled: never = phase;
+      return unhandled;
+    }
+  }
+}
+
+/**
+ * An apply that produced no receipt.
+ *
+ * Exhaustive over every non-finalized arm, and the ordering principle is what
+ * the reader must DO. Arms that prove nothing was authorized say so plainly;
+ * arms that cannot prove it say that instead and surface the recovery handle.
+ * Collapsing the two would either strand a user beside a half-restored tree or
+ * send them recovering from a rollback that never began.
+ */
+function describeUnfinishedApply(outcome: SelectiveApplyOutcome<VerifyCommandsResult>): string {
+  const recoveryHint = (checkpointId: string): string =>
+    `The pre-rollback emergency checkpoint is ${checkpointId}.\n` +
+    `Restore from it BEFORE any further rollback, or the next apply layers on top of\n` +
+    `a tree whose state is not known.\n`;
+
+  switch (outcome.kind) {
+    case "not_attempted":
+      return outcome.stage === "before_recovery_checkpoint"
+        ? `The selective rollback stopped before it began, at the ${outcome.transaction.outcome} stage.\n` +
+            "No emergency checkpoint was created and nothing was mutated. Retry is safe.\n"
+        : `The selective rollback stopped after its emergency checkpoint was created but\n` +
+            `before any mutation was authorized (established by ${outcome.source}).\n` +
+            "Nothing was mutated. Retry is safe; the unused checkpoint " +
+            `${outcome.recovery.checkpointId} can be deleted.\n`;
+
+    case "recovery_checkpoint_unavailable":
+      return (
+        "The pre-rollback emergency checkpoint could not be created, so the rollback was\n" +
+        `not authorized to mutate anything (${outcome.recovery.status}).\n` +
+        "Nothing was mutated. Fix the underlying problem and retry.\n"
+      );
+
+    case "publication_indeterminate":
+      // The one arm where the tree may genuinely be half-restored.
+      return (
+        "The selective rollback may have started mutating and cannot prove whether it did.\n" +
+        `Inspecting its invocation directory was inconclusive: ${outcome.inspection.detail}\n` +
+        "Treat the working tree as untrusted.\n" +
+        recoveryHint(outcome.recovery.checkpointId)
+      );
+
+    case "finalization_failed":
+      return outcome.failure.phase === "map_receipt"
+        ? "The selective rollback ran, and its receipt could not be assembled:\n" +
+            `  ${messageOf(outcome.failure.cause)}\n` +
+            "No receipt exists, so the next apply will fail closed on the attempt marker.\n" +
+            recoveryHint(outcome.recovery.checkpointId)
+        : `The selective rollback ran, and its receipt could not be published ` +
+            `(${outcome.failure.reason}):\n` +
+            `  ${messageOf(outcome.failure.cause)}\n` +
+            "No receipt exists, so the next apply will fail closed on the attempt marker.\n" +
+            recoveryHint(outcome.recovery.checkpointId);
+
+    case "internal_mapping_failure":
+      return (
+        `The rollback reached a state its own bookkeeping cannot describe: ${outcome.detail}\n` +
+        "This is a defect. Whether the tree was mutated is unknown.\n" +
+        (outcome.recovery.status === "created"
+          ? recoveryHint(outcome.recovery.checkpointId)
+          : `No emergency checkpoint was recorded (${outcome.recovery.status}).\n`)
+      );
+
+    case "finalized":
+      // Handled by the caller, which has the receipt to render. Reached only
+      // if that branch is ever removed, and saying so beats a blank line.
+      return "The selective rollback finalized, but its receipt was not rendered.\n";
+
+    default: {
+      const unhandled: never = outcome;
       return unhandled;
     }
   }
@@ -661,7 +844,7 @@ ${ROLLBACK_OUT_OF_SCOPE_NOTICE}
     // full id the attempt marker must persist needs the resolver to report
     // which id it matched. Until it does, a prefix is refused here rather
     // than persisted as itself, which would make the marker unreadable after
-    // a crash — the one thing that artifact exists to survive.
+    // a crash, which is the one thing that artifact exists to survive.
     const badFinding = this.finding.find((value) => !/^fnd_[0-9a-f]{64}$/.test(value));
     if (badFinding !== undefined) {
       this.context.stderr.write(
@@ -846,7 +1029,7 @@ ${ROLLBACK_OUT_OF_SCOPE_NOTICE}
       }
 
       case "selective":
-        return this.renderSelective(outcome.outcome);
+        return this.renderSelective(outcome.outcome, context);
 
       default: {
         const unhandled: never = outcome;
@@ -858,23 +1041,29 @@ ${ROLLBACK_OUT_OF_SCOPE_NOTICE}
   /**
    * Render a selective outcome.
    *
-   * Deliberately plain: the receipt is the artifact of record, and a formatted
-   * per-path presentation belongs with the rest of the reporting work. What is
-   * NOT deferred is the exit status, which every arm decides explicitly.
+   * Follows the split the legacy path already established and the
+   * `dirty-refuse-fresh-session` golden asserts: an outcome that produced a
+   * RECEIPT goes to stdout through the requested format renderer, and an
+   * outcome that produced none is plain diagnostic text on stderr with stdout
+   * left empty. Format flags describe how to render an artifact; they do not
+   * turn a refusal into one.
+   *
+   * Exhaustive, with a `never` binding, because several arms exist to say the
+   * result could not be determined. Rendering one of those as a bare kind name
+   * would leave a user who may have a half-restored tree with no instruction.
    */
-  private renderSelective(outcome: SelectiveRollbackOutcome): number {
-    const { stderr, stdout } = this.context;
-    const emit = (receipt: unknown): void => {
-      stdout.write(`${JSON.stringify(receipt, null, 2)}\n`);
-    };
+  private renderSelective(
+    outcome: SelectiveRollbackOutcome,
+    context: {
+      readonly format: "terminal" | "markdown" | "json";
+      readonly productVersion: string;
+    },
+  ): number {
+    const { stderr } = this.context;
 
     switch (outcome.kind) {
       case "selection_invalid":
-        stderr.write(
-          `The selection could not be resolved: ${outcome.reason.code}${
-            "detail" in outcome.reason ? ` — ${outcome.reason.detail}` : ""
-          }${"selector" in outcome.reason ? ` (${outcome.reason.selector})` : ""}\n`,
-        );
+        stderr.write(describeSelectionInvalid(outcome.reason));
         return 1;
 
       case "selection_empty":
@@ -887,17 +1076,13 @@ ${ROLLBACK_OUT_OF_SCOPE_NOTICE}
         return 1;
 
       case "preview_failed":
-        stderr.write(
-          `The selective preview failed at the ${outcome.phase} stage: ${
-            outcome.cause instanceof Error ? outcome.cause.message : String(outcome.cause)
-          }\n`,
-        );
-        for (const warning of outcome.cleanupWarnings) stderr.write(`  cleanup: ${warning}\n`);
+        stderr.write(describePreviewFailure(outcome.phase, outcome.cause));
+        writeCleanupWarnings(stderr, outcome.cleanupWarnings);
         return 1;
 
       case "previewed":
-        emit(outcome.receipt);
-        for (const warning of outcome.cleanupWarnings) stderr.write(`  cleanup: ${warning}\n`);
+        this.emitSelectiveReceipt(outcome.receipt, context);
+        writeCleanupWarnings(stderr, outcome.cleanupWarnings);
         // Informational, exactly as the legacy dry run is: an ineligible
         // preview is a finding to read, not a command failure.
         return 0;
@@ -905,20 +1090,21 @@ ${ROLLBACK_OUT_OF_SCOPE_NOTICE}
       case "applied": {
         const applied = outcome.outcome;
         if (applied.kind === "finalized") {
-          emit(applied.receipt);
+          this.emitSelectiveReceipt(applied.receipt, context);
+          if (applied.how === "already_identical") {
+            stderr.write(
+              "This exact receipt was already published for this invocation; it was not rewritten.\n",
+            );
+          }
           // Success is the CONJUNCTION, not either half. A finalized receipt
           // recording a failed restore is a successfully recorded failure.
+          // The `mode` narrowing is what the compiler requires to reach
+          // `outcome`, and finalization only ever maps an apply receipt.
           return applied.receipt.mode === "apply" && applied.receipt.outcome === "succeeded"
             ? 0
             : 1;
         }
-        stderr.write(`The selective rollback did not complete: ${applied.kind}\n`);
-        if ("recovery" in applied && applied.recovery.status === "created") {
-          stderr.write(
-            `The pre-rollback emergency checkpoint is ${applied.recovery.checkpointId}. ` +
-              `Restore from it before retrying.\n`,
-          );
-        }
+        stderr.write(describeUnfinishedApply(applied));
         return 1;
       }
 
@@ -926,6 +1112,31 @@ ${ROLLBACK_OUT_OF_SCOPE_NOTICE}
         const unhandled: never = outcome;
         return unhandled;
       }
+    }
+  }
+
+  /** One receipt, in the requested format, on stdout. */
+  private emitSelectiveReceipt(
+    receipt: SelectiveRollbackReceipt,
+    context: {
+      readonly format: "terminal" | "markdown" | "json";
+      readonly productVersion: string;
+    },
+  ): void {
+    const input: SelectiveReceiptRenderInput = {
+      file: receipt,
+      productVersion: context.productVersion,
+    };
+    // The JSON renderer returns the schema-verbatim value and the CLI
+    // serializes it, so stdout is byte-identical to the persisted artifact.
+    if (context.format === "json") {
+      this.context.stdout.write(
+        `${JSON.stringify(renderSelectiveReceipt(input, "json"), null, 2)}\n`,
+      );
+    } else if (context.format === "markdown") {
+      this.context.stdout.write(renderSelectiveReceipt(input, "markdown"));
+    } else {
+      this.context.stdout.write(renderSelectiveReceipt(input, "terminal"));
     }
   }
 }
