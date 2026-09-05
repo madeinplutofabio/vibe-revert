@@ -49,11 +49,12 @@ acyclic, and `mcp` intentionally does not depend on the binary.
   chosen profile, creates the local `.viberevert/` store, and adds it to
   `.gitignore`.
 - **Session lifecycle (`start` / `run` / `end`).** `start` captures a
-  pre-session checkpoint (`git`) and writes the active-session lock; `run`
-  evaluates the command guard, starts a session, spawns your command as a child
-  process, and ends the session when it exits; `end` records post-session git
-  status and releases the lock. See the [run contract](run-contract.md) and
-  [shell contract](shell-contract.md).
+  pre-session checkpoint (`git`), records the resolved evaluation snapshot, and
+  writes the active-session lock; `run` evaluates the command guard, starts a
+  session, spawns your command as a child process, and ends the session when it
+  exits; `end` captures the session's contribution under a lock, records
+  post-session git status, and releases the lock. See the
+  [run contract](run-contract.md) and [shell contract](shell-contract.md).
 - **`check`** resolves the base to compare against, diffs it (`git`), runs the
   checks engine (`checks`), clusters and sorts the findings, renders them
   (`reporters`), persists the report, and sets the exit code — `2` when a finding
@@ -61,7 +62,13 @@ acyclic, and `mcp` intentionally does not depend on the binary.
 - **`rollback`** runs under a lock: it loads the session's checkpoint, runs the
   refusal checks, writes a mandatory emergency checkpoint before any mutation,
   restores the working tree (`git`), and writes a receipt — a dry-run preview by
-  default. See the [rollback contract](rollback-contract.md) and
+  default. Supplying any selector routes it to the selective engine instead,
+  which resolves the selection against the session's contribution, publishes a
+  pre-mutation attempt marker, transplants only the selected change groups, and
+  verifies both the selected and the unselected paths on either side of the
+  project's own verification commands. Argument validation and rendering sit
+  outside the lock; everything that reads rollback state or mutates runs inside
+  it. See the [rollback contract](rollback-contract.md) and
   [rollback limitations](rollback-limitations.md).
 - **`mcp serve`** binds one repository at boot from the current directory, opens
   an append-only audit log, and serves its tools over stdio. See the

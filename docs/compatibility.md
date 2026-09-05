@@ -60,10 +60,14 @@ them against those versions (see [Session format](session-format.md)).
 
 An incompatible format change requires updated schemas and documented migration
 guidance. Schema versions do not advance merely because the package version
-changes.
+changes. Per-release guidance, including which capabilities an older session
+does and does not gain after an upgrade, is in
+[MIGRATIONS.md](../MIGRATIONS.md).
 
 An older VibeRevert release is not guaranteed to read artifacts written by a
-newer release.
+newer release. These schemas reject unknown fields rather than ignoring them, so
+downgrading across a format addition fails loudly at parse time rather than
+silently discarding data.
 
 ## Experimental features
 

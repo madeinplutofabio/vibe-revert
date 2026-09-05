@@ -17,15 +17,21 @@ behavior. `viberevert init` adds `.viberevert/` to your `.gitignore`.
 │   ├── after-status.txt                    # git status at end (audit)
 │   ├── after-status.z                      # git status at end, machine form
 │   ├── commands.log                        # one line per guarded command
+│   ├── contribution.json                   # what the session changed
 │   ├── checkpoint/                         # the pre-session checkpoint
 │   │   ├── manifest.json
 │   │   └── rollback/…                      # patches + tarballs (see below)
 │   ├── report.json                         # check report for this session
-│   ├── rollback-dry-run-receipt.json
-│   └── rollback-receipt.json
+│   ├── rollback-dry-run-receipt.json       # whole-session preview
+│   ├── rollback-receipt.json               # whole-session apply
+│   ├── selective-rollback-dry-run-receipt.json   # selective preview
+│   └── rollbacks/<rb_ULID>/                # one selective apply invocation
+│       ├── attempt.json                    # pre-mutation marker
+│       └── receipt.json                    # completed result
 ├── checkpoints/<checkpoint-id>/            # standalone checkpoints
 │   ├── manifest.json
 │   └── rollback/…
+├── objects/                                # content-addressed contribution objects
 └── reports/<report-id>/report.json         # ad-hoc (non-session) reports
 ```
 
@@ -34,7 +40,7 @@ session directory may contain only a subset.
 
 ## Persisted formats (the versioned surface)
 
-Five kinds of file are JSON validated by a strict schema in
+Eight kinds of file are JSON validated by a strict schema in
 `@viberevert/session-format` — unknown fields are rejected, not ignored. These
 are the schema-validated on-disk formats governed by VibeRevert's format-version
 and migration discipline:
@@ -46,12 +52,49 @@ and migration discipline:
 | Checkpoint manifest | `…/manifest.json` | `Manifest` |
 | Check report | `…/report.json` | `ReportFile` (wraps a `SessionReport`) |
 | Rollback receipt | `…/rollback-receipt.json`, `…/rollback-dry-run-receipt.json` | `ReceiptFile` |
+| Session contribution | `…/contribution.json` | `SessionContributionFile` |
+| Rollback attempt marker | `…/rollbacks/<rb_ULID>/attempt.json` | `RollbackAttempt` |
+| Selective rollback receipt | `…/rollbacks/<rb_ULID>/receipt.json`, `…/selective-rollback-dry-run-receipt.json` | `SelectiveRollbackReceipt` |
 
 Some structures are **nested inside** those files and never written on their
 own: a `ReportFile` contains a `SessionReport`, which contains `ChangedFile` and
 `CheckResult` entries, each `CheckResult` containing `Evidence`; a `ReceiptFile`
-contains `RollbackFileResult` and `RollbackFailure` entries. The rollback receipt
-is documented in full by the [rollback contract](rollback-contract.md).
+contains `RollbackFileResult` and `RollbackFailure` entries; a
+`SessionContributionFile` contains `SessionContributionEntry` entries, each
+holding two `PathState` values and a `ContentDelta`; `SessionState` embeds an
+`EvaluationSnapshot`. Both rollback receipts are documented in full by the
+[rollback contract](rollback-contract.md).
+
+### The three 0.8.0 artifacts
+
+**`contribution.json`** is the durable record of what a session changed, written
+by `viberevert end`. It carries the session and checkpoint ids, the HEAD SHAs
+either side of the session, and one entry per changed path: the path and any
+previous path, the operation, its change-group id, the complete `PathState`
+before and after, and the content delta. `PathState` has two independent axes,
+worktree and index, because one `kind` cannot express an unstaged deletion or a
+staged deletion with a worktree file present.
+
+`session.json` records `contribution_path` and `contribution_sha256` over the
+exact persisted bytes. Every consumer walks that chain before acting, and the
+digest is taken over the raw bytes before parsing, never over a
+re-serialization.
+
+**`attempt.json`** is the pre-mutation crash-recovery marker for one selective
+apply. Its presence without a sibling `receipt.json` means mutation may have
+started and did not finalize.
+
+**The selective receipt** records which change groups were selected, what each
+selected path did, and what the two integrity passes and the project's own
+verification commands found.
+
+**A note on `contribution_sha256` across platforms.** The digest is not stable
+between operating systems, by design. A regular file's executable bit is a real
+boolean on POSIX and unreportable on Windows, where the capture records `null`
+for unknown. Two captures of identical content on different platforms therefore
+produce different contribution bytes and different digests. This is the artifact
+being truthful about what it could observe; do not treat the digest as a
+content-identity across machines.
 
 Machine-readable JSON Schema exports are provided from `@viberevert/session-format`
 for structural validation and tooling. They do not encode every runtime rule,

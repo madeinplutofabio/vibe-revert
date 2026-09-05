@@ -69,7 +69,7 @@ prefix of the invocation (`rm -rf /` matches `rm -rf / --no-preserve-root` but n
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `rollback.exclude` | list of strings | `[]` (nothing excluded) | Glob patterns excluded from checkpoint capture and rollback scope. |
+| `rollback.exclude` | list of strings | `[]` (nothing excluded) | Glob patterns excluded from checkpoint capture and rollback scope, on the **untracked surface only**. A tracked path matching a pattern is still captured and still restored. Selective rollback reads this from the session-start snapshot, not live config. |
 | `rollback.enabled` | boolean | — | Reserved: parsed and validated but does not currently alter command behavior. |
 | `rollback.include_untracked` | boolean | — | Reserved: parsed and validated but does not currently alter command behavior. |
 
@@ -77,8 +77,24 @@ prefix of the invocation (`rm -rf /` matches `rm -rf / --no-preserve-root` but n
 
 Verification commands are a separate policy domain from `commands.guard` and
 `commands.require_confirm`. Those govern what an *agent* invocation is allowed
-to execute; `verify.commands` describes project checks reserved for recovery
-verification.
+to execute; `verify.commands` describes project checks VibeRevert runs to
+verify a recovery.
+
+**Where these execute, exactly.** They run in one place and one place only: a
+**selective rollback apply**, meaning `viberevert rollback <session> <selector>
+--apply`. Within that invocation they run after the transplant completes and
+only if it verified clean, and a second integrity comparison runs afterwards to
+detect a command that mutated the project it was asked to check.
+
+They do NOT execute on any other path. Whole-session rollback (no selector)
+never runs them, in either mode. A selective **dry run** never runs them. Nor
+does `check`, `end`, `run`, or `shell`.
+
+**The values used are the session's, not today's.** Selective rollback reads
+`verify.commands` from the evaluation snapshot captured when `viberevert start`
+ran, never from live config. `.viberevert.yml` is a file an agent can rewrite
+during its own session, so trusting live config would let an agent choose the
+command that executes at the moment a human tries to recover.
 
 Each entry uses an argv-structured command object rather than a single shell
 command string: `command` identifies the executable and `args` contains its
@@ -101,7 +117,7 @@ the order written, and duplicates are permitted.
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `verify.commands` | list of command objects | `[]` (no verification commands) | Ordered verification commands. Each entry is an object with a non-blank `command` and a required `args` list of strings. Reserved in this beta: parsed and validated, but not executed yet. |
+| `verify.commands` | list of command objects | `[]` (no verification commands) | Ordered verification commands. Each entry is an object with a non-blank `command` and a required `args` list of strings. Executed by a selective rollback apply only, from the session-start snapshot; see above. Run in order, stopping at the first that does not pass. |
 
 ### Project metadata
 

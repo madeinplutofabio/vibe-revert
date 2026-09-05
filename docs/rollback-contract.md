@@ -2,7 +2,24 @@
 
 Canonical contract surface for `viberevert rollback`. Read this before automating rollback in CI, in pre-commit / post-failure hooks, or wrapping it in higher-level tooling.
 
-This document is the source of truth for M D's locked behavior. The CLI's `--help`, the receipt renderer's text, and integration code should all match what's described here. When in doubt, this file wins.
+This document is the source of truth for the command's locked behavior. The CLI's `--help`, the receipt renderer's text, and integration code should all match what's described here. When in doubt, this file wins.
+
+---
+
+## Two engines behind one command
+
+`viberevert rollback` drives two different engines, and which one runs is decided entirely by whether you supplied a selector.
+
+| | No selector | Any selector |
+|---|---|---|
+| Engine | whole-session restore (M D) | selective restore (0.8.0) |
+| Restores | everything the checkpoint captured | only the selected change groups |
+| Evidence it needs | the session's checkpoint | the checkpoint **and** the session's durable contribution |
+| Receipt schema | `ReceiptFile` | `SelectiveRollbackReceipt` |
+
+Supplying **any** selector, including `--except` on its own, is what enters selective mode. Everything in this document that predates the "Selective rollback" section describes the whole-session engine and is unchanged.
+
+Sessions ended before 0.8.0 have no contribution, so selective mode refuses on them. Whole-session rollback keeps working for those sessions exactly as before.
 
 ---
 
@@ -14,15 +31,23 @@ viberevert rollback <session-id> --apply               # mutate the working tree
 viberevert rollback <session-id> --apply --force       # bypass dirty-tree / HEAD-mismatch / legacy-session safety preconditions
 viberevert rollback <session-id> --json                # JSON output (mutually exclusive with --markdown)
 viberevert rollback <session-id> --markdown            # CommonMark output (mutually exclusive with --json)
+
+# Selective mode: any one of these enters it
+viberevert rollback <session-id> --only 'payments/**'
+viberevert rollback <session-id> --except 'tests/**'
+viberevert rollback <session-id> --risk high
+viberevert rollback <session-id> --finding fnd_<64 hex>
 ```
 
 `<session-id>` MUST match `^sess_[0-9A-HJKMNP-TV-Z]{26}$` (Crockford ULID with the `sess_` prefix).
 
 **Mutual exclusion**: `--json` and `--markdown` together → exit 1. `--force` without `--apply` → exit 1 (dry-run never needs `--force`; allowing it would create ambiguity about whether `forced: true` in a dry-run receipt means anything).
 
+**Selector validation is pre-lock**, alongside the session-id check: `--risk` must be one of `low`, `medium`, `high`, `critical`, and `--finding` must be a full `fnd_<64 lowercase hex>` id. Both refuse with exit 1 before any rollback state is read.
+
 ---
 
-## What rollback does
+## What whole-session rollback does
 
 Restores the working tree to the state captured by the session's pre-session checkpoint (the checkpoint created automatically when `viberevert start` ran). Specifically:
 
@@ -163,6 +188,124 @@ The new checkpoint id is recorded in the receipt as `pre_rollback_checkpoint_id`
 The emergency checkpoint uses the CURRENT resolved config's `rollback.exclude` patterns — same as normal checkpoint capture. It does NOT silently widen capture scope.
 
 **If the emergency checkpoint fails to create, rollback aborts before any restore mutation.** We never mutate without a recoverable pre-state snapshot.
+
+---
+
+## Selective rollback
+
+Added in 0.8.0. Restores only the change groups the selectors resolve to, and leaves every other managed path provably untouched.
+
+### Selectors
+
+| Selector | Repeatable | Matches against |
+|---|---|---|
+| `--only <glob>` | yes, union | every alias in a change group, including a rename's previous path |
+| `--except <glob>` | yes, union, subtracted last | same alias set |
+| `--risk <level>` | no, single threshold | change groups a finding at or above that level touches |
+| `--finding <id>` | yes, union | the change groups a finding's `affected_paths` belong to |
+
+Resolution order and combination rules:
+
+- The initial universe is every change group in the contribution.
+- Positive families (`--only`, `--risk`, `--finding`) **intersect**. `--only 'payments/**' --risk critical` means critical changes inside `payments/`, never payments plus unrelated critical files.
+- A supplied positive family participates even when it resolves to nothing, so `--only 'does/not/exist/**' --risk critical` is empty rather than the critical groups.
+- `--except` is subtracted last.
+- **Exclusion is group-atomic.** Excluding any path in a rename or type group excludes the whole group.
+- `--risk` is an at-or-above threshold over `low < medium < high < critical`. `--risk high` covers high and critical. A change group no finding touches has no risk and is not selected at any threshold, so `--risk low` does not mean "everything".
+
+`--risk` and `--finding` read a session report, so they additionally require `viberevert check --since <session>` to have been run and its `source_contribution_sha256` to match the session's current contribution. A stale or missing report refuses rather than resolving to nothing.
+
+### Eligibility is all-or-nothing
+
+If any selected path fails preflight, no mutation begins. Selected units are never intentionally skipped. Dry-run classifies each selected path as one of:
+
+- `restored`: would be restored
+- `already_at_before`: already at its pre-session state; a repeat restore is a no-op, not drift
+- `modified_since`: changed since the session ended; refuses
+- `unsupported_state`: outside the representable domain
+- `missing_evidence`: the checkpoint cannot reconstruct this path's asserted before-state
+
+The receipt's `eligibility` is `eligible`, `ineligible`, or `empty_selection`.
+
+### Receipts
+
+Selective mode writes a different artifact from whole-session mode, at a different path.
+
+```
+# dry run, one per session, regenerable, overwritten freely
+.viberevert/sessions/<session-id>/selective-rollback-dry-run-receipt.json
+
+# apply, one per invocation, immutable
+.viberevert/sessions/<session-id>/rollbacks/<rb_ULID>/receipt.json
+```
+
+The preview receipt deliberately lives OUTSIDE `rollbacks/`. A receipt sitting in an invocation directory with no sibling attempt marker is what the history scan treats as inconsistent, and that fails closed. A preview mutates nothing and must never block a later apply.
+
+**An empty selection still writes a dry-run receipt**, with `eligibility: "empty_selection"` and empty results. Under `--apply` an empty selection refuses instead, with no marker and no receipt: there is nothing to authorize, and the attempt marker cannot express a selection resolving to no change group.
+
+### The attempt marker and the crash gap
+
+Before the first worktree or index mutation, a selective apply publishes an immutable marker at:
+
+```
+.viberevert/sessions/<session-id>/rollbacks/<rb_ULID>/attempt.json
+```
+
+It records `rollback_id`, `session_id`, `contribution_sha256`, the resolved selection, `pre_rollback_checkpoint_id`, and `state: "mutation_may_have_started"`. Only once it exists may the repository be mutated.
+
+The pair is the state machine:
+
+| On disk | Means |
+|---|---|
+| neither file | nothing was ever authorized to mutate |
+| marker only | mutation MAY have started and did not finalize |
+| marker plus receipt | the invocation completed and the receipt says how |
+
+A marker without its receipt fails every later apply closed and directs recovery through the recorded emergency checkpoint. This is deliberately conservative even when the process died between writing the marker and touching the first file: a false "you may need to recover" is cheap, a false "nothing happened" is not.
+
+### How the two engines interact
+
+Scanned under the rollback lock, before anything is created:
+
+| Prior state | Next operation | Outcome |
+|---|---|---|
+| Selective apply succeeded | Another selective apply | **Allowed.** The drift gate and `already_at_before` account for the prior work. |
+| Selective apply did not finalize | Any apply | **Refused.** Recover from that invocation's emergency checkpoint first. |
+| Whole-session apply receipt exists | Selective apply | **Refused.** The tree is no longer trusted as post-session state. |
+| Selective apply succeeded | Whole-session apply | **Refused.** Use `--only '**'` to finish restoring the rest. |
+| Any state | Dry run | **Allowed**, and reports the history. |
+
+Once surgical recovery has begun, control never returns to the whole-checkpoint engine, which has no way to reason about a tree already modified by selective operations. The intended progression is:
+
+```sh
+viberevert rollback <session> --risk critical --apply
+viberevert rollback <session> --risk high --apply
+viberevert rollback <session> --only '**' --apply
+```
+
+### Verification
+
+Two integrity passes run around the project's own verification commands:
+
+1. After the transplant: every selected path matches the oracle, and every unselected managed path matches the pre-operation snapshot.
+2. After the commands: the same comparison again, **including HEAD**, because a configured command could run `git commit` and leave file bytes acceptable while history moved.
+
+`rollback.exclude` applies to the untracked surface only. A tracked path matching an exclude pattern is still captured, still selectable, still restored, and still verified. Selective mode reads the exclude list from the session-start snapshot, never from live config.
+
+### Refusals specific to selective mode
+
+Each exits 1 and writes nothing.
+
+| Refusal | When |
+|---|---|
+| No contribution | The session predates 0.8.0, or ended without one. Whole-session rollback still works. |
+| Report required | `--risk` or `--finding` supplied with no session report. |
+| Stale report | The report's `source_contribution_sha256` does not match this session's contribution. |
+| Finding not found / has no restorable path | The id resolves to nothing, or to an advisory finding that names no changed file. |
+| Empty selection under `--apply` | The selectors matched no change group. |
+| Prior apply incomplete | An invocation left a marker with no receipt. |
+| Selective already applied, then whole-session apply | See the interaction table above. |
+| History unreadable | The rollback history could not be established, so no apply can be authorized. |
 
 ---
 
@@ -314,7 +457,11 @@ This differs from `viberevert check` (which is lock-free — non-mutating + idem
 
 **Path-based, not content-based.** A session-touched file that's reverted to its pre-session content after `end` is still classified as session-related (path is in the target set). Content-level safety would require persisting per-file hashes alongside the after-status snapshot; deferred to a future enhancement.
 
-**Session-only target.** `viberevert rollback <session>` is the only invocation in M D. Checkpoint-direct rollback (`viberevert rollback --checkpoint <cp_id>`) is deferred to a future small enhancement — same precedent style as M C's `viberevert reports` listing deferral.
+**Session-only target.** `viberevert rollback <session>` is the only invocation. Checkpoint-direct rollback (`viberevert rollback --checkpoint <cp_id>`) is deferred to a future small enhancement, the same precedent style as M C's `viberevert reports` listing deferral.
+
+**`--finding` takes full ids only.** The selection semantics allow an unambiguous short prefix, but the attempt marker must persist the resolved full id, and the resolver does not yet report which id a prefix matched. A prefix is refused before the lock rather than persisted as itself, which would leave a marker unreadable after a crash. Full ids are printed by `viberevert check --since <session> --json`.
+
+**Selective mode requires a contribution.** Sessions ended before 0.8.0 have none and cannot be back-filled; their after-state is physically gone. See `MIGRATIONS.md`.
 
 **No automatic recovery from crashed sessions.** Sessions that crashed before `viberevert end` could capture the after-status snapshot require `--apply --force` to roll back. A future M B enhancement (e.g., `viberevert sessions --gc` or `--reconcile`) may close this loop by reconstructing the snapshot from current git state.
 

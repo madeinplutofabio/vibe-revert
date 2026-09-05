@@ -77,6 +77,36 @@ real. Confidence is independent of risk level: a finding can be `critical` risk 
 | `medium` | Moderate confidence in the finding. |
 | `high` | Higher confidence in the finding. |
 
+## Finding identity and affected paths
+
+Each finding in a session-bound report carries two fields that make it
+addressable by selective rollback.
+
+- **`finding_id`** is a full `fnd_<64 lowercase hex>` identifier derived from the
+  session id, the check id, and the finding's affected paths. It is assigned
+  after clustering, so it names the finding as persisted. `viberevert rollback
+  --finding <id>` takes this value; short prefixes are not accepted yet.
+- **`affected_paths`** is the complete set of canonical **changed-file** paths
+  the finding applies to. It is the machine-readable path set, distinct from the
+  human-facing `evidence`, which is capped for readability and can therefore be
+  incomplete.
+
+`affected_paths` holds changed-file identities only. It never contains advisory
+paths such as "a test should be created here", so an advisory-only finding has
+an empty `affected_paths` and is not selectable. `--finding` on one refuses
+rather than resolving to nothing.
+
+**Risk is aggregated per path before clustering**, over each finding's own
+complete `affected_paths` at that finding's own level. Doing it after clustering
+would let a cluster holding one critical file and one medium file promote the
+medium one, which would silently widen what `--risk` selects.
+
+**Renames keep their origin.** Classification evaluates every alias in a change
+group, including a path's previous name, so a file moved out of `payments/`
+retains the risk its old location gave it. The finding still records the
+current path as its changed-file identity: `affected_paths` names where the file
+is now, while the evidence records that the rule matched the previous path.
+
 ## Reserved categories
 
 Two groups of category names are **not** produced by any configurable check:

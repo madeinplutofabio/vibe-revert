@@ -66,6 +66,42 @@ Even within Case 1, a few properties shape the result:
   track empty directories. Your files and index still match the pre-session
   baseline; remove any leftover empty directories manually if desired.
 
+## Limitations specific to selective rollback
+
+Selective rollback (`--only`, `--except`, `--risk`, `--finding`) restores part of
+what a session changed. It carries the limits above and adds these.
+
+- **It needs the session's contribution.** Sessions ended before 0.8.0 do not
+  have one and cannot be back-filled; their after-state is gone. Selective mode
+  refuses on them, and whole-session rollback remains available. See
+  [MIGRATIONS.md](../MIGRATIONS.md).
+- **Nothing is restored unless everything selected can be.** If any selected path
+  is ineligible, no mutation begins at all. Selected units are never partly
+  applied or silently skipped.
+- **It refuses drift rather than merging it.** A selected path changed since the
+  session ended is `modified_since` and refuses. `--force` does not override it.
+  Reconciling a changed path against its pre-session state is a later feature,
+  not a suppressed check.
+- **Selection is group-atomic.** Renames and type changes move as a unit, so
+  excluding any path in such a group excludes the whole group. You cannot restore
+  one half of a rename.
+- **Some path states are recorded but never restored.** A gitlink or submodule is
+  recorded and left alone. An unmerged index entry is recorded and refuses. A
+  file-to-directory transition fails closed unless every descendant is in the
+  same selected group.
+- **Untracked non-regular entries from before the session are outside the
+  representable domain.** They were never captured in a machine-safe form, so
+  nothing can assert they existed.
+- **`--finding` takes full ids only.** Short prefixes are refused for now,
+  because the attempt marker must persist a resolved id. Full ids come from
+  `viberevert check --since <session> --json`.
+- **`--risk` and `--finding` need a current report.** They resolve against
+  `viberevert check --since <session>`, and a report bound to a different
+  contribution is refused rather than used.
+- **Verification commands run on a selective apply.** If the session configured
+  `verify.commands`, a selective apply executes them, using the values captured
+  at `viberevert start` rather than whatever is in the file now.
+
 ## Before you roll back
 
 1. Run the dry-run first (the default) to see exactly what would change.
