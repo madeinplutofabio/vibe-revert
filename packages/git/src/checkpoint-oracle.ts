@@ -65,7 +65,7 @@ import type { Manifest } from "@viberevert/session-format";
 
 import { loadCheckpoint } from "./checkpoint.js";
 import { runGit } from "./git-cli.js";
-import { restoreCheckpoint } from "./restore.js";
+import { materializeCheckpointIntoFreshWorktree } from "./restore.js";
 
 /** Basename of the linked worktree inside tempRoot. */
 const WORKTREE_DIR = "worktree";
@@ -190,7 +190,15 @@ export async function withCheckpointOracle<T>(
 
     // Overlay captured dirt using the CAPTURED exclude patterns (faithful
     // reproduction of capture state, NOT current config).
-    await restoreCheckpoint(checkpointDir, {
+    //
+    // The fresh-worktree variant, not `restoreCheckpoint`. The worktree above
+    // was just created clean at the captured HEAD with no untracked files, and
+    // that lets the reset and the delete sweep be skipped as provable no-ops
+    // and the unconditional rewrite of every captured path be replaced by
+    // restoring only the paths whose bytes actually differ. Preflight,
+    // archive validation, parity and full hash verification are identical.
+    // See its header for exactly what those starting conditions license.
+    await materializeCheckpointIntoFreshWorktree(checkpointDir, {
       repoRoot: worktreePath,
       rollbackExcludePatterns: manifest.untracked.exclude_patterns ?? [],
     });

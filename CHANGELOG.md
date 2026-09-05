@@ -73,15 +73,29 @@ and does not gain after upgrading.
   persisting incoherent evidence.
 - `viberevert end` is measurably slower on larger repositories, because it
   materializes the session-start checkpoint and inventories every present
-  tracked regular file. Measured on the reference machine at 3.3 s for 200
-  files and 19 s for 4000.
+  tracked regular file. Measured on the reference machine at 2.1 s for 200
+  files and 7.9 s for 4000.
 - Several per-file loops in restore and capture now use bounded concurrency
-  instead of awaiting one filesystem call at a time, which took 21 percent off
-  `end` at 4000 files. The same paths are reconstructed and verified; only the
-  number of requests in flight changed. This also speeds up whole-session
-  rollback, which shares the restore path.
-- The structural cost is NOT fixed: one changed path still causes a complete
-  checkout, rewrite and verification of every tracked file. See
+  instead of awaiting one filesystem call at a time. The same paths are
+  reconstructed and verified; only the number of requests in flight changed.
+  Results and failures stay ordered by input index, so an error naming a path
+  is reproducible, and a caller-injected object sink is still invoked one call
+  at a time. This also speeds up whole-session rollback, which shares the
+  restore path.
+- The end-of-session oracle no longer rewrites every tracked file. It hashes
+  them against the checkpoint and restores bytes only where they differ, which
+  is sound because that worktree was just checked out at the captured HEAD.
+  Verification is unchanged: the same preflight, the same archive validation,
+  the same dirty-set parity and the same full post-restore hash check. This
+  affects the internal oracle only; `viberevert rollback` against a live
+  repository takes the unchanged path.
+- Together the two changes took `end` at 4000 files from 24.3 s to 7.9 s, 67
+  percent. The largest single component was git's stat cache: rewriting every
+  tracked file invalidated it, so the parity check that followed re-read
+  everything to conclude nothing had changed. That step went from 8.5 s to
+  74 ms.
+- A reduced structural cost remains: one changed path still causes a complete
+  checkout and a hash of every tracked file. See
   [docs/performance.md](docs/performance.md) and
   [ADR 0008](docs/adr/0008-end-of-session-oracle-cost.md).
 

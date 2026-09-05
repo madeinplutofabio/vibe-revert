@@ -685,6 +685,33 @@ describe("source invariant", () => {
     }
   });
 
+  it("10b: the fresh-worktree materializer has exactly one caller and no public export", async () => {
+    // `materializeCheckpointIntoFreshWorktree` skips work that is only a
+    // provable no-op because `withCheckpointOracle` just created a clean
+    // worktree at the captured HEAD with no untracked files. Called against
+    // any other repository those skips are silently WRONG: the reset would
+    // have mattered, the delete sweep would have had files to remove, and the
+    // hash scan would compare against a tree nobody prepared.
+    //
+    // Nothing in the type system expresses "only valid on a worktree you just
+    // created", so the single-caller rule is the guarantee, and this test is
+    // what makes it a rule rather than a comment.
+    const src = new URL("../src/", import.meta.url);
+    const barrel = await readFile(new URL("index.ts", src), "utf8");
+    expect(barrel).not.toContain("materializeCheckpointIntoFreshWorktree");
+
+    const callers: string[] = [];
+    for (const name of (await readdir(src)).sort()) {
+      // The definition itself is not a call site.
+      if (!name.endsWith(".ts") || name === "restore.ts") continue;
+      const source = await readFile(new URL(name, src), "utf8");
+      if (source.includes("materializeCheckpointIntoFreshWorktree")) {
+        callers.push(name);
+      }
+    }
+    expect(callers).toEqual(["checkpoint-oracle.ts"]);
+  });
+
   it("11: the gate owns the accumulator, the ordering, and the catch scope", async () => {
     const source = await readFile(
       new URL("../src/selective-transplant-gate.ts", import.meta.url),

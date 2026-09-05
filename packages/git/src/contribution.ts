@@ -139,7 +139,7 @@ import {
 import picomatch from "picomatch";
 
 import { withCheckpointOracle } from "./checkpoint-oracle.js";
-import { mapWithConcurrency } from "./concurrency.js";
+import { mapWithConcurrency, serializeCalls } from "./concurrency.js";
 import {
   diffPreparedMirrors,
   type NameStatusEntry,
@@ -843,17 +843,39 @@ async function acquireLive(
   const inventory = new Map<string, string>();
 
   /**
+   * The injected sink, called ONE AT A TIME.
+   *
+   * The inventory scan below observes paths concurrently, but `sink` belongs to
+   * the caller, and every caller that existed before that change was entitled
+   * to assume sequential invocation, because that is how this function called
+   * it. Speeding up observation must not silently upgrade the contract to "your
+   * sink must be reentrant", which is a strictly stronger requirement nobody
+   * agreed to. The production sink writes content-addressed objects and would
+   * survive concurrency; that is not the point, since the contract is what
+   * other callers and tests rely on.
+   *
+   * Serializing costs almost nothing: the sink runs for CANDIDATES only, which
+   * is the set the session actually changed, while the expensive part being
+   * parallelized is observing and hashing every tracked file.
+   */
+  const serializedSink: ContributionObjectSink | null =
+    targets === null ? null : serializeCalls(targets.sink);
+
+  /**
    * Consume a candidate's payload. Storage takes every payload so the evidence
    * chain resolves; the mirror takes regular files only, because that is all
    * hunks can be derived from. Pass B passes no targets and does neither.
+   *
+   * The mirror write stays concurrent: it is this module's own scratch state,
+   * one distinct file per path, not an injected callback.
    */
   const consumePayload = async (
     path: string,
     state: PathState,
     object: { readonly digest: string; readonly data: Buffer } | undefined,
   ): Promise<void> => {
-    if (targets === null || object === undefined) return;
-    await targets.sink({ digest: object.digest, data: object.data });
+    if (targets === null || serializedSink === null || object === undefined) return;
+    await serializedSink({ digest: object.digest, data: object.data });
     if (state.worktree.kind === "regular") {
       await writeMirrorFile(targets.mirrorRoot, path, object.data);
     }

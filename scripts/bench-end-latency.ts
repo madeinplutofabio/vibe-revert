@@ -47,11 +47,12 @@
 //   pnpm tsx scripts/bench-end-latency.ts --sizes 200,1000 --runs 3
 
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { cpus, tmpdir, totalmem } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { removeAndVerify } from "./scratch-cleanup.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -158,35 +159,6 @@ async function measureSize(files: number, runs: number): Promise<SizeResult> {
     return { files, bytes, start: startTimes, end: endTimes };
   } finally {
     await removeAndVerify(parent);
-  }
-}
-
-/**
- * Delete a scratch root and PROVE it is gone.
- *
- * `rm -rf` is best-effort by design: `force` swallows the error that says the
- * directory is still there. On Windows a live handle from an indexer or a
- * scanner defeats the delete silently, and a run that leaves scratch git
- * worktrees behind is not a clean run. Leftovers accumulate into filesystem
- * permission failures in unrelated test fixtures later, which is a genuinely
- * expensive thing to debug from the far end.
- *
- * So the removal is verified rather than assumed, and a survivor is reported
- * loudly with its path. Reported rather than thrown: the measurement itself
- * already succeeded, and losing the numbers to a cleanup problem would be the
- * wrong trade.
- */
-export async function removeAndVerify(root: string): Promise<void> {
-  await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-  const survived = await stat(root).then(
-    () => true,
-    () => false,
-  );
-  if (survived) {
-    console.error(
-      `WARNING: scratch root survived cleanup and must be removed by hand: ${root}\n` +
-        "         Leftover scratch worktrees cause permission failures in later fixture runs.",
-    );
   }
 }
 

@@ -56,10 +56,21 @@ export const DEFAULT_FS_CONCURRENCY = 16;
 /**
  * Map `items` through `fn` with at most `limit` calls in flight.
  *
- * Results come back in INPUT ORDER. The first rejection propagates, matching
- * `Promise.all`; work already in flight is allowed to settle rather than being
- * cancelled, because these are filesystem operations with no cancellation
- * story and abandoning them mid-write would be worse than letting them finish.
+ * Results come back in INPUT ORDER.
+ *
+ * FAILURE IS DETERMINISTIC BY INPUT INDEX, which `Promise.all` does not give
+ * you: it rejects with whichever promise settles first, so the same broken
+ * repository could report a different path on each run purely because of
+ * scheduling. Here the lowest-index failure always wins, so an error message
+ * naming a path is reproducible.
+ *
+ * On the first failure, workers stop pulling NEW items and everything already
+ * in flight is allowed to settle. That is safe for the "lowest index" claim
+ * because items are dispatched in increasing index order: any index below the
+ * failing one has already been dispatched and will finish. It also matters
+ * that in-flight work is not abandoned, since these are filesystem operations
+ * with no cancellation story and stopping mid-write would be worse than
+ * finishing.
  */
 export async function mapWithConcurrency<T, R>(
   items: readonly T[],
@@ -72,18 +83,65 @@ export async function mapWithConcurrency<T, R>(
   const results = new Array<R>(items.length);
   let next = 0;
 
+  // COLLECTED, not tracked in a single mutable slot. A slot would let
+  // TypeScript narrow it from the loop guard and then read the narrowed type
+  // in the catch, which is unsound here anyway: another worker can assign
+  // between the two points. An array has no narrowing to get wrong.
+  const failures: { readonly index: number; readonly error: unknown }[] = [];
+
   const worker = async (): Promise<void> => {
     for (;;) {
+      if (failures.length > 0) return;
       const index = next;
       next += 1;
       if (index >= items.length) return;
-      // `items[index]` is in range by the guard above; the non-null assertion
-      // is avoided by reading through a local that TypeScript can narrow.
+      // In range by the guard above; read through a local so no non-null
+      // assertion is needed.
       const item = items[index] as T;
-      results[index] = await fn(item, index);
+      try {
+        results[index] = await fn(item, index);
+      } catch (error) {
+        failures.push({ index, error });
+        return;
+      }
     }
   };
 
   await Promise.all(Array.from({ length: effective }, worker));
+
+  const first = [...failures].sort((a, b) => a.index - b.index)[0];
+  if (first !== undefined) throw first.error;
   return results;
+}
+
+/**
+ * Serialize calls to one side-effecting function while its callers run
+ * concurrently.
+ *
+ * Exists for INJECTED callbacks. A caller that hands this package a sink was
+ * entitled to assume it would be invoked one call at a time, because that is
+ * how it was invoked before concurrency was introduced here. Speeding up
+ * observation must not silently widen that contract into "your sink must be
+ * reentrant", which is a different and much stronger requirement that no
+ * existing caller agreed to.
+ *
+ * Each call queues behind the previous one, and a rejection does not poison
+ * the queue for later callers: the failure surfaces to the caller that caused
+ * it, and the chain continues.
+ */
+export function serializeCalls<A extends readonly unknown[], R>(
+  fn: (...args: A) => Promise<R>,
+): (...args: A) => Promise<R> {
+  let tail: Promise<unknown> = Promise.resolve();
+  return (...args: A): Promise<R> => {
+    const run = tail.then(
+      () => fn(...args),
+      () => fn(...args),
+    );
+    tail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  };
 }

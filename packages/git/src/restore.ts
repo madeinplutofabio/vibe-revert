@@ -289,6 +289,7 @@ import {
 import { sha256File } from "./hashes.js";
 import { isVibeRevertInternalPath } from "./restore-internal-path-policy.js";
 import { loadRestorePreflight } from "./restore-preflight.js";
+import { createRestoreProfile } from "./restore-profile.js";
 
 // =============================================================================
 // Public API — restoreCheckpoint
@@ -390,11 +391,14 @@ export async function restoreCheckpoint(
   // Non-mutating trust validation phase (centralized in loadRestorePreflight)
   // ===========================================================================
 
-  const pre = await loadRestorePreflight(checkpointDir, {
-    repoRoot: opts.repoRoot,
-    rollbackExcludePatterns: opts.rollbackExcludePatterns,
-    includeArtifactBuffers: true,
-  });
+  const profile = createRestoreProfile();
+  const pre = await profile.phase("preflight+archives", () =>
+    loadRestorePreflight(checkpointDir, {
+      repoRoot: opts.repoRoot,
+      rollbackExcludePatterns: opts.rollbackExcludePatterns,
+      includeArtifactBuffers: true,
+    }),
+  );
 
   // HEAD must match unless explicitly overridden. Preflight returns
   // headMatch as INFO; this is where we convert to the typed throw per
@@ -424,7 +428,7 @@ export async function restoreCheckpoint(
   // Wipe tracked-side state to a clean HEAD. Discards ALL tracked changes
   // (staged AND unstaged) and clears the index. Does NOT touch untracked
   // files — those are handled separately below.
-  await gitResetHardHead(opts.repoRoot);
+  await profile.phase("reset --hard HEAD", () => gitResetHardHead(opts.repoRoot));
 
   // Replay the captured patches. Order matters:
   //   - staged.patch FIRST with --index: re-stages exactly what was staged
@@ -436,12 +440,14 @@ export async function restoreCheckpoint(
   //     now matches the captured working tree exactly.
   // Empty patch buffers are no-ops in git apply, so a clean-tracked-tree
   // checkpoint replays correctly without special-casing.
-  if (stagedPatch.length > 0) {
-    await gitApplyWithIndex(opts.repoRoot, stagedPatch);
-  }
-  if (unstagedPatch.length > 0) {
-    await gitApply(opts.repoRoot, unstagedPatch);
-  }
+  await profile.phase("patch replay", async () => {
+    if (stagedPatch.length > 0) {
+      await gitApplyWithIndex(opts.repoRoot, stagedPatch);
+    }
+    if (unstagedPatch.length > 0) {
+      await gitApply(opts.repoRoot, unstagedPatch);
+    }
+  });
 
   // Rewrite the EXACT captured bytes of every tracked-dirty regular file over
   // what reset+patch replay produced. git's clean/smudge (core.autocrlf)
@@ -450,10 +456,12 @@ export async function restoreCheckpoint(
   // `snapshots.file_hashes` and failing the verification below. This
   // content-only overwrite (index/mode/type stay git's) makes the working tree
   // match the captured bytes exactly. (rc-eol-autocrlf-tracked-restore)
-  await restoreTrackedDirtyContent(
-    trackedArchiveBuf,
-    Object.keys(pre.manifest.snapshots.file_hashes),
-    opts.repoRoot,
+  await profile.phase("tracked byte restore", () =>
+    restoreTrackedDirtyContent(
+      trackedArchiveBuf,
+      Object.keys(pre.manifest.snapshots.file_hashes),
+      opts.repoRoot,
+    ),
   );
 
   // Untracked side: the current working tree may have files created
@@ -467,7 +475,9 @@ export async function restoreCheckpoint(
   // checkpoint (created by the CLI immediately before this call) can
   // never be deleted by restore, regardless of `.gitignore` state.
   const expectedUntrackedPaths = [...expectedUntrackedSet];
-  await deleteUncapturedUntracked(opts.repoRoot, expectedUntrackedSet, isExcluded);
+  await profile.phase("untracked delete sweep", () =>
+    deleteUncapturedUntracked(opts.repoRoot, expectedUntrackedSet, isExcluded),
+  );
 
   // Extraction-path cleanup. AFTER the delete pass: some blockers that
   // looked unresolvable pre-mutation are now safely cleanable (e.g., a
@@ -486,10 +496,8 @@ export async function restoreCheckpoint(
   // should reject such paths from evidence, but a tripwire here makes
   // the impossible-condition visible at the throw point so the drift
   // surfaces rather than getting silently absorbed.
-  const conflicts = await clearExtractionPathConflicts(
-    opts.repoRoot,
-    expectedUntrackedPaths,
-    isExcluded,
+  const conflicts = await profile.phase("untracked conflict scan", () =>
+    clearExtractionPathConflicts(opts.repoRoot, expectedUntrackedPaths, isExcluded),
   );
   if (conflicts.length > 0) {
     throw new RestoreExtractionConflictError(conflicts);
@@ -508,9 +516,11 @@ export async function restoreCheckpoint(
   // verified that an empty archive matches empty file_hashes (set
   // parity), so skipping extraction is sound — the buffer is provably
   // empty by the time we get here when expectedUntrackedSet is empty.
-  if (expectedUntrackedSet.size > 0) {
-    await extractUntrackedTarball(untrackedArchiveBuf, opts.repoRoot);
-  }
+  await profile.phase("untracked extract", async () => {
+    if (expectedUntrackedSet.size > 0) {
+      await extractUntrackedTarball(untrackedArchiveBuf, opts.repoRoot);
+    }
+  });
 
   // ===========================================================================
   // Post-mutation verification (parity FIRST, hashes SECOND)
@@ -521,7 +531,9 @@ export async function restoreCheckpoint(
   // output against `manifest.snapshots.tracked_dirty_paths` VERBATIM.
   // No lstat narrowing, no regular-file filtering, no `rollback.exclude`
   // filtering — full set equality. Set-level signal precedes byte-level.
-  await verifyTrackedDirtyParity(opts.repoRoot, pre.manifest);
+  await profile.phase("tracked dirty parity", () =>
+    verifyTrackedDirtyParity(opts.repoRoot, pre.manifest),
+  );
 
   // Hash-verify every captured file. Both `manifest.snapshots.file_hashes`
   // (tracked-dirty regular-file subset) and `manifest.untracked.file_hashes`
@@ -529,8 +541,150 @@ export async function restoreCheckpoint(
   // Collected per-path mismatches are thrown as a single structured
   // error (matches RestoreVerificationError's contract).
   const mismatches: RestoreHashMismatch[] = [];
-  await collectHashMismatches(opts.repoRoot, pre.manifest.snapshots.file_hashes, mismatches);
-  await collectHashMismatches(opts.repoRoot, pre.manifest.untracked.file_hashes, mismatches);
+  await profile.phase("final hash verify", async () => {
+    await collectHashMismatches(opts.repoRoot, pre.manifest.snapshots.file_hashes, mismatches);
+    await collectHashMismatches(opts.repoRoot, pre.manifest.untracked.file_hashes, mismatches);
+  });
+  profile.report("restoreCheckpoint");
+  if (mismatches.length > 0) {
+    throw new RestoreVerificationError(mismatches);
+  }
+}
+
+// =============================================================================
+// Package-internal — materializeCheckpointIntoFreshWorktree
+// =============================================================================
+//
+// The oracle's restore. `withCheckpointOracle` is its ONLY caller, an
+// architectural invariant test enforces that, and it is deliberately absent
+// from `src/index.ts`.
+//
+// It exists because the oracle's starting conditions are strictly stronger
+// than a user-facing rollback's, and `restoreCheckpoint` cannot assume them.
+// `withCheckpointOracle` has just run `git worktree add --detach <capturedHead>`
+// into an empty scratch directory, so before this function runs:
+//
+//   the working tree is clean at the captured HEAD
+//   the index matches that HEAD
+//   there are no untracked files at all
+//
+// Three consequences, and NOTHING is skipped that those conditions do not
+// already guarantee:
+//
+//   `reset --hard HEAD` is a no-op. It resets to HEAD and the worktree was
+//       created at that same HEAD. Measured at 3.3 s on 4000 files, spent
+//       proving nothing.
+//   the uncaptured-untracked delete sweep has nothing to find, because a
+//       freshly created worktree has no untracked files.
+//   every tracked file already holds its HEAD bytes, so the unconditional
+//       rewrite of every captured path is mostly writing identical bytes.
+//
+// That last one is REPLACED, not dropped. The captured hashes are checked
+// first, and archived bytes are restored only for paths that actually differ.
+// Where git's checkout reproduces the captured bytes the mismatch set is
+// empty, so the archive is still validated by preflight but never expanded.
+// Where a filter did change the bytes, which is the `core.autocrlf` case the
+// unconditional rewrite existed for, those paths are restored exactly as
+// before.
+//
+// VERIFICATION IS UNCHANGED AND UNCONDITIONAL. The tracked-dirty parity check
+// and the full hash verification over both captured maps run exactly as they
+// do in `restoreCheckpoint`, and preflight is the same call with the same
+// arguments. This function reconstructs less; it never checks less.
+//
+// One property moved and is worth stating. A path missing from the tracked
+// archive used to fail while being copied out of staging. Now a path matching
+// its captured hash is never copied, so a gap in the archive surfaces at the
+// final hash verification instead. Detection is preserved; only its timing
+// changed.
+
+export interface FreshWorktreeMaterializeOptions {
+  /** The freshly created scratch worktree. Never the user's repository. */
+  readonly repoRoot: string;
+  /** CAPTURED patterns, matching how the checkpoint was taken. */
+  readonly rollbackExcludePatterns: readonly string[];
+}
+
+export async function materializeCheckpointIntoFreshWorktree(
+  checkpointDir: string,
+  opts: FreshWorktreeMaterializeOptions,
+): Promise<void> {
+  const profile = createRestoreProfile();
+
+  const pre = await profile.phase("preflight+archives", () =>
+    loadRestorePreflight(checkpointDir, {
+      repoRoot: opts.repoRoot,
+      rollbackExcludePatterns: opts.rollbackExcludePatterns,
+      includeArtifactBuffers: true,
+    }),
+  );
+
+  // The oracle worktree was created AT the captured HEAD, so a mismatch means
+  // the caller did not do that and every assumption above is void. There is no
+  // `allowHeadMismatch` here on purpose: an oracle built on a different HEAD
+  // would be evidence for the wrong tree.
+  if (!pre.headMatch) {
+    throw new RestoreHeadMismatchError(pre.manifest.git.head_sha, pre.actualHeadSha);
+  }
+  if (pre.excludeDrift !== null) {
+    throw new RestoreExcludeDriftError(pre.excludeDrift);
+  }
+
+  const { trackedArchiveBuf, untrackedArchiveBuf, stagedPatch, unstagedPatch } = pre.artifacts;
+
+  // No `reset --hard`: see the header.
+  await profile.phase("patch replay", async () => {
+    if (stagedPatch.length > 0) {
+      await gitApplyWithIndex(opts.repoRoot, stagedPatch);
+    }
+    if (unstagedPatch.length > 0) {
+      await gitApply(opts.repoRoot, unstagedPatch);
+    }
+  });
+
+  // Which captured paths does checkout plus patch replay NOT already
+  // reproduce? Usually none.
+  const drifted: RestoreHashMismatch[] = [];
+  await profile.phase("tracked hash scan", () =>
+    collectHashMismatches(opts.repoRoot, pre.manifest.snapshots.file_hashes, drifted),
+  );
+
+  await profile.phase("tracked byte restore", async () => {
+    if (drifted.length === 0) return;
+    await restoreTrackedDirtyContent(
+      trackedArchiveBuf,
+      drifted.map((m) => m.path),
+      opts.repoRoot,
+    );
+  });
+
+  // No uncaptured-untracked delete sweep: see the header. The extraction
+  // conflict scan is NOT the same thing and stays, because a captured
+  // untracked path can still collide with a file checked out at HEAD.
+  const expectedUntrackedPaths = [...pre.expectedUntrackedSet];
+  const conflicts = await profile.phase("untracked conflict scan", () =>
+    clearExtractionPathConflicts(opts.repoRoot, expectedUntrackedPaths, pre.isExcluded),
+  );
+  if (conflicts.length > 0) {
+    throw new RestoreExtractionConflictError(conflicts);
+  }
+  await profile.phase("untracked extract", async () => {
+    if (pre.expectedUntrackedSet.size > 0) {
+      await extractUntrackedTarball(untrackedArchiveBuf, opts.repoRoot);
+    }
+  });
+
+  // Verification, identical to `restoreCheckpoint`.
+  await profile.phase("tracked dirty parity", () =>
+    verifyTrackedDirtyParity(opts.repoRoot, pre.manifest),
+  );
+
+  const mismatches: RestoreHashMismatch[] = [];
+  await profile.phase("final hash verify", async () => {
+    await collectHashMismatches(opts.repoRoot, pre.manifest.snapshots.file_hashes, mismatches);
+    await collectHashMismatches(opts.repoRoot, pre.manifest.untracked.file_hashes, mismatches);
+  });
+  profile.report("materializeCheckpointIntoFreshWorktree");
   if (mismatches.length > 0) {
     throw new RestoreVerificationError(mismatches);
   }
@@ -1267,6 +1421,12 @@ async function restoreTrackedDirtyContent(
   }
 
   const staging = await mkdtemp(join(tmpdir(), "viberevert-tracked-restore-"));
+  // Only the paths this call will actually copy are unpacked. Previously the
+  // whole archive was expanded to staging and then a subset was copied out of
+  // it, which is free when the subset IS the archive and pure waste when it is
+  // not. The wanted set is what makes a scoped caller cheap; for a full
+  // restore it is every path in the archive and nothing changes.
+  const wanted = new Set(expectedPaths);
   try {
     await pipeline(
       Readable.from([archiveBuf]),
@@ -1276,7 +1436,8 @@ async function restoreTrackedDirtyContent(
           "type" in entry &&
           entry.type === "File" &&
           isSafeStoredRelativePath(path) &&
-          !isVibeRevertInternalPath(path),
+          !isVibeRevertInternalPath(path) &&
+          wanted.has(path),
         preservePaths: false,
       }),
     );

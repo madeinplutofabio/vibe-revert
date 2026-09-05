@@ -25,15 +25,15 @@
 //   pnpm build && pnpm tsx scripts/probe-end-phases.ts --sizes "200,1000,4000"
 
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { cpus, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { loadCheckpoint } from "../packages/git/src/checkpoint.js";
 import { withCheckpointOracle } from "../packages/git/src/checkpoint-oracle.js";
-import { restoreCheckpoint } from "../packages/git/src/restore.js";
-import { removeAndVerify } from "./bench-end-latency.js";
+import { materializeCheckpointIntoFreshWorktree } from "../packages/git/src/restore.js";
+import { removeAndVerify } from "./scratch-cleanup.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -82,6 +82,11 @@ interface Phase {
  * the caller checks the sum against the measured lifecycle: if they disagree,
  * this split describes something other than what production does and must not
  * be trusted.
+ *
+ * The middle step is `materializeCheckpointIntoFreshWorktree`, NOT
+ * `restoreCheckpoint`. The oracle stopped calling the latter, and a split that
+ * kept timing it would keep reporting the cost of code no longer on this path.
+ * For a phase breakdown INSIDE this step, set `VIBEREVERT_PROFILE_RESTORE=1`.
  */
 async function splitOracle(
   repo: string,
@@ -99,7 +104,7 @@ async function splitOracle(
   });
   const t1 = performance.now();
 
-  await restoreCheckpoint(checkpointDir, {
+  await materializeCheckpointIntoFreshWorktree(checkpointDir, {
     repoRoot: worktreePath,
     rollbackExcludePatterns: manifest.untracked.exclude_patterns ?? [],
   });
@@ -210,7 +215,9 @@ async function main(): Promise<void> {
     );
   }
 
-  console.log("\n| Files | worktree add | restoreCheckpoint | teardown | split sum vs lifecycle |");
+  console.log(
+    "\n| Files | worktree add | fresh-worktree materialize | teardown | sum vs lifecycle |",
+  );
   console.log("|---:|---:|---:|---:|---:|");
   for (const p of all) {
     const sum = p.worktreeAdd + p.restore + p.teardown;
