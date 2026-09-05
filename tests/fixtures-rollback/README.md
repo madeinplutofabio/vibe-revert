@@ -404,6 +404,37 @@ Plus git commit author / date env vars for commits the harness
 makes itself. Together these guarantee byte-identical output across
 machines and CI runs.
 
+### The one value that is redacted, not fixed
+
+`contribution_sha256` is replaced with `<contribution-sha256>` in every
+selective receipt golden, in all three formats. It is the only redacted
+value.
+
+It cannot be pinned, because it is a digest over `contribution.json`,
+and that file honestly records what each platform can observe about a
+path. On POSIX a regular file's executable bit is a real boolean; on
+Windows the filesystem cannot report one, so the captured value is
+`null`, meaning unknown. Measured on the `selective-dry-run` fixture:
+flipping `"executable": null` to `"executable": false` in the Windows
+bytes produces the exact digest Linux and macOS produce, and nothing
+else in the file differs, commit SHAs included.
+
+So the divergence is the artifact being truthful. Pinning the digest
+would require a Windows capture to claim it saw something it cannot
+see. This is the same position the project already takes on real git
+SHAs, which never appear in a golden either.
+
+The digest's correctness is checked where it matters rather than here:
+`loadVerifiedSessionContribution` rehashes the bytes on every read, so
+a selective rollback that got as far as writing a receipt has already
+proven the digest matches.
+
+The redaction is BY VALUE, reading the digest from that run's own
+persisted receipt, so it needs no per-format knowledge of how each
+renderer labels the field. If a renderer stops emitting the digest, the
+harness throws rather than quietly producing a golden that merely
+happens to be stable.
+
 ## Relationship to `tests/fixtures/`
 
 `tests/fixtures/` holds M C scenarios that exercise

@@ -5,7 +5,7 @@ VibeRevert Selective Rollback Receipt
 Rollback ID:      rb_01KDVDNA009CEYQ0QAVTDW0T7S
 Session ID:       sess_01KDVDNA00BZYA8KS027KPF7N4
 Checkpoint ID:    cp_01KDVDNA00HMDCQ95QZSDQBCYC
-Contribution:     5551f3d4e0ffd900a65443f4de00f386f231816a702f7663da2bcd0eaecc9180
+Contribution:     <contribution-sha256>
 Mode:             apply
 Pre-rollback CP:  cp_01KDVDNA00HMDCQ95QZSDQBCYC
 Outcome:          succeeded
