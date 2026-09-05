@@ -2,7 +2,7 @@
 
 > Git-aware checkpoint and rollback engine.
 
-Captures the pre-session working-tree state (HEAD, branch, staged/unstaged diffs, untracked files, hashes) and restores it on rollback.
+Captures the pre-session working-tree state (HEAD, branch, staged/unstaged diffs, untracked files, hashes) and restores it on rollback, in whole or, from 0.8.0, for selected change groups only.
 
 Part of [VibeRevert](https://github.com/madeinplutofabio/vibe-revert) — the safety belt for vibe coding.
 

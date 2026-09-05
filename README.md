@@ -69,6 +69,13 @@ viberevert check               # see what changed and what looks risky
 viberevert rollback <session>  # preview putting your files back; add --apply to restore
 ```
 
+Restoring only part of a session works the same way, with a selector:
+
+```bash
+viberevert rollback <session> --only 'app/api/**'          # preview just that part
+viberevert rollback <session> --only 'app/api/**' --apply  # restore just that part
+```
+
 ## What it protects you from
 
 You let an AI agent work across your project, and it touched more than you expected — maybe payment code, a database migration, a deploy file — while your own half-finished work was sitting right there uncommitted. VibeRevert captures your project's starting file state first, so a session you don't like doesn't cost you your afternoon.
@@ -91,9 +98,36 @@ VibeRevert does not ask another language model whether your agent's changes look
 
 When something needs attention, VibeRevert can turn those findings into an agent-ready fix prompt. The rules decide what to flag; you decide what happens next.
 
-## What rollback restores — and what it doesn't
+## Roll back all of it, or only the part that went wrong
 
-`viberevert rollback` restores your **local project files** — tracked, staged, and untracked, including uncommitted work — to how they were when the session started. It previews by default; `--apply` writes the change, and every apply first saves an emergency checkpoint.
+`viberevert rollback` restores your **local project files** — tracked, staged, and untracked, including uncommitted work — to how they were when the session started. It previews by default; `--apply` writes the change, and every apply first saves an emergency checkpoint you can recover from.
+
+Since 0.8.0 you can also restore **part** of a session. Say the agent's payments change was wrong but its test additions were fine: put back only the payments work and keep everything else.
+
+```text
+$ viberevert rollback <session> --only 'app/api/**'    # preview — nothing changed yet
+[RESTORED]  app/api/checkout/route.ts
+[RESTORED]  app/api/webhooks/stripe/route.ts
+Eligibility: eligible
+
+$ viberevert rollback <session> --only 'app/api/**' --apply
+```
+
+Four ways to choose, and any one of them switches rollback into selective mode:
+
+| Selector | Picks |
+|---|---|
+| `--only <glob>` | changes matching a path pattern |
+| `--except <glob>` | everything but those, subtracted last |
+| `--risk <level>` | changes a finding rated at or above that level touches |
+| `--finding <id>` | the changes one specific finding applies to |
+
+Positive selectors combine by intersection, so `--only 'payments/**' --risk critical` means critical changes inside `payments/`, not payments plus every unrelated critical file. Path selectors follow a renamed file, so a file moved out of `payments/` still matches. **Nothing is restored unless everything you selected can be**: if any selected path drifted since the session ended, the whole operation refuses rather than half-applying, and `--force` does not override that. If a selective apply is interrupted, the next one fails closed and points you at the emergency checkpoint rather than layering a second partial restore on top.
+
+Two current limitations worth knowing before you rely on it:
+
+- **Sessions ended before 0.8.0 cannot be selectively rolled back.** They have no record of what they contributed and it cannot be reconstructed. Whole-session rollback still works on them, unchanged. See [MIGRATIONS.md](MIGRATIONS.md).
+- **`--finding` needs the full finding id**, as printed by `viberevert check --since <session> --json`. Short prefixes are not accepted yet.
 
 It does **not** reverse effects outside your project files. Deployments, database writes, third-party API calls, payments, and sent emails need their own recovery. Rollback is state-based rather than atomic, and it's a safety net around AI sessions, not a replacement for tests or review. Read [what rollback can and can't restore](docs/rollback-limitations.md) before you rely on it.
 

@@ -65,13 +65,66 @@ deferred any optimization until there was evidence it was needed, on the
 grounds that incremental capture would undermine the agent-independent model.
 That evidence now exists.
 
-**What is NOT yet measured** is which component dominates. `end` does the raw
-inventory twice, materializes the session-start checkpoint into a scratch
-worktree, and derives the contribution. The worktree materialization is the
-obvious suspect, since it is a full checkout rather than a hash pass, but that
-is a hypothesis and no one has profiled it. Attributing the cost is the first
-step for anyone optimizing this, and doing it before choosing a strategy would
-avoid optimizing the wrong half.
+## Where that time goes
+
+Attributed with `pnpm tsx scripts/probe-end-phases.ts`, same machine and
+fixtures, 3 runs per size.
+
+| Tracked files | `end` median | oracle lifecycle | oracle share | everything else |
+|---:|---:|---:|---:|---:|
+| 200 | 3401 ms | 1898 ms | 56% | 1503 ms |
+| 1000 | 8643 ms | 6522 ms | 75% | 2121 ms |
+| 4000 | 23718 ms | 17972 ms | 76% | 5746 ms |
+
+The oracle lifecycle is measured by running the real `withCheckpointOracle` with
+an empty callback, so the figure is exactly create plus tear down and nothing
+else. "Everything else" is the remainder, and it contains BOTH raw inventories,
+rename derivation, mirror diffing, contribution assembly and persistence
+together.
+
+Splitting the lifecycle into its three steps:
+
+| Tracked files | `git worktree add` | `restoreCheckpoint` | teardown |
+|---:|---:|---:|---:|
+| 200 | 195 ms | 1599 ms | 75 ms |
+| 1000 | 560 ms | 5148 ms | 185 ms |
+| 4000 | 1971 ms | 18572 ms | 605 ms |
+
+**`restoreCheckpoint` into the scratch worktree is the cost.** It is 79 to 88
+percent of the oracle lifecycle, and therefore roughly two thirds of everything
+`end` does.
+
+**The plan's suspicion was misdirected.** It named the raw-byte inventory as the
+latency risk and "the first number step 15 should measure". The inventories are
+inside "everything else", which never exceeds a quarter of the total and is
+usually far less. Optimizing there would be effort spent on the wrong component.
+
+The reason is structural: the oracle materializes the entire pre-session tree so
+BEFORE state can be read for the few paths a session changed, and building it
+touches every tracked file three times. `git worktree add` checks out every
+file, `restoreTrackedDirtyContent` then rewrites the captured bytes of every
+entry in `snapshots.file_hashes`, which is every present tracked regular file,
+and post-restore verification hashes them all again. A session that edited one
+file in a 4000-file repository writes 8000 files and hashes 4000 more.
+
+**This is a known limitation of 0.8.0, not a defect being hidden.** Fixing it
+means either a cheaper oracle that reads BEFORE content per path instead of
+materializing the whole tree, or an oracle-specific restore mode that skips
+verification, and both are architectural changes to a safety-critical path. The
+decision to ship with the cost, and the criteria for reopening it, are recorded
+in [ADR 0008](adr/0008-end-of-session-oracle-cost.md).
+
+### A caveat on the split
+
+The three-step table REPLICATES the oracle's sequence rather than instrumenting
+it, using the same primitives the production function calls. The script checks
+its sum against the independently measured lifecycle, and the two agree within
+roughly 10 to 20 percent. That is sound enough to identify the dominant
+component and should not be quoted more precisely than that.
+
+The two raw inventories are not measured separately from each other. Doing so
+would need instrumentation inside production code for a component bounded above
+by a quarter of the total, and the conclusion does not depend on it.
 
 ### Caveats
 

@@ -61,7 +61,11 @@ See [`docs/pty-contract.md`](https://github.com/madeinplutofabio/vibe-revert/blo
 
 Default is dry-run: it produces a structured receipt describing what `--apply` would do, without mutating the repo. Pass `--apply` to actually restore. `--force` only bypasses the force-overridable dirty-tree safety checks documented in the contract. Receipts are persisted at `.viberevert/sessions/<sess>/rollback-receipt.json` for apply and `.viberevert/sessions/<sess>/rollback-dry-run-receipt.json` for dry-run; render via `--json`, `--markdown`, or default terminal output.
 
-Every `--apply` auto-creates an emergency pre-rollback checkpoint of the current state before restore, and records its id in the receipt as `pre_rollback_checkpoint_id`.
+**Selective rollback (0.8.0).** Supplying any of `--only <glob>`, `--except <glob>`, `--risk <level>` or `--finding <id>` restores only the matching change groups and leaves every other managed path untouched. Positive selector families intersect, `--except` subtracts last, and exclusion is group-atomic. Eligibility is all-or-nothing: if any selected path drifted since the session ended, nothing is mutated and `--force` does not override it. Selective receipts are separate artifacts, at `.viberevert/sessions/<sess>/selective-rollback-dry-run-receipt.json` for a preview and `.viberevert/sessions/<sess>/rollbacks/<rb_id>/receipt.json` for an apply.
+
+Selective rollback needs the session's durable contribution, which only sessions ended by 0.8.0 or later have. Sessions ended earlier refuse selectively and roll back whole-session as before. `--finding` currently requires a full `fnd_<64 hex>` id.
+
+Every `--apply` auto-creates an emergency pre-rollback checkpoint of the current state before restore, and records its id in the receipt as `pre_rollback_checkpoint_id`. A selective apply additionally publishes a pre-mutation attempt marker, so an interrupted apply fails every later apply closed and directs recovery through that checkpoint rather than layering a second partial restore.
 
 Scope: filesystem + git state only. Does NOT restore database schemas, deployed artifacts, package-registry publishes, external API state, or any other process-side effects.
 
