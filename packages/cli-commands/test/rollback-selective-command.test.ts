@@ -13,29 +13,43 @@
 //   B. the mode/selector binding, as a unit
 //   C. the single-lock boundary
 //   D. post-lock rendering and exit status for the selective arms
+//   E. the empty resolution, on both sides of the dry-run/apply split
 //
-// What is NOT here: a real contribution, a real transplant, per-path preview
-// output. Those need the end-of-session capture transaction to have produced a
-// contribution, which is a different fixture entirely, and their reporting is
-// rung 8's. Everything below refuses or resolves BEFORE any mutation, which is
-// exactly the surface these four groups are about.
+// Nothing below MUTATES the repository. Every case either refuses before the
+// transplant or takes the read-only preview path, which is what makes a
+// command-level suite affordable here. The transplant's own end-to-end
+// coverage, and per-path presentation, are rung 8's.
 //
-// The refusal fixture is a legacy session: `session.json` with no
-// `contribution_path`, which is the shape every pre-0.8.0 ended session has on
-// disk today. That makes it the honest input for "selective rollback against a
-// session that has no contribution", and it is the state most real repositories
-// are in right now.
+// TWO fixtures, because the two questions are different:
+//
+//   - a legacy ENDED session, `session.json` with no `contribution_path`. That
+//     is the shape every pre-0.8.0 ended session has on disk today, so it is
+//     the honest input for "selective rollback against a session that has no
+//     contribution", and it is the state most real repositories are in.
+//   - the same session WITH a real contribution written to disk and its digest
+//     computed from the exact bytes. Needed because an empty resolution is a
+//     RESULT that gets recorded, and recording it requires a verified
+//     contribution to name. Group E's positive control uses it too: without a
+//     selection that genuinely resolves, every "it was empty" assertion would
+//     pass against a command that could only ever produce emptiness.
 
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import { promisify } from "node:util";
 import {
+  CONTRIBUTION_FILE_SCHEMA_VERSION,
+  deriveChangeGroupId,
   type Manifest,
+  type PathState,
   SCHEMA_VERSION,
   SESSION_STATE_SCHEMA_VERSION,
+  type SelectiveRollbackReceipt,
+  type SessionContributionEntry,
+  type SessionContributionFile,
   type SessionState,
 } from "@viberevert/session-format";
 import { Cli } from "clipanion";
@@ -49,7 +63,6 @@ const execFileAsync = promisify(execFile);
 
 const SESSION_ID = "sess_01JV8Z0N6E7ABCDEFGHJKMNPQR";
 const CHECKPOINT_ID = "cp_01JV8Y7W2M7ABCDEFGHJKMNPQR";
-const HEAD_SHA = "a1b2c3d4e5f6789012345678901234567890abcd";
 const STARTED_AT = "2026-05-04T10:30:11Z";
 const ENDED_AT = "2026-05-04T10:35:11Z";
 
@@ -138,13 +151,55 @@ async function writeMinimalConfig(): Promise<void> {
   await writeFile(join(tmpRoot, ".viberevert.yml"), "version: 1\n");
 }
 
+const ABSENT: PathState = { worktree: { kind: "absent" }, index: { kind: "absent" } };
+const CONTRIBUTION_REL = `.viberevert/sessions/${SESSION_ID}/contribution.json`;
+const SELECTIVE_DRY_RUN_RECEIPT = "selective-rollback-dry-run-receipt.json";
+
+const contributionEntry = (path: string): SessionContributionEntry => ({
+  path,
+  operation: "modified",
+  facets: [],
+  change_group_id: deriveChangeGroupId(SESSION_ID, [path]),
+  before: ABSENT,
+  after: ABSENT,
+  content_delta: { kind: "none" },
+});
+
 /**
- * A legacy ENDED session: real checkpoint artifacts, no contribution.
+ * Write a real contribution and return the binding a session must record.
+ *
+ * The digest is computed from the EXACT bytes written, never declared, so the
+ * fixture cannot drift from the artifact the loader will verify.
+ */
+async function writeContribution(): Promise<{ path: string; sha256: string }> {
+  const contribution: SessionContributionFile = {
+    schema_version: CONTRIBUTION_FILE_SCHEMA_VERSION,
+    session_id: SESSION_ID,
+    checkpoint_id: CHECKPOINT_ID,
+    before_head_sha: "0".repeat(40),
+    after_head_sha: "1".repeat(40),
+    captured_at: STARTED_AT,
+    ended_at: ENDED_AT,
+    entries: [contributionEntry("docs/readme.md"), contributionEntry("src/a.ts")],
+  };
+  const bytes = Buffer.from(JSON.stringify(contribution, null, 2), "utf8");
+  await writeFile(join(tmpRoot, ...CONTRIBUTION_REL.split("/")), bytes);
+  return {
+    path: CONTRIBUTION_REL,
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+  };
+}
+
+/**
+ * An ENDED session with real checkpoint artifacts, optionally with a
+ * contribution.
  *
  * Ended rather than active so the D63 active-session refusal does not fire
- * first and hide the selection refusal these tests are about.
+ * first and hide the selection outcome these tests are about.
  */
-async function writeLegacyEndedSession(): Promise<void> {
+async function writeLegacyEndedSession(
+  opts: { withContribution?: boolean } = {},
+): Promise<{ contributionSha256?: string }> {
   const sessionDir = join(tmpRoot, ".viberevert", "sessions", SESSION_ID);
   const checkpointDir = join(sessionDir, "checkpoint");
   await mkdir(join(checkpointDir, "rollback"), { recursive: true });
@@ -158,11 +213,38 @@ async function writeLegacyEndedSession(): Promise<void> {
     await writeFile(join(checkpointDir, "rollback", filename), "");
   }
 
+  // Commit the working files, then record the REAL HEAD, so the fixture
+  // describes the repository it lives in and the tree is clean.
+  //
+  // Both matter for the apply-side tests: a placeholder HEAD refuses on D64
+  // head_mismatch and an untracked `.gitignore` / `.viberevert.yml` refuses on
+  // D61 dirty_tree, either of which would silently turn a test about selection
+  // into a test of a precondition it never meant to exercise.
+  await execFileAsync("git", ["add", "-A"], { cwd: tmpRoot });
+  await execFileAsync(
+    "git",
+    [
+      "-c",
+      "user.name=Test",
+      "-c",
+      "user.email=test@test.test",
+      "commit",
+      "-q",
+      "-m",
+      "fixture",
+      "--allow-empty",
+    ],
+    { cwd: tmpRoot },
+  );
+  const headSha = (
+    await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: tmpRoot })
+  ).stdout.trim();
+
   const manifest: Manifest = {
     schema_version: SCHEMA_VERSION,
     session_id: SESSION_ID,
     captured_at: STARTED_AT,
-    git: { head_sha: HEAD_SHA, branch: "main", porcelain_v1: "" },
+    git: { head_sha: headSha, branch: "main", porcelain_v1: "" },
     diffs: {
       unstaged_patch_path: "rollback/unstaged.patch",
       staged_patch_path: "rollback/staged.patch",
@@ -177,6 +259,8 @@ async function writeLegacyEndedSession(): Promise<void> {
   };
   await writeFile(join(checkpointDir, "manifest.json"), JSON.stringify(manifest, null, 2));
 
+  const contribution = opts.withContribution === true ? await writeContribution() : undefined;
+
   const session: SessionState = {
     schema_version: SESSION_STATE_SCHEMA_VERSION,
     session_id: SESSION_ID,
@@ -185,12 +269,23 @@ async function writeLegacyEndedSession(): Promise<void> {
     ended_at: ENDED_AT,
     before_status_path: `.viberevert/sessions/${SESSION_ID}/before-status.txt`,
     after_status_path: `.viberevert/sessions/${SESSION_ID}/after-status.txt`,
+    // Present so the session is genuinely ended: without the machine-readable
+    // snapshot, D61b refuses every apply before the selection is resolved.
+    after_status_z_path: `.viberevert/sessions/${SESSION_ID}/after-status.z`,
     commands_log_path: `.viberevert/sessions/${SESSION_ID}/commands.log`,
+    ...(contribution !== undefined
+      ? { contribution_path: contribution.path, contribution_sha256: contribution.sha256 }
+      : {}),
   } as SessionState;
   await writeFile(join(sessionDir, "session.json"), JSON.stringify(session, null, 2));
   await writeFile(join(sessionDir, "before-status.txt"), "");
   await writeFile(join(sessionDir, "after-status.txt"), "");
+  // Empty: the session ended with no changed paths, which is a coherent state
+  // and keeps the dirty-tree comparison from having anything to disagree with.
+  await writeFile(join(sessionDir, "after-status.z"), "");
   await writeFile(join(sessionDir, "commands.log"), "");
+
+  return contribution === undefined ? {} : { contributionSha256: contribution.sha256 };
 }
 
 const selectors = (overrides: Partial<SelectionSelectors> = {}): SelectionSelectors => ({
@@ -389,6 +484,111 @@ describe("selective rollback against a session with no contribution", () => {
 
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("CONTRIBUTION_REQUIRED");
+  });
+});
+
+describe("a selection that resolves to nothing", () => {
+  const receiptPath = () =>
+    join(tmpRoot, ".viberevert", "sessions", SESSION_ID, SELECTIVE_DRY_RUN_RECEIPT);
+
+  const readReceipt = async (): Promise<SelectiveRollbackReceipt> =>
+    JSON.parse(await readFile(receiptPath(), "utf8"));
+
+  it("a dry run RECORDS it as empty_selection and exits 0", async () => {
+    await writeMinimalConfig();
+    await writeLegacyEndedSession({ withContribution: true });
+
+    const result = await runRollback([SESSION_ID, "--only", "nothing/matches/**"]);
+
+    expect(result.exitCode).toBe(0);
+    const receipt = await readReceipt();
+    if (receipt.mode !== "dry_run") throw new Error("expected a dry-run receipt");
+    expect(receipt.eligibility).toBe("empty_selection");
+    expect(receipt.results).toEqual([]);
+    expect(receipt.resolved_change_group_ids).toEqual([]);
+  });
+
+  it("the recorded receipt names what the selectors were matched against", async () => {
+    await writeMinimalConfig();
+    const { contributionSha256 } = await writeLegacyEndedSession({ withContribution: true });
+
+    await runRollback([SESSION_ID, "--only", "nothing/matches/**", "--except", "b/**"]);
+
+    const receipt = await readReceipt();
+    expect(receipt.session_id).toBe(SESSION_ID);
+    expect(receipt.checkpoint_id).toBe(CHECKPOINT_ID);
+    // Bound to the digest of the exact bytes the loader verified, so the
+    // receipt says which contribution produced this answer.
+    expect(receipt.contribution_sha256).toBe(contributionSha256);
+    expect(receipt.selectors).toEqual({ only: ["nothing/matches/**"], except: ["b/**"] });
+    expect(receipt.rollback_id).toMatch(/^rb_[0-9A-HJKMNP-TV-Z]{26}$/);
+  });
+
+  it("is written OUTSIDE rollbacks/, so it can never look like an unfinalized attempt", async () => {
+    await writeMinimalConfig();
+    await writeLegacyEndedSession({ withContribution: true });
+
+    await runRollback([SESSION_ID, "--only", "nothing/matches/**"]);
+
+    // A receipt inside an invocation directory with no sibling marker is what
+    // the history scan reports as inconsistent, which would fail every later
+    // apply closed on the strength of a command that mutated nothing.
+    expect(await exists(receiptPath())).toBe(true);
+    expect(await exists(join(tmpRoot, ".viberevert", "sessions", SESSION_ID, "rollbacks"))).toBe(
+      false,
+    );
+  });
+
+  it("an APPLY refuses it instead, with no receipt and no invocation", async () => {
+    await writeMinimalConfig();
+    await writeLegacyEndedSession({ withContribution: true });
+
+    const result = await runRollback([SESSION_ID, "--only", "nothing/matches/**", "--apply"]);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("nothing to apply");
+    expect(await exists(receiptPath())).toBe(false);
+    expect(await exists(join(tmpRoot, ".viberevert", "sessions", SESSION_ID, "rollbacks"))).toBe(
+      false,
+    );
+  });
+
+  it("a selection that DOES resolve takes the preview path instead", async () => {
+    // The positive control for every assertion above. Without it, an
+    // `empty_selection` receipt could be what this command produces for
+    // everything, and each test in this group would still pass.
+    await writeMinimalConfig();
+    await writeLegacyEndedSession({ withContribution: true });
+
+    const result = await runRollback([SESSION_ID, "--only", "src/**"]);
+
+    expect(result.exitCode).toBe(0);
+    const receipt = await readReceipt();
+    if (receipt.mode !== "dry_run") throw new Error("expected a dry-run receipt");
+    expect(receipt.eligibility).not.toBe("empty_selection");
+    expect(receipt.results.map((r) => r.path)).toEqual(["src/a.ts"]);
+    expect(receipt.resolved_change_group_ids).toHaveLength(1);
+    // Both halves of the coupling the schema enforces: a non-empty selection
+    // has results AND resolved groups, and it went through the same file.
+    expect(result.stdout).toContain('"mode": "dry_run"');
+  });
+
+  it("writes both kinds to the SAME session-scoped path, so a preview replaces a preview", async () => {
+    await writeMinimalConfig();
+    await writeLegacyEndedSession({ withContribution: true });
+
+    await runRollback([SESSION_ID, "--only", "src/**"]);
+    const resolved = await readReceipt();
+    await runRollback([SESSION_ID, "--only", "nothing/matches/**"]);
+    const empty = await readReceipt();
+
+    if (resolved.mode !== "dry_run" || empty.mode !== "dry_run") {
+      throw new Error("expected dry-run receipts");
+    }
+    // A regenerable artifact with one home. If the empty case had its own
+    // path, a stale non-empty preview would sit beside it claiming otherwise.
+    expect(resolved.eligibility).toBe("eligible");
+    expect(empty.eligibility).toBe("empty_selection");
   });
 });
 

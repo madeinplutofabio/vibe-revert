@@ -100,6 +100,7 @@ import {
   type BoundSelectionInvalidReason,
   type BoundSelectiveRestore,
   prepareBoundSelectiveRestore,
+  type VerifiedSelectionIdentity,
 } from "./bound-selective-restore.js";
 import { CheckpointListLoadError, CollisionExitSentinel } from "./checkpoint-helpers.js";
 import {
@@ -132,8 +133,12 @@ import {
   resolveAfterInspection,
   type SelectiveApplyOutcome,
 } from "./selective-apply-result.js";
-import { mapSelectiveDryRunReceipt } from "./selective-dry-run-mapper.js";
+import {
+  mapEmptySelectiveDryRunReceipt,
+  mapSelectiveDryRunReceipt,
+} from "./selective-dry-run-mapper.js";
 import { finalizeSelectiveReceipt } from "./selective-receipt-finalizer.js";
+import type { ReceiptMapping } from "./selective-receipt-mapper.js";
 import { runVerificationCommands, type VerifyCommandsResult } from "./verify-commands.js";
 
 // =============================================================================
@@ -255,7 +260,15 @@ type AdmittedVerdict = Extract<RollbackAdmissionVerdict, { readonly decision: "a
 export type SelectiveRollbackOutcome =
   /** The selectors could not be resolved against this session's evidence. */
   | { readonly kind: "selection_invalid"; readonly reason: BoundSelectionInvalidReason }
-  /** The selectors resolved to no change group. A no-op previewing, a refusal applying. */
+  /**
+   * The selectors resolved to no change group, on an APPLY.
+   *
+   * A refusal, with no marker and no receipt: there is nothing to authorize.
+   * The dry-run half of this case is not here, because it is not a dead end.
+   * It records an `empty_selection` receipt and arrives as `previewed`, which
+   * is what keeps all four cells symmetric: every selective dry run persists
+   * exactly one receipt.
+   */
   | { readonly kind: "selection_empty" }
   /**
    * The preview did not produce a persisted receipt.
@@ -543,6 +556,59 @@ async function runFullRollback(
   return { kind: "full", receipt, admission };
 }
 
+/**
+ * Persist a mapped dry-run receipt.
+ *
+ * Outside `rollbacks/`: a receipt in an invocation directory with no sibling
+ * attempt marker is exactly what the history scan reports as inconsistent, and
+ * that would block every later apply on a command that mutated nothing.
+ */
+async function persistPreviewReceipt(
+  repoRoot: string,
+  sessionId: string,
+  mapping: ReceiptMapping,
+  cleanupWarnings: readonly string[],
+): Promise<SelectiveRollbackOutcome> {
+  if (mapping.outcome === "failed") {
+    return { kind: "preview_failed", phase: "map_receipt", cause: mapping.cause, cleanupWarnings };
+  }
+  const receiptPath = selectiveDryRunReceiptPath(repoRoot, sessionId);
+  try {
+    await writeFileAtomic(receiptPath, serializeReceipt(mapping.receipt));
+  } catch (cause) {
+    return { kind: "preview_failed", phase: "write_receipt", cause, cleanupWarnings };
+  }
+  return { kind: "previewed", receipt: mapping.receipt, receiptPath, cleanupWarnings };
+}
+
+/**
+ * Record a selection that resolved to no change group.
+ *
+ * No oracle is opened, because there is nothing to classify, so there are no
+ * cleanup warnings and the `preview` failure phase is unreachable here. The
+ * receipt is still written: `empty_selection` is a result the schema has a
+ * spelling for, and a dry run that persisted nothing would make the user infer
+ * it from an absent file.
+ */
+async function recordEmptySelectivePreview(
+  input: LockedRollbackPhaseInput,
+  identity: VerifiedSelectionIdentity,
+): Promise<SelectiveRollbackOutcome> {
+  return persistPreviewReceipt(
+    input.repoRoot,
+    input.sessionId,
+    mapEmptySelectiveDryRunReceipt({
+      sessionId: identity.sessionId,
+      checkpointId: identity.checkpointId,
+      contributionSha256: identity.contributionSha256,
+      selectors: persistedSelectorsOf(identity.selectors),
+      rollbackId: generateRollbackId(),
+      writtenAt: input.clock(),
+    }),
+    [],
+  );
+}
+
 /** Classify every selected path without touching the project, then persist it. */
 async function runSelectivePreview(
   input: LockedRollbackPhaseInput,
@@ -564,35 +630,23 @@ async function runSelectivePreview(
       cleanupWarnings: preview.cleanupWarnings,
     };
   }
-  const cleanupWarnings = preview.cleanupWarnings;
-
   // A dry run publishes no marker and reserves no invocation, so this id names
   // this preview alone. Sampled beside it, immediately before mapping.
-  const mapping = mapSelectiveDryRunReceipt({
-    preview,
-    plan: bound.plan,
-    sessionId: bound.sessionId,
-    checkpointId: bound.checkpointId,
-    contributionSha256: bound.contributionSha256,
-    selectors: persistedSelectorsOf(bound.selectors),
-    rollbackId: generateRollbackId(),
-    writtenAt: input.clock(),
-  });
-  if (mapping.outcome === "failed") {
-    return { kind: "preview_failed", phase: "map_receipt", cause: mapping.cause, cleanupWarnings };
-  }
-
-  // Outside `rollbacks/`: a receipt with no sibling marker is exactly what the
-  // history scan reports as inconsistent, and that would block every later
-  // apply on a command that mutated nothing.
-  const receiptPath = selectiveDryRunReceiptPath(repoRoot, sessionId);
-  try {
-    await writeFileAtomic(receiptPath, serializeReceipt(mapping.receipt));
-  } catch (cause) {
-    return { kind: "preview_failed", phase: "write_receipt", cause, cleanupWarnings };
-  }
-
-  return { kind: "previewed", receipt: mapping.receipt, receiptPath, cleanupWarnings };
+  return persistPreviewReceipt(
+    repoRoot,
+    sessionId,
+    mapSelectiveDryRunReceipt({
+      preview,
+      plan: bound.plan,
+      sessionId: bound.sessionId,
+      checkpointId: bound.checkpointId,
+      contributionSha256: bound.contributionSha256,
+      selectors: persistedSelectorsOf(bound.selectors),
+      rollbackId: generateRollbackId(),
+      writtenAt: input.clock(),
+    }),
+    preview.cleanupWarnings,
+  );
 }
 
 /**
@@ -853,7 +907,17 @@ export async function runLockedRollbackPhase(
     };
   }
   if (prepared.outcome === "empty") {
-    return { kind: "selective", outcome: { kind: "selection_empty" }, admission };
+    // Asymmetric on purpose, and only here. A dry run RECORDS the empty
+    // resolution; an apply refuses it, because there is nothing to authorize
+    // and a marker naming no change group is unrepresentable.
+    return {
+      kind: "selective",
+      outcome:
+        mode === "dry_run"
+          ? await recordEmptySelectivePreview(input, prepared.identity)
+          : { kind: "selection_empty" },
+      admission,
+    };
   }
 
   if (mode === "dry_run") {

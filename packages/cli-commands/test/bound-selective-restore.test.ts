@@ -422,12 +422,59 @@ describe("prepareBoundSelectiveRestore: passthrough", () => {
   it("13: selectors matching nothing are empty, not an error", async () => {
     const fx = await setup();
     try {
+      const selectors = { only: ["nothing/matches/**"], except: [], finding: [] };
       const result = await prepareBoundSelectiveRestore({
+        repoRoot: fx.repoRoot,
+        contributionBinding: fx.binding,
+        selectors,
+      });
+      // The empty arm carries the VERIFIED identities, because a dry run
+      // records this outcome as a receipt and a receipt saying "these
+      // selectors matched nothing" must also say what they were matched
+      // against. There is no plan: resolution stops before one is built.
+      expect(result).toEqual({
+        mode: "selective",
+        outcome: "empty",
+        identity: {
+          contributionSha256: fx.binding.sha256,
+          sessionId: SESSION_ID,
+          checkpointId: CHECKPOINT_ID,
+          selectors,
+        },
+      });
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  it("14: the empty arm's identities are the SAME ones a resolved arm carries", async () => {
+    // Both arms read the identity off one verified contribution, so a receipt
+    // written for an empty selection is bound exactly as a previewed one is.
+    // Two independently assembled identity objects could disagree; one shared
+    // interface built in one place cannot.
+    const fx = await setup();
+    try {
+      const empty = await prepareBoundSelectiveRestore({
         repoRoot: fx.repoRoot,
         contributionBinding: fx.binding,
         selectors: { only: ["nothing/matches/**"], except: [], finding: [] },
       });
-      expect(result).toEqual({ mode: "selective", outcome: "empty" });
+      const resolved = await prepareBoundSelectiveRestore({
+        repoRoot: fx.repoRoot,
+        contributionBinding: fx.binding,
+        selectors: { only: ["**"], except: [], finding: [] },
+      });
+
+      if (empty.mode !== "selective" || empty.outcome !== "empty") {
+        throw new Error("expected an empty resolution");
+      }
+      if (resolved.mode !== "selective" || resolved.outcome !== "resolved") {
+        throw new Error("expected a resolved selection");
+      }
+
+      expect(empty.identity.contributionSha256).toBe(resolved.bound.contributionSha256);
+      expect(empty.identity.sessionId).toBe(resolved.bound.sessionId);
+      expect(empty.identity.checkpointId).toBe(resolved.bound.checkpointId);
     } finally {
       await fx.cleanup();
     }

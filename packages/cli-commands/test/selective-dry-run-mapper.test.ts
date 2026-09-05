@@ -17,7 +17,9 @@ import type { PathState, SelectiveRollbackReceipt } from "@viberevert/session-fo
 import { describe, expect, it } from "vitest";
 import {
   type MapSelectiveDryRunReceiptArgs,
+  mapEmptySelectiveDryRunReceipt,
   mapSelectiveDryRunReceipt,
+  type SelectiveDryRunReceiptIdentity,
 } from "../src/selective-dry-run-mapper.js";
 import type { ReceiptMapping } from "../src/selective-receipt-mapper.js";
 
@@ -214,6 +216,57 @@ describe("mapSelectiveDryRunReceipt: eligibility is three-way", () => {
     expect(receipt.eligibility).toBe("empty_selection");
     expect(receipt.results).toEqual([]);
     expect(receipt.resolved_change_group_ids).toEqual([]);
+  });
+});
+
+describe("mapEmptySelectiveDryRunReceipt: a selection that resolved to nothing", () => {
+  const identity: SelectiveDryRunReceiptIdentity = {
+    sessionId: SESSION_ID,
+    checkpointId: CHECKPOINT_ID,
+    contributionSha256: DIGEST,
+    selectors: { only: ["nothing/matches/**"] },
+    rollbackId: ROLLBACK_ID,
+    writtenAt: WRITTEN_AT,
+  };
+
+  function emptyReceipt(): DryRunReceipt {
+    const result = mapEmptySelectiveDryRunReceipt(identity);
+    if (result.outcome !== "mapped") {
+      throw new Error(`expected a receipt, got a failure: ${String(result.cause)}`);
+    }
+    if (result.receipt.mode !== "dry_run") throw new Error("expected a dry-run receipt");
+    return result.receipt;
+  }
+
+  it("is a real receipt: empty_selection, no results, no resolved groups", () => {
+    const receipt = emptyReceipt();
+    expect(receipt.eligibility).toBe("empty_selection");
+    expect(receipt.results).toEqual([]);
+    expect(receipt.resolved_change_group_ids).toEqual([]);
+  });
+
+  it("records the selectors that matched nothing, which is the whole point", () => {
+    // A receipt saying "nothing matched" is only meaningful beside what was
+    // asked for and what it was asked of.
+    const receipt = emptyReceipt();
+    expect(receipt.selectors).toEqual({ only: ["nothing/matches/**"] });
+    expect(receipt.session_id).toBe(SESSION_ID);
+    expect(receipt.checkpoint_id).toBe(CHECKPOINT_ID);
+    expect(receipt.contribution_sha256).toBe(DIGEST);
+    expect(receipt.rollback_id).toBe(ROLLBACK_ID);
+    expect(receipt.written_at).toBe(WRITTEN_AT);
+  });
+
+  it("is byte-for-byte what the preview path produces for an empty preview", () => {
+    // The two entry points assemble through one function, and this is what
+    // proves it. A second assembler could satisfy the schema's
+    // `empty_selection` coupling today and drift from it later.
+    const viaPreview = mapped({
+      ...identity,
+      preview: previewOf([]),
+      plan: planOf([]),
+    });
+    expect(emptyReceipt()).toEqual(viaPreview);
   });
 });
 

@@ -846,7 +846,7 @@ ${ROLLBACK_OUT_OF_SCOPE_NOTICE}
       }
 
       case "selective":
-        return this.renderSelective(outcome.outcome, context.mode);
+        return this.renderSelective(outcome.outcome);
 
       default: {
         const unhandled: never = outcome;
@@ -862,7 +862,7 @@ ${ROLLBACK_OUT_OF_SCOPE_NOTICE}
    * per-path presentation belongs with the rest of the reporting work. What is
    * NOT deferred is the exit status, which every arm decides explicitly.
    */
-  private renderSelective(outcome: SelectiveRollbackOutcome, mode: "dry_run" | "apply"): number {
+  private renderSelective(outcome: SelectiveRollbackOutcome): number {
     const { stderr, stdout } = this.context;
     const emit = (receipt: unknown): void => {
       stdout.write(`${JSON.stringify(receipt, null, 2)}\n`);
@@ -878,11 +878,13 @@ ${ROLLBACK_OUT_OF_SCOPE_NOTICE}
         return 1;
 
       case "selection_empty":
-        // Locked selection semantics: an explicit no-op previewing, a refusal
-        // applying. Nothing was mutated either way, and the exit status says
-        // which of the two happened.
-        stderr.write("The selectors matched no change group in this session's contribution.\n");
-        return mode === "dry_run" ? 0 : 1;
+        // APPLY only. The dry-run half of an empty resolution is a written
+        // `empty_selection` receipt and arrives as `previewed`.
+        stderr.write(
+          "The selectors matched no change group in this session's contribution, so there is nothing to apply.\n" +
+            "Re-run without --apply to record what the selectors resolved to.\n",
+        );
+        return 1;
 
       case "preview_failed":
         stderr.write(

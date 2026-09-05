@@ -116,21 +116,34 @@ import {
 } from "./selection-resolver.js";
 
 /**
- * The transaction root: one verified contribution, the intent that selected
- * from it, and the plan derived from both.
+ * What a verified contribution establishes about a selection, whatever that
+ * selection resolved to.
  *
  * `sessionId` and `checkpointId` are DERIVED from the verified contribution and
  * are never parameters. Fields are limited to what downstream phases consume;
  * this is not a copy of every available contribution field.
+ *
+ * Split out so the EMPTY resolution carries exactly the same identities the
+ * resolved one does. A dry run whose selectors matched nothing still owes a
+ * receipt, and that receipt still has to name the session, the checkpoint and
+ * the contribution its answer was computed against. Sharing one interface is
+ * what keeps the two arms from drifting into different notions of identity.
  */
-export interface BoundSelectiveRestore {
-  readonly contribution: SessionContributionFile;
+export interface VerifiedSelectionIdentity {
   /** Proven to be the digest of the exact parsed bytes. */
   readonly contributionSha256: string;
   readonly sessionId: string;
   readonly checkpointId: string;
   /** Retained because resolution discards intent and the receipt records it. */
   readonly selectors: SelectionSelectors;
+}
+
+/**
+ * The transaction root: one verified contribution, the intent that selected
+ * from it, and the plan derived from both.
+ */
+export interface BoundSelectiveRestore extends VerifiedSelectionIdentity {
+  readonly contribution: SessionContributionFile;
   /** `plan.selectedChangeGroupIds` is the sole canonical authorization list. */
   readonly plan: SelectiveRestorePlan;
 }
@@ -148,7 +161,20 @@ export type BoundSelectionInvalidReason =
 
 export type PrepareBoundSelectiveRestoreResult =
   | { readonly mode: "full" }
-  | { readonly mode: "selective"; readonly outcome: "empty" }
+  /**
+   * The selectors resolved to no change group.
+   *
+   * Carries `identity` because this is a RESULT, not a dead end: a dry run
+   * records it as `eligibility: "empty_selection"`, and a receipt asserting
+   * "these selectors matched nothing" is only meaningful if it also says what
+   * they were matched against. There is no plan, because there is nothing to
+   * plan.
+   */
+  | {
+      readonly mode: "selective";
+      readonly outcome: "empty";
+      readonly identity: VerifiedSelectionIdentity;
+    }
   | {
       readonly mode: "selective";
       readonly outcome: "invalid";
@@ -240,7 +266,16 @@ export async function prepareBoundSelectiveRestore(
     // an authorization widening.
     throw new Error("selection resolution changed from selective to full for the same selectors");
   }
-  if (resolution.outcome === "empty") return { mode: "selective", outcome: "empty" };
+  // Built from the verified contribution, exactly as the resolved arm's is, so
+  // both arms name the same session, checkpoint and bytes.
+  const identity: VerifiedSelectionIdentity = {
+    contributionSha256: contributionBinding.sha256,
+    sessionId: contribution.session_id,
+    checkpointId: contribution.checkpoint_id,
+    selectors,
+  };
+
+  if (resolution.outcome === "empty") return { mode: "selective", outcome: "empty", identity };
   if (resolution.outcome === "invalid") {
     return { mode: "selective", outcome: "invalid", reason: resolution.reason };
   }
@@ -253,18 +288,7 @@ export async function prepareBoundSelectiveRestore(
   });
   requireAuthorizationPreserved(resolution.changeGroupIds, plan.selectedChangeGroupIds);
 
-  return {
-    mode: "selective",
-    outcome: "resolved",
-    bound: {
-      contribution,
-      contributionSha256: contributionBinding.sha256,
-      sessionId: contribution.session_id,
-      checkpointId: contribution.checkpoint_id,
-      selectors,
-      plan,
-    },
-  };
+  return { mode: "selective", outcome: "resolved", bound: { ...identity, contribution, plan } };
 }
 
 /**
