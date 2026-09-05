@@ -35,11 +35,21 @@ session that edited one file still pays the full cost.
 
 ### Results
 
+Current, after the concurrency work described below:
+
 | Tracked files | Total bytes | `start` median | `start` p95 | `end` median | `end` p95 | `end`/`start` |
 |---:|---:|---:|---:|---:|---:|---:|
-| 200 | 198 KiB | 929 ms | 954 ms | 3395 ms | 3673 ms | 3.65x |
-| 1000 | 989 KiB | 1236 ms | 1285 ms | 8419 ms | 9224 ms | 6.81x |
-| 4000 | 3960 KiB | 2367 ms | 2421 ms | 24305 ms | 25844 ms | 10.27x |
+| 200 | 198 KiB | 964 ms | 971 ms | 3250 ms | 3343 ms | 3.37x |
+| 1000 | 989 KiB | 1292 ms | 1304 ms | 7174 ms | 8350 ms | 5.55x |
+| 4000 | 3960 KiB | 2473 ms | 2535 ms | 19206 ms | 20312 ms | 7.77x |
+
+Before that work, same script, same fixtures, same machine:
+
+| Tracked files | `end` median | now | change |
+|---:|---:|---:|---:|
+| 200 | 3395 ms | 3250 ms | 4% faster |
+| 1000 | 8419 ms | 7174 ms | 15% faster |
+| 4000 | 24305 ms | 19206 ms | 21% faster |
 
 Median rather than mean, because one scheduler stall or antivirus scan drags a
 mean around and says nothing about typical cost. The p95 is reported precisely
@@ -107,12 +117,54 @@ entry in `snapshots.file_hashes`, which is every present tracked regular file,
 and post-restore verification hashes them all again. A session that edited one
 file in a 4000-file repository writes 8000 files and hashes 4000 more.
 
-**This is a known limitation of 0.8.0, not a defect being hidden.** Fixing it
-means either a cheaper oracle that reads BEFORE content per path instead of
-materializing the whole tree, or an oracle-specific restore mode that skips
-verification, and both are architectural changes to a safety-critical path. The
-decision to ship with the cost, and the criteria for reopening it, are recorded
-in [ADR 0008](adr/0008-end-of-session-oracle-cost.md).
+### What was fixed: waiting one syscall at a time
+
+A CPU profile of a single `end` on the 4000-file fixture was **82 percent
+idle**. Only about 4 seconds of 22.5 was computation; the rest was waiting.
+
+The cause was sequential `await` per file. Several loops walked every tracked
+file issuing one filesystem call per iteration, so libuv's thread pool sat idle
+holding a single request. Measured on this machine, 4000 files, one read plus
+one write each:
+
+| In flight | Time |
+|---:|---:|
+| 1 (sequential await) | 4305 ms |
+| 4 | 641 ms |
+| 8 | 636 ms |
+| 16 | 674 ms |
+| 32 | 621 ms |
+
+The whole win arrives at 4, which is `UV_THREADPOOL_SIZE`'s default, and the
+curve is flat after. Three loops now use bounded concurrency: the post-restore
+hash verification, the tracked-content copy, and the raw-byte inventory scan.
+The per-file recursive `mkdir` in the copy loop was also hoisted, since a flat
+directory of N files was paying N-1 syscalls that could not create anything.
+
+**Nothing about what is touched, written, or verified changed.** The same paths
+are reconstructed and the same paths are verified; only the number of requests
+in flight differs. Payloads are still consumed as they are produced rather than
+retained, so peak memory is bounded by the concurrency limit instead of by
+repository size. All 757 tests in `@viberevert/git` pass unchanged.
+
+### What is still not fixed
+
+**The structural cost remains.** One changed path still causes a complete
+checkout, a rewrite of every tracked file, and verification of every tracked
+file. Concurrency made that work faster, not smaller, which is why 4000 files
+still costs 19 seconds.
+
+Removing it means the oracle must reconstruct only the paths whose BEFORE state
+is actually needed. The obstacle is ordering rather than difficulty: the
+candidate set is not fully known until the live tree has been hashed, and that
+hashing currently happens inside the oracle callback, so the oracle cannot be
+scoped to a set that does not exist yet. Hoisting the live acquisition out of
+the oracle is what makes a scoped oracle possible, and it is a restructure of
+the contribution-capture path rather than a local change.
+
+**This is a known limitation of 0.8.0, not a defect being hidden.** The
+decision, the remaining design, and the criteria for reopening are recorded in
+[ADR 0008](adr/0008-end-of-session-oracle-cost.md).
 
 ### A caveat on the split
 

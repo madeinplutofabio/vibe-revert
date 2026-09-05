@@ -139,6 +139,7 @@ import {
 import picomatch from "picomatch";
 
 import { withCheckpointOracle } from "./checkpoint-oracle.js";
+import { mapWithConcurrency } from "./concurrency.js";
 import {
   diffPreparedMirrors,
   type NameStatusEntry,
@@ -862,27 +863,48 @@ async function acquireLive(
   //    source. Candidacy is fully determined here, so the storage decision
   //    happens while the payload exists rather than by retaining it.
   const trackedPaths = [...endIndex.byPath.keys()].sort();
+
+  // Path safety is checked for EVERY path first, in sorted order, before any
+  // observation runs. The check is synchronous and cheap, and doing it up
+  // front keeps the reported path deterministic: with concurrent observation,
+  // whichever worker happened to reach an unsafe path first would otherwise
+  // decide the error message.
+  const inventoryPaths: string[] = [];
   for (const path of trackedPaths) {
     if (isViberevertStorePath(path)) continue;
     const message = repoRelativePathSafetyError(path, "captureContribution.trackedInventory");
     if (message !== null) throw new Error(message);
+    inventoryPaths.push(path);
+  }
 
+  // Observed with bounded concurrency. Every path is still observed, and each
+  // one's payload is still consumed while it exists rather than retained, so
+  // at most `DEFAULT_FS_CONCURRENCY` payloads are alive at once instead of
+  // one. That preserves the streaming property this scan was written for.
+  //
+  // Order-independent by construction: `cache` and `inventory` are keyed, and
+  // `candidates` is a Set whose iteration order never reaches the artifact
+  // because `observationPaths` below sorts it. `consumePayload` writes
+  // content-addressed objects and one mirror file per path.
+  await mapWithConcurrency(inventoryPaths, async (path) => {
     const observation = await observePathState(repoRoot, path, endIndex);
     cache.set(path, observation.state);
 
+    let isCandidate = candidates.has(path);
     if (observation.state.worktree.kind === "regular") {
       const digest = observation.state.worktree.content_ref;
       inventory.set(path, digest);
       if (manifest.snapshots.file_hashes[path] !== digest) {
         candidates.add(path);
+        isCandidate = true;
       }
     }
 
-    if (candidates.has(path)) {
+    if (isCandidate) {
       await consumePayload(path, observation.state, observation.worktreeObject);
     }
     // observation.worktreeObject goes out of scope here, by design.
-  }
+  });
 
   // 9. The observation set: candidates plus caller extras, kept disjoint so
   //    the fence can name which of the two moved.

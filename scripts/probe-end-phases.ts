@@ -33,6 +33,7 @@ import { promisify } from "node:util";
 import { loadCheckpoint } from "../packages/git/src/checkpoint.js";
 import { withCheckpointOracle } from "../packages/git/src/checkpoint-oracle.js";
 import { restoreCheckpoint } from "../packages/git/src/restore.js";
+import { removeAndVerify } from "./bench-end-latency.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -109,7 +110,7 @@ async function splitOracle(
     windowsHide: true,
     maxBuffer: 1 << 26,
   }).catch(() => undefined);
-  await rm(tempRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+  await removeAndVerify(tempRoot);
   const t3 = performance.now();
 
   return { worktreeAdd: t1 - t0, restore: t2 - t1, teardown: t3 - t2 };
@@ -179,7 +180,7 @@ async function measure(files: number, runs: number): Promise<Phase> {
       teardown: median(teardowns),
     };
   } finally {
-    await rm(parent, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+    await removeAndVerify(parent);
   }
 }
 

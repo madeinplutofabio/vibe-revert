@@ -1,6 +1,6 @@
 # ADR 0008: End-of-session oracle materialization cost
 
-- Status: **Open**, 2026-09-05. The cost is measured and understood; the fix is deferred past 0.8.0.
+- Status: **Open**, 2026-09-05. Partially addressed: a concurrency fix took 21 percent off `end` at 4000 files. The STRUCTURAL cost remains and is deferred past 0.8.0.
 - Milestone: 0.8.0 (surgical recovery), step 15
 - Related: [performance](../performance.md), [ADR 0006: Session contribution and object store](0006-session-contribution-and-object-store.md); `packages/git/src/checkpoint-oracle.ts`, `packages/git/src/restore.ts`
 
@@ -59,9 +59,48 @@ touches every tracked file three times:
 So a session that edited one file in a 4000-file repository writes 8000 files
 and hashes 4000 more, to learn about one.
 
+## What was fixed, and what it was worth
+
+A CPU profile of one `end` on the 4000-file fixture was **82 percent idle**.
+The loops that walk every tracked file were issuing one `await`ed filesystem
+call per iteration, so libuv's thread pool held a single request at a time.
+Measured, 4000 files, one read plus one write each: 4305 ms sequential against
+641 ms at four in flight, flat beyond.
+
+Bounded concurrency was applied to the post-restore hash verification, the
+tracked-content copy, and the raw-byte inventory scan, and the per-file
+recursive `mkdir` was hoisted out of the copy loop. Same paths reconstructed,
+same paths verified, payloads still consumed rather than retained so memory
+stays bounded by the concurrency limit. All 757 `@viberevert/git` tests pass
+unchanged.
+
+Result on the identical benchmark: `end` at 4000 files went 24305 ms to
+19206 ms, a 21 percent improvement, and the `end`/`start` ratio fell from
+10.27x to 7.77x.
+
+**It is not enough.** 19 seconds for 4000 small files is still slow, and the
+fix was to the constant factor rather than to the shape. One changed path still
+causes a complete checkout, rewrite and verification of every tracked file.
+
+## The remaining obstacle, stated precisely
+
+A scoped oracle needs to know which paths to reconstruct. The candidate set is
+not fully known until the live tree has been hashed, because a file git
+considers clean can still have raw bytes that differ from the captured
+inventory, and any such file is a candidate. That hashing happens inside the
+oracle callback today, so the oracle cannot be scoped to a set that does not
+exist when it is created.
+
+Hoisting the live acquisition out of the oracle is what unlocks the scoped
+design, and it is a restructure of the contribution-capture ordering rather
+than a local change. It also has a subtlety worth naming in advance: the static
+candidate sources currently include the oracle's own `git status`, whose rename
+aliases are not obviously reproducible from the manifest alone.
+
 ## Decision
 
-**Ship 0.8.0 with this cost, documented, and defer the fix.**
+**Ship 0.8.0 with the remaining cost, documented, and defer the structural
+fix.**
 
 Reducing it means one of two changes, and both are architectural rather than
 local:

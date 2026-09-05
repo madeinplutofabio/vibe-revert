@@ -72,9 +72,18 @@ and does not gain after upgrading.
   `EndStateChangedDuringCapture` with the session left active, rather than
   persisting incoherent evidence.
 - `viberevert end` is measurably slower on larger repositories, because it
-  inventories every present tracked regular file. Measured at 3.4 s for 200
-  files and 24 s for 4000 on the reference machine. This is characterized rather
-  than fixed; see [docs/performance.md](docs/performance.md).
+  materializes the session-start checkpoint and inventories every present
+  tracked regular file. Measured on the reference machine at 3.3 s for 200
+  files and 19 s for 4000.
+- Several per-file loops in restore and capture now use bounded concurrency
+  instead of awaiting one filesystem call at a time, which took 21 percent off
+  `end` at 4000 files. The same paths are reconstructed and verified; only the
+  number of requests in flight changed. This also speeds up whole-session
+  rollback, which shares the restore path.
+- The structural cost is NOT fixed: one changed path still causes a complete
+  checkout, rewrite and verification of every tracked file. See
+  [docs/performance.md](docs/performance.md) and
+  [ADR 0008](docs/adr/0008-end-of-session-oracle-cost.md).
 
 ### Known limitations
 

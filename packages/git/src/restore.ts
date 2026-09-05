@@ -268,6 +268,7 @@ import {
   normalizePathArray,
 } from "@viberevert/session-format";
 import * as tar from "tar";
+import { mapWithConcurrency } from "./concurrency.js";
 import {
   RestoreExcludeDriftError,
   type RestoreExtractionConflict,
@@ -1279,11 +1280,21 @@ async function restoreTrackedDirtyContent(
         preservePaths: false,
       }),
     );
-    for (const rel of expectedPaths) {
-      const to = join(repoRoot, rel);
-      await mkdir(dirname(to), { recursive: true });
-      await writeFile(to, await readFile(join(staging, rel)));
+    // Parent directories FIRST, deduplicated. The previous shape issued one
+    // recursive `mkdir` per file, so a flat directory of N files paid N-1
+    // syscalls that could not create anything. Creating each distinct parent
+    // once is the same end state.
+    const parents = [...new Set(expectedPaths.map((rel) => dirname(join(repoRoot, rel))))];
+    for (const parent of parents) {
+      await mkdir(parent, { recursive: true });
     }
+
+    // Copy with bounded concurrency. Each path is independent, so ordering
+    // carries no meaning here, and the sequential shape was spending most of
+    // its time waiting on one syscall at a time. Identical files are written.
+    await mapWithConcurrency(expectedPaths, async (rel) => {
+      await writeFile(join(repoRoot, rel), await readFile(join(staging, rel)));
+    });
   } finally {
     // Best-effort scratch cleanup ONLY. A leaked OS-temp dir is preferable to
     // failing an otherwise-successful rollback. The inner try/catch ensures a
@@ -1385,31 +1396,33 @@ async function collectHashMismatches(
   fileHashes: Readonly<Record<string, string>>,
   mismatches: RestoreHashMismatch[],
 ): Promise<void> {
-  for (const [path, expectedSha256] of Object.entries(fileHashes)) {
+  // Hashed with bounded concurrency rather than one file at a time. Every
+  // entry is verified exactly as before; only the number in flight changes.
+  // `mapWithConcurrency` returns results in INPUT ORDER, so the mismatch list
+  // stays in `Object.entries` order and the error message is deterministic.
+  const entries = Object.entries(fileHashes);
+  const observed = await mapWithConcurrency(entries, async ([path]) => {
     const abs = join(repoRoot, path);
-    let actualSha256: string | null;
     try {
       const st = await lstat(abs);
-      if (!st.isFile()) {
-        actualSha256 = null;
-      } else {
-        try {
-          actualSha256 = await sha256File(abs);
-        } catch (err) {
-          if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-            actualSha256 = null;
-          } else {
-            throw err;
-          }
-        }
-      }
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-        actualSha256 = null;
-      } else {
+      if (!st.isFile()) return null;
+      try {
+        return await sha256File(abs);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
         throw err;
       }
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw err;
     }
+  });
+
+  for (let i = 0; i < entries.length; i += 1) {
+    const entry = entries[i];
+    if (entry === undefined) continue;
+    const [path, expectedSha256] = entry;
+    const actualSha256 = observed[i] ?? null;
     if (actualSha256 !== expectedSha256) {
       mismatches.push({ path, expectedSha256, actualSha256 });
     }
