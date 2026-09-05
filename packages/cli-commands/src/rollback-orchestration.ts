@@ -608,8 +608,13 @@ function bypassableByForce(refusal: RollbackRefusal): boolean {
  *
  * Exhaustiveness-checked for the same reason as `bypassableByForce`: a refusal
  * with no error shape cannot be surfaced to a user.
+ *
+ * Exported so the command layer can render a refusal it obtained as a VALUE
+ * from `deriveRollbackAdmission` through the same locked copy `checkRefusals`
+ * throws. Reaching an existing single owner, not a second mapping: a caller
+ * that rebuilt these errors itself would be the drift this function prevents.
  */
-function refusalError(targetSessionId: string, refusal: RollbackRefusal): Error {
+export function refusalError(targetSessionId: string, refusal: RollbackRefusal): Error {
   switch (refusal.kind) {
     case "active_session":
       return new RollbackActiveSessionRefusalError(refusal.activeSessionId);

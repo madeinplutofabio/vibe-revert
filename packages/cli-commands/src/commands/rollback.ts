@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Fabio Marcello Salvadori
 
-// `viberevert rollback <session-id> [--apply] [--force] [--json|--markdown]`
-// — restore a session's pre-session captured state per M D D59.
+// `viberevert rollback <session-id> [--only|--except|--finding|--risk]
+//                                   [--apply] [--force] [--json|--markdown]`
+// — restore a session's pre-session captured state per M D D59, in whole or in
+// part.
 //
 // =============================================================================
 // Architectural locks (must be preserved by all changes here)
@@ -128,12 +130,18 @@
 //     directly. The format-branch at the render+write step is
 //     explicit, NOT a one-liner.
 //
-// 13. **Single-timestamp policy (M C precedent).** One `now`
-//     value is sampled via `resolveNowForCliTimestamp()` BEFORE
-//     the lock and threaded into BOTH the lock metadata
-//     (`lockInfo.started_at`) AND the receipt's `written_at` AND
-//     the emergency checkpoint's `capturedAt`. No subsequent
-//     `Date.now()`/`new Date()` calls in this file.
+// 13. **Timestamp policy (revised in M 0.8.0 step 12).** The
+//     pre-lock `resolveNowForCliTimestamp()` sample now feeds ONLY
+//     the D22 lock metadata's `started_at`, which is exactly what
+//     that field means. Receipts are stamped INSIDE the lock,
+//     immediately before each is mapped, because a `written_at`
+//     chosen before an unbounded wait describes when the command
+//     was typed rather than when its receipt was produced. The
+//     legacy full path still samples once per operation, so its
+//     emergency checkpoint's `capturedAt` and its receipt's
+//     `written_at` remain equal to each other. `resolveNowForCliTimestamp`
+//     is the only clock this file reads; no `Date.now()`/`new Date()`
+//     appears here or in the locked phase.
 //
 // 14. **D74 unlock dependency.** Step 7 also updates
 //     `commands/start.ts` to remove the "MUST NOT name viberevert
@@ -212,66 +220,89 @@
 //     Cases (a)-(g) are clean retry; case (h) requires manual
 //     recovery via the emergency checkpoint surfaced in the error
 //     message.
+//
+// 17. **The locked region lives in `../rollback-locked-phase.ts`.**
+//     `execute()` performs pure argument validation, acquires the
+//     lock EXACTLY ONCE, and renders. Every rollback-state read,
+//     the admission decision, and all four operation cells belong
+//     to `runLockedRollbackPhase`. Locks #1, #3, #4, #5, #6, #13
+//     and #16 are enforced THERE now; they remain stated here
+//     because this is the command they constrain. The moved
+//     symbols keep their names, so a search for
+//     `loadExistingApplyReceipt` or `rollbackApplyReceiptPath`
+//     still lands on one definition.
+//
+// 18. **Refusals arrive as values; only faults throw.** The locked
+//     phase returns `decision: "refused"` rather than throwing,
+//     because a throw from inside the lock callback discards the
+//     result `withRollbackLockCapturingRelease` exists to preserve.
+//     Legacy refusals are rendered post-lock through
+//     `refusalError`, their single owner, so the copy stays
+//     identical to what `checkRefusals` throws.
+//
+// 19. **A lock-release failure forces exit 1 without hiding the
+//     outcome.** The stale lock directory is reported to stderr
+//     FIRST, before anything that can re-throw, and the operation's
+//     own result is still rendered in full. The two are independent
+//     facts: a rollback can succeed exactly as intended and still
+//     leave a lock nobody will release, and the next command cannot
+//     run until an operator removes it.
+//
+// 20. **Selectors are validated pre-lock and BOUND to their mode.**
+//     `--risk` is checked against the four levels and `--finding`
+//     against the full `fnd_<64 hex>` shape before the lock, like
+//     the session-id check. `resolveRollbackSelectionMode` then
+//     returns a value carrying the selectors on the selective arm
+//     and nothing on the full arm, so no downstream caller can pair
+//     a mode with selectors that contradict it.
 
-import { readFile } from "node:fs/promises";
 import { hostname } from "node:os";
-import { join } from "node:path";
 import {
   ConfigNotFoundError,
   ConfigParseError,
   ConfigValidationError,
-  generateRollbackId,
-  loadActiveSessionLock,
-  loadConfig,
   RepoRootNotFoundError,
   resolveRepoRoot,
   SessionNotFoundError,
 } from "@viberevert/core";
-import {
-  type EndOfSessionSnapshot,
-  GitNotAvailableError,
-  getHeadSha,
-  getStatusPorcelainZ,
-  loadEndOfSessionChangedPaths,
-  planRestoreCheckpoint,
-  type RestorePlan,
-  type StatusEntry,
-} from "@viberevert/git";
+import { GitNotAvailableError } from "@viberevert/git";
 import { type ReceiptRenderInput, renderReceipt } from "@viberevert/reporters";
 import {
-  type ReceiptFile,
-  ReceiptFileSchema,
+  type RiskLevel,
+  RiskLevelSchema,
   ROLLBACK_OUT_OF_SCOPE_NOTICE,
 } from "@viberevert/session-format";
 import { Command, Option } from "clipanion";
 
-import { writeFileAtomic } from "../atomic.js";
-import { CheckpointListLoadError, CollisionExitSentinel } from "../checkpoint-helpers.js";
-import {
-  createEmergencyCheckpoint,
-  type EmergencyCheckpointResult,
-  RollbackEmergencyCheckpointError,
-} from "../emergency-checkpoint.js";
+import { CollisionExitSentinel } from "../checkpoint-helpers.js";
+import { RollbackEmergencyCheckpointError } from "../emergency-checkpoint.js";
 import { ConcurrentOperationError, type LockInfo } from "../locks.js";
-import { withRollbackLock } from "../rollback-lock.js";
+import type { RollbackAdmissionRefusal } from "../rollback-admission.js";
+import { withRollbackLockCapturingRelease } from "../rollback-lock.js";
 import {
-  buildReceiptForApply,
-  buildReceiptForDryRun,
+  ApplyReceiptCorruptError,
+  type LockedRollbackOutcome,
+  RollbackReceiptWriteError,
+  type RollbackSelectionMode,
+  resolveRollbackSelectionMode,
+  runLockedRollbackPhase,
+  type SelectiveRollbackOutcome,
+} from "../rollback-locked-phase.js";
+import {
   CheckpointArtifactsMissingError,
-  checkRefusals,
-  type ExistingApplyReceipt,
   RollbackActiveSessionRefusalError,
   RollbackAlreadyAppliedError,
   RollbackDirtyTreeRefusalError,
   RollbackHeadMismatchError,
   RollbackUnEndedSessionRefusalError,
-  resolveSessionAndCheckpoint,
+  refusalError,
 } from "../rollback-orchestration.js";
 import {
   RuntimeEnvInvalidError,
   resolveNowForCliTimestamp,
   resolveProductVersionForReport,
 } from "../runtime-env.js";
+import type { SelectionSelectors } from "../selection-resolver.js";
 
 // =============================================================================
 // Constants
@@ -283,118 +314,13 @@ import {
 // `../rollback-lock.ts`.
 
 // =============================================================================
-// Internal error classes (file-local — not exported)
+// Moved to `../rollback-locked-phase.ts`
 // =============================================================================
-
-/**
- * Thrown by `loadExistingApplyReceipt` when the apply-receipt
- * file exists at the canonical D68 path but is unusable for the
- * D70 idempotency check. Per lock #5, the CLI fails closed on
- * every malformed-receipt mode rather than silently treating it
- * as "no existing apply receipt." Cases covered:
- *   - Non-ENOENT read failure (EACCES, ENOTDIR, EISDIR, ...)
- *   - JSON parse failure
- *   - Schema validation failure (ReceiptFileSchema rejection)
- *   - Receipt mode is not "apply" (the CLI never wrote a
- *     non-apply receipt to this path; presence here means
- *     corruption or hand-edit)
- *   - pre_rollback_checkpoint_id is null (D69 refine should
- *     catch this at parse, but defensive)
- *   - session_id does not match the requested target sessionId
- *     (foreign receipt at this path = corruption)
- */
-class ApplyReceiptCorruptError extends Error {
-  override readonly name = "ApplyReceiptCorruptError";
-  constructor(
-    readonly receiptPath: string,
-    readonly reason: string,
-    cause?: unknown,
-  ) {
-    super(
-      `Apply receipt at ${receiptPath} is unusable for D70 idempotency check: ${reason}. ` +
-        `Inspect the file or remove it manually if you accept that the prior rollback's audit record is being discarded.`,
-      cause === undefined ? undefined : { cause },
-    );
-  }
-}
-
-/**
- * Thrown by `writeReceiptAtomically` when the underlying
- * writeFileAtomic call fails (disk full, permission denied,
- * EROFS, etc.). Dual-mode message based on whether a recovery
- * handle was supplied:
- *
- *   - APPLY mode (recoveryCheckpointId provided) — lock #16
- *     case (h): the receipt is missing AND restoreCheckpoint
- *     already ran, so mutation MAY have occurred. The message
- *     warns about possible mutation AND surfaces the D65
- *     emergency checkpoint id/name as the recovery handle (the
- *     receipt that would normally carry
- *     pre_rollback_checkpoint_id does not exist, so this error
- *     message is the user's ONLY surface for the recovery handle).
- *   - DRY-RUN mode (no recovery handle): dry-run never mutates,
- *     so the message correctly states no mutation was attempted
- *     and omits any recovery hint.
- */
-class RollbackReceiptWriteError extends Error {
-  override readonly name = "RollbackReceiptWriteError";
-  constructor(
-    readonly receiptPath: string,
-    cause: unknown,
-    readonly recoveryCheckpointId?: string,
-    readonly recoveryCheckpointName?: string,
-  ) {
-    const mutationHint =
-      recoveryCheckpointId !== undefined
-        ? "The working tree may have been mutated; inspect 'git status'."
-        : "No rollback mutation was attempted.";
-
-    const recoveryHint =
-      recoveryCheckpointId !== undefined
-        ? ` The pre-rollback emergency checkpoint is ${recoveryCheckpointId}` +
-          (recoveryCheckpointName !== undefined ? ` (name: ${recoveryCheckpointName})` : "") +
-          `. Restore from it BEFORE retrying rollback to avoid layering a partial apply on top of partial state.`
-        : "";
-
-    super(
-      `Failed to write rollback receipt to ${receiptPath}: ${
-        cause instanceof Error ? cause.message : String(cause)
-      }. ${mutationHint}${recoveryHint}`,
-      { cause },
-    );
-  }
-}
-
-// =============================================================================
-// D68 receipt path helpers (lock #4 — no inline path joins)
-// =============================================================================
-
-/**
- * Path to the dry-run receipt file per D68. Dry-run and apply
- * persist to DIFFERENT files so dry-run never overwrites the
- * apply audit record (preserves D70 idempotency).
- */
-function rollbackDryRunReceiptPath(repoRoot: string, sessionId: string): string {
-  return join(repoRoot, ".viberevert", "sessions", sessionId, "rollback-dry-run-receipt.json");
-}
-
-/**
- * Path to the apply receipt file per D68 (WRITE intent).
- */
-function rollbackApplyReceiptPath(repoRoot: string, sessionId: string): string {
-  return join(repoRoot, ".viberevert", "sessions", sessionId, "rollback-receipt.json");
-}
-
-/**
- * Same file as `rollbackApplyReceiptPath` — separate name conveys
- * READ intent (existence-check + parse via `loadExistingApplyReceipt`)
- * vs WRITE intent. The duplication is intentional for call-site
- * readability and so a future D68 path change updates BOTH the
- * read site AND the write site via one helper each.
- */
-function existingApplyReceiptPath(repoRoot: string, sessionId: string): string {
-  return rollbackApplyReceiptPath(repoRoot, sessionId);
-}
+//
+// `ApplyReceiptCorruptError`, `RollbackReceiptWriteError`, the three D68 path
+// helpers, `loadExistingApplyReceipt` and `writeReceiptAtomically` all moved
+// with the locked phase that uses them. They are imported back here only so
+// `handleKnownError` can keep surfacing their locked copy verbatim.
 
 // =============================================================================
 // Pure helpers
@@ -411,8 +337,17 @@ function buildInvocationCommandString(args: {
   readonly apply: boolean;
   readonly force: boolean;
   readonly format: "terminal" | "markdown" | "json";
+  readonly selectors: SelectionSelectors;
 }): string {
   const parts = [`viberevert rollback ${args.session}`];
+  // Selectors first, in the order they are declared, and repeated once per
+  // supplied value. A competing invocation's refusal copy shows this string
+  // verbatim, and "another rollback is running" is far less useful when it
+  // omits WHICH changes that rollback is touching.
+  for (const value of args.selectors.only) parts.push(`--only ${value}`);
+  for (const value of args.selectors.except) parts.push(`--except ${value}`);
+  for (const value of args.selectors.finding) parts.push(`--finding ${value}`);
+  if (args.selectors.risk !== undefined) parts.push(`--risk ${args.selectors.risk}`);
   if (args.apply) parts.push("--apply");
   if (args.force) parts.push("--force");
   if (args.format === "json") parts.push("--json");
@@ -420,107 +355,47 @@ function buildInvocationCommandString(args: {
   return parts.join(" ");
 }
 
-// =============================================================================
-// I/O helpers
-// =============================================================================
-
 /**
- * Read+parse+validate the existing apply receipt for the D70
- * idempotency check. Returns `null` ONLY when the file is
- * genuinely absent (ENOENT). All other failure modes — non-ENOENT
- * read errors AND parse / shape / mode / session-id mismatches —
- * throw `ApplyReceiptCorruptError` per lock #5 fail-closed
- * discipline.
- */
-async function loadExistingApplyReceipt(
-  repoRoot: string,
-  sessionId: string,
-): Promise<ExistingApplyReceipt | null> {
-  const receiptPath = existingApplyReceiptPath(repoRoot, sessionId);
-  let raw: string;
-  try {
-    raw = await readFile(receiptPath, "utf8");
-  } catch (err) {
-    if (
-      err !== null &&
-      typeof err === "object" &&
-      "code" in err &&
-      (err as { code: string }).code === "ENOENT"
-    ) {
-      return null;
-    }
-    // Any non-ENOENT read failure (EACCES, ENOTDIR, EISDIR, EIO,
-    // etc.) is treated as corruption-equivalent for the purpose
-    // of clean exit. We cannot trust the file's contents enough
-    // to skip the D70 check, and we cannot read it to enforce
-    // the check — fail closed.
-    throw new ApplyReceiptCorruptError(receiptPath, "failed to read apply receipt", err);
-  }
-
-  let parsed: ReceiptFile;
-  try {
-    const json: unknown = JSON.parse(raw);
-    parsed = ReceiptFileSchema.parse(json);
-  } catch (err) {
-    throw new ApplyReceiptCorruptError(receiptPath, "JSON parse or schema validation failed", err);
-  }
-
-  if (parsed.mode !== "apply") {
-    throw new ApplyReceiptCorruptError(
-      receiptPath,
-      `mode is ${JSON.stringify(parsed.mode)} (expected "apply"). The CLI never writes a non-apply receipt to this path; the file is corrupted or hand-edited.`,
-    );
-  }
-  if (parsed.pre_rollback_checkpoint_id === null) {
-    throw new ApplyReceiptCorruptError(
-      receiptPath,
-      "pre_rollback_checkpoint_id is null in apply mode (D69 refine violation)",
-    );
-  }
-  if (parsed.session_id !== sessionId) {
-    throw new ApplyReceiptCorruptError(
-      receiptPath,
-      `session_id ${JSON.stringify(parsed.session_id)} does not match target ${JSON.stringify(sessionId)}`,
-    );
-  }
-  return parsed as ExistingApplyReceipt;
-}
-
-/**
- * Write a receipt file atomically via the CLI's private
- * `writeFileAtomic`. Receipt JSON is serialized with `null, 2`
- * indentation for human-readable on-disk audit trail (the
- * stdout JSON renderer uses the same indentation per lock #12).
- * I/O failures wrap as `RollbackReceiptWriteError` so the CLI
- * surfaces a clean stderr message instead of letting a raw
- * fs error propagate to Clipanion's crash surface.
+ * One line per admission refusal this command must render itself.
  *
- * The optional `recovery` arg threads the D65 emergency
- * checkpoint id+name through to `RollbackReceiptWriteError`
- * so apply-mode receipt-write failures surface the recovery
- * handle to the user (the missing receipt was the user's only
- * other source of pre_rollback_checkpoint_id — per lock #16
- * case (h)). Dry-run callers omit `recovery` (no emergency CP),
- * and the error message branches accordingly to avoid claiming
- * a non-existent mutation.
+ * The LEGACY refusals are not here: they go through `refusalError`, which is
+ * their single owner and carries the locked copy `checkRefusals` throws. Only
+ * the selective-history dimension, which produces values and never errors,
+ * needs its own rendering.
  */
-async function writeReceiptAtomically(
-  path: string,
-  receipt: ReceiptFile,
-  recovery?: {
-    readonly recoveryCheckpointId: string;
-    readonly recoveryCheckpointName: string;
-  },
-): Promise<void> {
-  try {
-    await writeFileAtomic(path, `${JSON.stringify(receipt, null, 2)}\n`);
-  } catch (err) {
-    throw new RollbackReceiptWriteError(
-      path,
-      err,
-      recovery?.recoveryCheckpointId,
-      recovery?.recoveryCheckpointName,
-    );
+function describeSelectiveHistoryRefusal(
+  refusal: Extract<RollbackAdmissionRefusal, { readonly source: "selective_history" }>["refusal"],
+): string {
+  switch (refusal.kind) {
+    case "history_fault":
+      return (
+        `Cannot proceed: this session's selective rollback history could not be established ` +
+        `(${refusal.fault.outcome} at ${refusal.fault.path}: ${refusal.fault.detail}).\n` +
+        `A rollback that cannot read its own history cannot tell whether a prior apply left the tree partly restored.\n` +
+        `Re-run without --apply to inspect the session; fix or remove the artifact above before applying.\n`
+      );
+    case "prior_apply_incomplete":
+      return (
+        `Cannot proceed: a prior selective rollback (${refusal.blocker.rollbackId}, ${refusal.blocker.writtenAt}) ` +
+        `did not finalize, so the working tree may be partly restored.\n` +
+        `Restore from its pre-rollback checkpoint ${refusal.blocker.preRollbackCheckpointId} first:\n` +
+        `  viberevert rollback --checkpoint ${refusal.blocker.preRollbackCheckpointId}\n` +
+        (refusal.allBlockers.length > 1
+          ? `${refusal.allBlockers.length} invocations are blocking; the one above is the earliest, and its checkpoint is the last state before any damage.\n`
+          : "")
+      );
+    case "selective_apply_already_applied":
+      return (
+        `Cannot proceed: surgical recovery has already begun on this session ` +
+        `(${refusal.appliedInvocations.join(", ")}), and a whole-session rollback has no way to reason about a tree ` +
+        `already modified by selective operations.\n` +
+        `To finish restoring the rest of the contribution, use the selective engine:\n` +
+        `  viberevert rollback <session> --only '**' --apply\n`
+      );
+    default: {
+      const unhandled: never = refusal;
+      return unhandled;
+    }
   }
 }
 
@@ -646,6 +521,20 @@ Apply mode creates an EMERGENCY pre-rollback checkpoint of the current working t
 BEFORE the restore mutation, named "pre-rollback-<truncated-sess-id>". The receipt
 records its ID for recovery.
 
+SELECTIVE ROLLBACK. With no selector this restores the whole session, exactly as it
+always has. Supplying ANY selector, including --except on its own, restores only the
+change groups it resolves to, and leaves every other managed path untouched:
+
+- --only / --except take path globs and match a renamed file through its whole alias
+  set, so --only 'payments/**' still matches a file renamed out of payments/.
+- --risk <level> is an AT-OR-ABOVE threshold, so --risk high covers high and critical.
+- --finding <id> takes finding ids from \`viberevert check --since <session>\`.
+- Different positive families INTERSECT; --except is subtracted last; exclusion is
+  group-atomic, so excluding any path in a rename group excludes the group.
+
+Selective rollback needs the session's durable contribution, which sessions ended
+before 0.8.0 do not have. It refuses rather than guessing when the world moved on.
+
 ${ROLLBACK_OUT_OF_SCOPE_NOTICE}
     `,
     examples: [
@@ -656,6 +545,14 @@ ${ROLLBACK_OUT_OF_SCOPE_NOTICE}
         "$0 rollback sess_01JV8Z0N6E7ABCDEFGHJKMNPQR --apply --force",
       ],
       ["Emit machine-readable JSON receipt", "$0 rollback sess_01JV8Z0N6E7ABCDEFGHJKMNPQR --json"],
+      [
+        "Preview restoring only the payments changes",
+        "$0 rollback sess_01JV8Z0N6E7ABCDEFGHJKMNPQR --only 'payments/**'",
+      ],
+      [
+        "Restore every high-and-above change, keeping tests",
+        "$0 rollback sess_01JV8Z0N6E7ABCDEFGHJKMNPQR --risk high --except 'tests/**' --apply",
+      ],
     ],
   });
 
@@ -677,6 +574,30 @@ ${ROLLBACK_OUT_OF_SCOPE_NOTICE}
   markdown = Option.Boolean("--markdown", false, {
     description:
       "Emit the receipt as CommonMark markdown to stdout. Mutually exclusive with --json.",
+  });
+
+  // ---------------------------------------------------------------------------
+  // Selectors. ANY of them, including --except alone, enters selective mode.
+  // ---------------------------------------------------------------------------
+
+  only = Option.Array("--only", [], {
+    description:
+      "Restore only change groups matching this glob. Repeatable (union). Matches renamed paths through their whole alias set.",
+  });
+
+  except = Option.Array("--except", [], {
+    description:
+      "Exclude change groups matching this glob. Repeatable (union), subtracted last, and group-atomic.",
+  });
+
+  finding = Option.Array("--finding", [], {
+    description:
+      "Restore the change groups a finding applies to. Repeatable (union). Requires a report from `viberevert check --since`.",
+  });
+
+  risk = Option.String("--risk", {
+    description:
+      "Restore change groups at or above this risk level (low|medium|high|critical). A threshold, not an exact match.",
   });
 
   override async execute(): Promise<number> {
@@ -719,12 +640,56 @@ ${ROLLBACK_OUT_OF_SCOPE_NOTICE}
     }
     const sessionId = this.session;
 
-    // Step D: resolve the wall-clock timestamp ONCE for this command
-    // (D13 single-timestamp policy per lock #13). Threaded into
-    // lockInfo, the receipt's written_at, and the emergency
-    // checkpoint's capturedAt. RuntimeEnvInvalidError (test-only
-    // failure mode for a malformed env override) surfaces here
-    // before lock acquisition.
+    // Step C2: validate --risk before the lock, like every other pure
+    // argument check. Clipanion accepts any string, and a typo must not
+    // survive as far as a selection that silently matches nothing.
+    let risk: RiskLevel | undefined;
+    if (this.risk !== undefined) {
+      const parsed = RiskLevelSchema.safeParse(this.risk);
+      if (!parsed.success) {
+        this.context.stderr.write(
+          `Invalid --risk ${JSON.stringify(this.risk)}. ` +
+            `Expected one of: ${RiskLevelSchema.options.join(", ")}.\n`,
+        );
+        return 1;
+      }
+      risk = parsed.data;
+    }
+
+    // Step C3: --finding takes FULL finding ids. The locked selection
+    // semantics allow an unambiguous short prefix, and resolving one to the
+    // full id the attempt marker must persist needs the resolver to report
+    // which id it matched. Until it does, a prefix is refused here rather
+    // than persisted as itself, which would make the marker unreadable after
+    // a crash — the one thing that artifact exists to survive.
+    const badFinding = this.finding.find((value) => !/^fnd_[0-9a-f]{64}$/.test(value));
+    if (badFinding !== undefined) {
+      this.context.stderr.write(
+        `Invalid --finding ${JSON.stringify(badFinding)}. ` +
+          `Expected a full finding id of the form fnd_<64 lowercase hex>, ` +
+          `as printed by \`viberevert check --since <session> --json\`. ` +
+          `Short prefixes are not accepted yet.\n`,
+      );
+      return 1;
+    }
+
+    const selectors: SelectionSelectors = {
+      only: this.only,
+      except: this.except,
+      finding: this.finding,
+      ...(risk !== undefined ? { risk } : {}),
+    };
+    // PURE, and it binds the mode to the selectors that produced it, so the
+    // locked phase cannot be handed a mode its selectors disagree with.
+    const selection: RollbackSelectionMode = resolveRollbackSelectionMode(selectors);
+
+    // Step D: resolve the wall-clock timestamp for the D22 lock metadata.
+    // The RECEIPTS no longer read this value: they are stamped inside the
+    // lock, immediately before each one is mapped, because a `written_at`
+    // sampled here would describe when the command was typed rather than
+    // when its receipt was produced. `started_at` is exactly the field that
+    // should still be sampled before acquisition. RuntimeEnvInvalidError
+    // (a malformed env override) surfaces here, before the lock.
     let now: string;
     try {
       now = resolveNowForCliTimestamp();
@@ -757,6 +722,7 @@ ${ROLLBACK_OUT_OF_SCOPE_NOTICE}
       apply: this.apply,
       force,
       format,
+      selectors,
     });
 
     const lockInfo: LockInfo = {
@@ -772,190 +738,192 @@ ${ROLLBACK_OUT_OF_SCOPE_NOTICE}
     //   D63 active → D70 applied → D64 head → D61b un_ended → D61 dirty
     // -------------------------------------------------------------------------
 
-    let protectedResult: { readonly receipt: ReceiptFile };
+    let locked: Awaited<ReturnType<typeof withRollbackLockCapturingRelease<LockedRollbackOutcome>>>;
     try {
-      protectedResult = await withRollbackLock(repoRoot, lockInfo, async () => {
-        // 1. loadConfig — INSIDE the lock so rollback uses the config
-        //    snapshot in effect at lock-acquisition time (lock #1).
-        const config = await loadConfig(repoRoot);
-        const rollbackExcludePatterns = config.rollback?.exclude ?? [];
-
-        // 2. loadActiveSessionLock — may return null.
-        const activeLock = await loadActiveSessionLock(repoRoot);
-
-        // 3. resolveSessionAndCheckpoint — throws SessionNotFoundError
-        //    or CheckpointArtifactsMissingError.
-        const { session, manifest, checkpointDir } = await resolveSessionAndCheckpoint(
+      locked = await withRollbackLockCapturingRelease(repoRoot, lockInfo, () =>
+        runLockedRollbackPhase({
+          repoRoot,
           sessionId,
-          repoRoot,
-        );
-
-        // 4. loadEndOfSessionChangedPaths — discriminated union
-        //    (present|missing) per Step 4 lock.
-        const endOfSessionSnapshot: EndOfSessionSnapshot = await loadEndOfSessionChangedPaths(
-          session,
-          repoRoot,
-        );
-
-        // 5. getStatusPorcelainZ — parsed StatusEntry[] for the
-        //    current dirty-tree comparison (D61).
-        const currentStatus: readonly StatusEntry[] = await getStatusPorcelainZ(repoRoot);
-
-        // 6. getHeadSha — current HEAD sha for the D64 check.
-        const currentHeadSha = await getHeadSha(repoRoot);
-
-        // 7. loadExistingApplyReceipt — fail-closed per lock #5.
-        //    null only on genuine absence; throws on any corruption.
-        const existingApplyReceipt = await loadExistingApplyReceipt(repoRoot, sessionId);
-
-        // 8. checkRefusals — applies the D75 force policy;
-        //    throws the first applicable refusal in apply mode;
-        //    returns the outcome (with warnings populated) in
-        //    dry-run mode.
-        const outcome = checkRefusals({
-          targetSessionId: sessionId,
-          session,
-          manifest,
-          currentHeadSha,
-          currentStatus,
-          endOfSessionSnapshot,
-          activeLock,
-          existingApplyReceipt,
           mode,
           force,
-        });
-
-        // 9. planRestoreCheckpoint — ALWAYS computed. Dry-run uses
-        //    it as the basis for receipt.results[]; apply uses it
-        //    as preRestorePlan for both preflight-failure
-        //    propagation (rule #12 in orchestration) AND post-restore
-        //    per-path results synthesis.
-        const plan: RestorePlan = await planRestoreCheckpoint(checkpointDir, {
-          repoRoot,
-          rollbackExcludePatterns,
-          allowHeadMismatch: outcome.allowHeadMismatch,
-        });
-
-        const rollbackId = generateRollbackId();
-        let receipt: ReceiptFile;
-
-        if (mode === "apply") {
-          // 10a. D65 emergency pre-rollback checkpoint. Dry-run
-          //      NEVER reaches this branch per lock #3.
-          //      RollbackEmergencyCheckpointError on failure
-          //      PREVENTS the apply receipt from being written
-          //      (per lock #16 case (g) — no apply receipt = no
-          //      D70 lock; clean retry).
-          let emergency: EmergencyCheckpointResult;
-          try {
-            emergency = await createEmergencyCheckpoint({
-              repoRoot,
-              rollbackExcludePatterns,
-              targetSessionId: sessionId,
-              now,
-              invocationCommand,
-            });
-          } catch (err) {
-            // Presentation stays here: the command-neutral helper propagates
-            // the typed error, and this preserves the pre-extraction stderr
-            // text and the CollisionExitSentinel exit-1 flow byte-for-byte.
-            if (err instanceof CheckpointListLoadError) {
-              this.context.stderr.write(`Error reading existing checkpoints: ${err.message}\n`);
-              throw new CollisionExitSentinel();
-            }
-            throw err;
-          }
-
-          // 11a. Build the apply receipt. buildReceiptForApply
-          //      calls restoreCheckpoint internally; on throw it
-          //      populates receipt.failures via classifyRestoreError
-          //      and leaves receipt.results empty per D76
-          //      conservative semantics. Per lock #16, the receipt
-          //      IS written regardless of restore success/failure
-          //      because the emergency CP already exists and the
-          //      tree state is no longer trusted as post-session.
-          receipt = await buildReceiptForApply({
-            rollbackId,
-            writtenAt: now,
-            session,
-            checkpointDir,
-            repoRoot,
-            rollbackExcludePatterns,
-            preRollbackCheckpointId: emergency.checkpointId,
-            preRestorePlan: plan,
-            outcome,
-            forced: force,
-          });
-
-          // 12a. Persist the apply receipt atomically to its
-          //      D68 path. Writes for every apply attempt that
-          //      reached this stage (lock #16). The emergency CP
-          //      handle is threaded into writeReceiptAtomically's
-          //      `recovery` arg so RollbackReceiptWriteError
-          //      (lock #16 case (h)) surfaces the recovery handle
-          //      in stderr — the missing receipt was the user's
-          //      only other source of pre_rollback_checkpoint_id.
-          await writeReceiptAtomically(rollbackApplyReceiptPath(repoRoot, sessionId), receipt, {
-            recoveryCheckpointId: emergency.checkpointId,
-            recoveryCheckpointName: emergency.name,
-          });
-        } else {
-          // 10b. Dry-run: skip emergency checkpoint (lock #3).
-          //      Build the dry-run receipt — pure synthesis from
-          //      plan + outcome, including rule-#12 preflight
-          //      propagation from plan.preflight_failures.
-          receipt = buildReceiptForDryRun({
-            rollbackId,
-            writtenAt: now,
-            session,
-            plan,
-            outcome,
-          });
-
-          // 11b. Persist the dry-run receipt atomically to its
-          //      D68 path. Overwrites any prior dry-run receipt
-          //      freely; never touches the apply receipt path.
-          //      No `recovery` arg — dry-run has no emergency CP
-          //      to recover from, and RollbackReceiptWriteError's
-          //      message branches accordingly to avoid claiming a
-          //      non-existent mutation.
-          await writeReceiptAtomically(rollbackDryRunReceiptPath(repoRoot, sessionId), receipt);
-        }
-
-        return { receipt };
-      });
+          selection,
+          clock: resolveNowForCliTimestamp,
+          invocationCommand,
+          stderr: this.context.stderr,
+        }),
+      );
     } catch (err) {
       return handleKnownError(this.context.stderr, err);
     }
+    const outcome = locked.result;
 
     // -------------------------------------------------------------------------
-    // POST-LOCK PHASE: render the receipt to stdout. Lock has been
-    // released; only stdout writes happen here.
+    // POST-LOCK PHASE: rendering and exit status only. No I/O against
+    // rollback state happens below this line.
     // -------------------------------------------------------------------------
 
-    const renderInput: ReceiptRenderInput = {
-      file: protectedResult.receipt,
+    // Written FIRST, and before anything that can re-throw, so a stranded lock
+    // directory is reported even when rendering the outcome exits non-locally.
+    // The two facts are independent: an operation can have completed exactly as
+    // intended and still have left a lock nobody will release.
+    if (locked.lockRelease.state === "release_failed") {
+      this.context.stderr.write(
+        `The rollback completed, but its lock could not be released: ${
+          locked.lockRelease.cause instanceof Error
+            ? locked.lockRelease.cause.message
+            : String(locked.lockRelease.cause)
+        }\n` +
+          `Remove this stale lock directory before the next viberevert command:\n  ${locked.lockRelease.path}\n`,
+      );
+    }
+
+    const operationExit = this.renderOutcome(outcome, {
+      sessionId,
+      mode,
+      format,
       productVersion,
-    };
-    // Per lock #12: JSON renderer returns `unknown` (the ReceiptFile
-    // reference per D38); CLI must serialize via JSON.stringify.
-    // Terminal/markdown overloads return `string` and write directly.
-    if (format === "json") {
-      const rendered = renderReceipt(renderInput, "json");
-      this.context.stdout.write(`${JSON.stringify(rendered, null, 2)}\n`);
-    } else if (format === "markdown") {
-      this.context.stdout.write(renderReceipt(renderInput, "markdown"));
-    } else {
-      this.context.stdout.write(renderReceipt(renderInput, "terminal"));
-    }
+    });
 
-    // Exit code per D66:
-    //   - dry-run: always 0 (informational; preflight failures
-    //     surface in receipt.failures but don't change exit code).
-    //   - apply: 0 if receipt.failures is empty; 1 otherwise.
-    if (mode === "dry_run") {
-      return 0;
+    // A stale lock requires operator action, so it forces exit 1 while the
+    // outcome above is still reported in full. Reporting success here would
+    // let an automated caller move on from a repository the next command
+    // cannot operate on.
+    return locked.lockRelease.state === "release_failed" ? 1 : operationExit;
+  }
+
+  /**
+   * Render one locked-phase outcome and return its exit status.
+   *
+   * Exhaustive over `LockedRollbackOutcome`, so a new arm is a compile error
+   * rather than a silent exit 0.
+   */
+  private renderOutcome(
+    outcome: LockedRollbackOutcome,
+    context: {
+      readonly sessionId: string;
+      readonly mode: "dry_run" | "apply";
+      readonly format: "terminal" | "markdown" | "json";
+      readonly productVersion: string;
+    },
+  ): number {
+    const { stderr, stdout } = this.context;
+
+    switch (outcome.kind) {
+      case "refused": {
+        // Legacy refusals go through their single owner, so the copy is the
+        // same one `checkRefusals` throws and cannot drift from it.
+        if (outcome.primary.source === "legacy") {
+          return handleKnownError(stderr, refusalError(context.sessionId, outcome.primary.refusal));
+        }
+        stderr.write(describeSelectiveHistoryRefusal(outcome.primary.refusal));
+        return 1;
+      }
+
+      case "admission_failed":
+        // NOT a refusal: no rule said no, the gate could not ask. Surfaced
+        // through the same mapping the cause would have taken had it been
+        // thrown, which is exactly what it did before the gate existed.
+        return handleKnownError(stderr, outcome.cause);
+
+      case "full": {
+        const renderInput: ReceiptRenderInput = {
+          file: outcome.receipt,
+          productVersion: context.productVersion,
+        };
+        // Per lock #12: the JSON renderer returns `unknown` (the ReceiptFile
+        // reference per D38) and the CLI serializes it; the terminal and
+        // markdown overloads return `string` and are written directly.
+        if (context.format === "json") {
+          stdout.write(`${JSON.stringify(renderReceipt(renderInput, "json"), null, 2)}\n`);
+        } else if (context.format === "markdown") {
+          stdout.write(renderReceipt(renderInput, "markdown"));
+        } else {
+          stdout.write(renderReceipt(renderInput, "terminal"));
+        }
+        // D66: dry run is informational and always 0; apply is 0 only with an
+        // empty failure list.
+        return context.mode === "dry_run" ? 0 : outcome.receipt.failures.length === 0 ? 0 : 1;
+      }
+
+      case "selective":
+        return this.renderSelective(outcome.outcome, context.mode);
+
+      default: {
+        const unhandled: never = outcome;
+        return unhandled;
+      }
     }
-    return protectedResult.receipt.failures.length === 0 ? 0 : 1;
+  }
+
+  /**
+   * Render a selective outcome.
+   *
+   * Deliberately plain: the receipt is the artifact of record, and a formatted
+   * per-path presentation belongs with the rest of the reporting work. What is
+   * NOT deferred is the exit status, which every arm decides explicitly.
+   */
+  private renderSelective(outcome: SelectiveRollbackOutcome, mode: "dry_run" | "apply"): number {
+    const { stderr, stdout } = this.context;
+    const emit = (receipt: unknown): void => {
+      stdout.write(`${JSON.stringify(receipt, null, 2)}\n`);
+    };
+
+    switch (outcome.kind) {
+      case "selection_invalid":
+        stderr.write(
+          `The selection could not be resolved: ${outcome.reason.code}${
+            "detail" in outcome.reason ? ` — ${outcome.reason.detail}` : ""
+          }${"selector" in outcome.reason ? ` (${outcome.reason.selector})` : ""}\n`,
+        );
+        return 1;
+
+      case "selection_empty":
+        // Locked selection semantics: an explicit no-op previewing, a refusal
+        // applying. Nothing was mutated either way, and the exit status says
+        // which of the two happened.
+        stderr.write("The selectors matched no change group in this session's contribution.\n");
+        return mode === "dry_run" ? 0 : 1;
+
+      case "preview_failed":
+        stderr.write(
+          `The selective preview failed at the ${outcome.phase} stage: ${
+            outcome.cause instanceof Error ? outcome.cause.message : String(outcome.cause)
+          }\n`,
+        );
+        for (const warning of outcome.cleanupWarnings) stderr.write(`  cleanup: ${warning}\n`);
+        return 1;
+
+      case "previewed":
+        emit(outcome.receipt);
+        for (const warning of outcome.cleanupWarnings) stderr.write(`  cleanup: ${warning}\n`);
+        // Informational, exactly as the legacy dry run is: an ineligible
+        // preview is a finding to read, not a command failure.
+        return 0;
+
+      case "applied": {
+        const applied = outcome.outcome;
+        if (applied.kind === "finalized") {
+          emit(applied.receipt);
+          // Success is the CONJUNCTION, not either half. A finalized receipt
+          // recording a failed restore is a successfully recorded failure.
+          return applied.receipt.mode === "apply" && applied.receipt.outcome === "succeeded"
+            ? 0
+            : 1;
+        }
+        stderr.write(`The selective rollback did not complete: ${applied.kind}\n`);
+        if ("recovery" in applied && applied.recovery.status === "created") {
+          stderr.write(
+            `The pre-rollback emergency checkpoint is ${applied.recovery.checkpointId}. ` +
+              `Restore from it before retrying.\n`,
+          );
+        }
+        return 1;
+      }
+
+      default: {
+        const unhandled: never = outcome;
+        return unhandled;
+      }
+    }
   }
 }

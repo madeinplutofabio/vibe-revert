@@ -323,7 +323,20 @@ export {
 
 // Runtime values: identity generators.
 export { generateCheckpointId } from "./ids.js";
-
+// Inferred TypeScript types: the read-only selective preview (M 0.8.0 step 12).
+export type {
+  PreviewSelectiveRestoreOptions,
+  SelectivePreviewOutcome,
+  SelectivePreviewPath,
+  SelectiveRestorePreviewResult,
+} from "./preview-selective.js";
+// Runtime values: the read-only selective preview. The SOLE public READ-ONLY
+// selective entry point, as `runSelectiveRestoreTransaction` is the sole public
+// MUTATING one. It materializes the session-start oracle privately and exposes
+// none of the parts it orders: no oracle handle, no evidence function, nothing
+// that could write. Its outcome vocabulary matches the receipt's dry-run
+// vocabulary member for member, so a caller assigns rather than translates.
+export { previewSelectiveRestore } from "./preview-selective.js";
 // Inferred TypeScript types: restore APIs (M D — D73 promotion of
 // restoreCheckpoint from M B internal; D76 new planRestoreCheckpoint).
 export type {

@@ -603,28 +603,38 @@ describe("Architectural invariants -- M D D77 rollback module boundaries", () =>
   // does NOT have restore) and 2b (rollback-orchestration.ts owns
   // the real restore call). Invariants 3, 4, 5 get one test each.
 
-  it("rollback.ts references planRestoreCheckpoint but NOT restoreCheckpoint directly (D77 invariant 2a)", () => {
-    // The rollback command owns the dry-run planning path (via
+  it("the command layer references planRestoreCheckpoint but NOT restoreCheckpoint directly (D77 invariant 2a)", () => {
+    // The command layer owns the dry-run planning path (via
     // planRestoreCheckpoint) and orchestrates the apply path through
     // rollback-orchestration.ts's buildReceiptForApply. It does NOT
     // call restoreCheckpoint directly -- that call lives in the
     // orchestration module so Lock #16 (apply receipt = ATTEMPT)
     // can wrap it in one place.
     //
-    // A regression that pulls restoreCheckpoint into rollback.ts
-    // would either bypass the receipt-ATTEMPT wrapping (breaking
-    // the "receipt persists on restore throw" contract) or duplicate
-    // it across layers (drift risk). Either way, the layering is
-    // wrong -- fail the test loudly.
-    const source = readSource("packages/cli-commands/src/commands/rollback.ts");
+    // M 0.8.0 step 12 split that layer in two: commands/rollback.ts keeps
+    // argument handling, ONE lock acquisition and rendering, while
+    // rollback-locked-phase.ts owns everything under the lock, including the
+    // planning call. The invariant is unchanged in substance and is now
+    // asserted over BOTH files, which also makes it stronger: neither half
+    // may reach for restoreCheckpoint.
+    //
+    // A regression that pulls restoreCheckpoint into either file would
+    // bypass the receipt-ATTEMPT wrapping (breaking the "receipt persists on
+    // restore throw" contract) or duplicate it across layers (drift risk).
+    const COMMAND_REL = "packages/cli-commands/src/commands/rollback.ts";
+    const LOCKED_PHASE_REL = "packages/cli-commands/src/rollback-locked-phase.ts";
+
     expect(
-      findOffenders(source, /\bplanRestoreCheckpoint\b/),
-      "rollback.ts must reference planRestoreCheckpoint in non-comment code (D77 invariant 2a -- dry-run planning path)",
+      findOffenders(readSource(LOCKED_PHASE_REL), /\bplanRestoreCheckpoint\b/),
+      "rollback-locked-phase.ts must reference planRestoreCheckpoint in non-comment code (D77 invariant 2a -- dry-run planning path)",
     ).not.toEqual([]);
-    expect(
-      findOffenders(source, /\brestoreCheckpoint\b/),
-      "rollback.ts must NOT reference restoreCheckpoint directly; the apply restore call belongs in rollback-orchestration.ts so Lock #16 (apply receipt = ATTEMPT) can wrap it (D77 invariant 2a)",
-    ).toEqual([]);
+
+    for (const rel of [COMMAND_REL, LOCKED_PHASE_REL]) {
+      expect(
+        findOffenders(readSource(rel), /\brestoreCheckpoint\b/),
+        `${rel} must NOT reference restoreCheckpoint directly; the apply restore call belongs in rollback-orchestration.ts so Lock #16 (apply receipt = ATTEMPT) can wrap it (D77 invariant 2a)`,
+      ).toEqual([]);
+    }
   });
 
   it("rollback-orchestration.ts references restoreCheckpoint (D77 invariant 2b)", () => {

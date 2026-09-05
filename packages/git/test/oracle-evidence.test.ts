@@ -34,7 +34,11 @@ import { describe, expect, it } from "vitest";
 import { createCheckpoint } from "../src/checkpoint.js";
 import { withCheckpointOracle } from "../src/checkpoint-oracle.js";
 import { CheckpointNotFoundError } from "../src/errors.js";
-import { findMissingEvidence, type OracleEvidenceVerdict } from "../src/oracle-evidence.js";
+import {
+  collectMissingEvidence,
+  findMissingEvidence,
+  type OracleEvidenceVerdict,
+} from "../src/oracle-evidence.js";
 import { observePathState, readIndexSnapshot } from "../src/path-state.js";
 import {
   ABSENT_PATH_STATE,
@@ -399,6 +403,170 @@ describe("findMissingEvidence", () => {
     await expect(findMissingEvidence(absent, conflicted)).rejects.toThrow(
       /requires an eligible plan/,
     );
+  });
+});
+
+// =============================================================================
+// Section A2: the exhaustive sibling, for the read-only preview
+// =============================================================================
+//
+// Same verdict per path as the fail-fast walk, different traversal depth. A
+// preview that stopped at the first gap would label every later path from a
+// check that never ran, which is the false promise the preview exists to
+// prevent.
+
+const OTHER_GROUP = "cg_0000000000000000000000000000000000000000000000000000000000000002";
+
+function classificationWith(
+  path: string,
+  expectedBefore: PathState,
+  outcome: SelectiveRestoreClassification["outcome"],
+  changeGroupId: string = GROUP,
+): SelectiveRestoreClassification {
+  return {
+    path,
+    changeGroupId,
+    expectedBefore,
+    expectedAfter: ABSENT_PATH_STATE,
+    observed: ABSENT_PATH_STATE,
+    outcome,
+  };
+}
+
+const PLANNED_RESTORE = { kind: "planned", disposition: "restore_required" } as const;
+const PLANNED_AT_BEFORE = { kind: "planned", disposition: "already_at_before" } as const;
+const CONFLICTED = { kind: "conflict", reason: { code: "MODIFIED_SINCE" } } as const;
+
+/** Four files, staged, captured. The oracle reproduces exactly these. */
+async function fourFileCheckpoint(repo: TestRepo): Promise<string> {
+  for (const name of ["a.txt", "b.txt", "c.txt", "d.txt"]) {
+    await write(repo, name, `${name} content\n`);
+  }
+  await git(repo.repoRoot, ["add", "-A"]);
+  return await makeCheckpoint(repo, "cp");
+}
+
+describe("collectMissingEvidence", () => {
+  it("10: reports EVERY unreconstructable path in a mixed, ineligible plan", async () => {
+    const repo = await setupRepo();
+    try {
+      const checkpointDir = await fourFileCheckpoint(repo);
+      const present = (path: string) => currentState(repo.repoRoot, path);
+
+      const plan: SelectiveRestorePlan = {
+        capabilities: { symlinkCheckout: true },
+        selectedChangeGroupIds: [GROUP, OTHER_GROUP],
+        topologyDependencyPaths: [],
+        operations: [],
+        // CONFLICTED, which the fail-fast sibling refuses outright. A planning
+        // conflict on one path says nothing about another path's evidence, so
+        // this walk must still run.
+        outcome: "conflicted",
+        conflicts: [{ changeGroupId: GROUP, path: "a.txt", reason: { code: "MODIFIED_SINCE" } }],
+        classifications: [
+          // Conflicted, but its evidence IS present: not an evidence finding.
+          classificationWith("a.txt", await present("a.txt"), CONFLICTED),
+          // Planned, evidence absent.
+          classificationWith(
+            "b.txt",
+            regularState("not what the checkpoint holds\n"),
+            PLANNED_RESTORE,
+          ),
+          // already_at_before with evidence present.
+          classificationWith("c.txt", await present("c.txt"), PLANNED_AT_BEFORE),
+          // already_at_before with evidence ABSENT, in a second group.
+          classificationWith(
+            "d.txt",
+            regularState("also not it\n"),
+            PLANNED_AT_BEFORE,
+            OTHER_GROUP,
+          ),
+        ],
+      };
+
+      const { value: missing } = await withCheckpointOracle(repo.repoRoot, checkpointDir, {
+        tempDirPrefix: TEST_ORACLE_PREFIX,
+        run: ({ worktreePath }) => collectMissingEvidence(worktreePath, plan),
+      });
+
+      // BOTH gaps, in path order. b.txt does not stop the pass, which is the
+      // whole difference from the fail-fast walk.
+      expect(missing.map((m) => m.path)).toEqual(["b.txt", "d.txt"]);
+      // The (path, group) PAIR survives, so a caller can join on it rather than
+      // on a path that may repeat across groups.
+      expect(missing.map((m) => m.changeGroupId)).toEqual([GROUP, OTHER_GROUP]);
+      // Paths whose evidence is present are absent from the result, including
+      // the conflicted one: a conflict is not an evidence finding.
+      expect(missing.some((m) => m.path === "a.txt" || m.path === "c.txt")).toBe(false);
+      expect(missing[0]?.detail).toContain("the contribution asserts");
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it("11: checks already_at_before, so a preview cannot exempt it", async () => {
+    const repo = await setupRepo();
+    try {
+      const checkpointDir = await fourFileCheckpoint(repo);
+
+      // Exempting it would make evidence validity depend on the live checkout,
+      // and would let a preview promise `already_at_before` for a path the
+      // apply then refuses. The transaction's own walk makes no exemption.
+      const plan = eligiblePlan([
+        classificationWith("a.txt", regularState("wrong\n"), PLANNED_AT_BEFORE),
+      ]);
+
+      const { value: missing } = await withCheckpointOracle(repo.repoRoot, checkpointDir, {
+        tempDirPrefix: TEST_ORACLE_PREFIX,
+        run: ({ worktreePath }) => collectMissingEvidence(worktreePath, plan),
+      });
+
+      expect(missing.map((m) => m.path)).toEqual(["a.txt"]);
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it("12: returns nothing when the checkpoint reproduces every classification", async () => {
+    const repo = await setupRepo();
+    try {
+      const checkpointDir = await fourFileCheckpoint(repo);
+      const plan = eligiblePlan([
+        classificationWith("a.txt", await currentState(repo.repoRoot, "a.txt"), PLANNED_RESTORE),
+        classificationWith("b.txt", await currentState(repo.repoRoot, "b.txt"), PLANNED_AT_BEFORE),
+      ]);
+
+      const { value: missing } = await withCheckpointOracle(repo.repoRoot, checkpointDir, {
+        tempDirPrefix: TEST_ORACLE_PREFIX,
+        run: ({ worktreePath }) => collectMissingEvidence(worktreePath, plan),
+      });
+
+      expect(missing).toEqual([]);
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it("13: the fail-fast sibling still stops at the FIRST gap", async () => {
+    const repo = await setupRepo();
+    try {
+      const checkpointDir = await fourFileCheckpoint(repo);
+      // The same two gaps test 10 saw, on an ELIGIBLE plan so the fail-fast
+      // walk accepts it. Its contract is unchanged by the sibling's arrival.
+      const plan = eligiblePlan([
+        classificationWith("b.txt", regularState("wrong\n"), PLANNED_RESTORE),
+        classificationWith("d.txt", regularState("also wrong\n"), PLANNED_RESTORE),
+      ]);
+
+      const { value } = await withCheckpointOracle(repo.repoRoot, checkpointDir, {
+        tempDirPrefix: TEST_ORACLE_PREFIX,
+        run: ({ worktreePath }) => findMissingEvidence(worktreePath, plan),
+      });
+
+      expect(expectMissing(value).path).toBe("b.txt");
+    } finally {
+      await repo.cleanup();
+    }
   });
 });
 

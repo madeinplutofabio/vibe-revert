@@ -66,6 +66,7 @@ import type {
   DirectReceiptSource,
   ReceiptFinalizationSource,
 } from "./selective-apply-result.js";
+import { pairKey, sameStringSet } from "./selective-pair-key.js";
 import type {
   VerifyCommandResult,
   VerifyCommandRun,
@@ -125,26 +126,6 @@ const ordinal = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 
 const byPathThenGroup = (a: ApplyPathResult, b: ApplyPathResult): number =>
   ordinal(a.path, b.path) || ordinal(a.change_group_id, b.change_group_id);
-
-/**
- * NUL, built rather than written as a literal.
- *
- * A space would not do: path "a b" in group "c" and path "a" in group "b c"
- * would produce the same key, and a space is legal inside a git path. NUL is
- * legal in neither component. Constructed with `fromCharCode` because a raw NUL
- * in source makes git treat the whole file as binary, which costs every future
- * diff and blame on it.
- */
-const PAIR_DELIMITER = String.fromCharCode(0);
-
-const pairKey = (path: string, changeGroupId: string): string =>
-  `${path}${PAIR_DELIMITER}${changeGroupId}`;
-
-function sameSet(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
-  if (a.size !== b.size) return false;
-  for (const value of a) if (!b.has(value)) return false;
-  return true;
-}
 
 // ---- Command results --------------------------------------------------------
 
@@ -396,7 +377,7 @@ function projectedResults(
       outcome: candidate.outcome,
     });
   }
-  if (!sameSet(observed, planPairs)) {
+  if (!sameStringSet(observed, planPairs)) {
     return {
       message:
         "the verification's (path, change group) pairs differ from the plan's classifications",
@@ -687,7 +668,7 @@ function mapInternal(args: MapSelectiveReceiptArgs): ReceiptMapping {
   }
 
   const planGroups = new Set(plan.classifications.map((c) => c.changeGroupId));
-  if (!sameSet(new Set(attempt.selection.resolved_change_group_ids), planGroups)) {
+  if (!sameStringSet(new Set(attempt.selection.resolved_change_group_ids), planGroups)) {
     return mappingFailure(
       "the plan's change groups differ from the selection the attempt marker authorized",
     );

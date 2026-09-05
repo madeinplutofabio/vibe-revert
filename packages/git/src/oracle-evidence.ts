@@ -107,6 +107,22 @@ import {
 } from "./path-state.js";
 import type { SelectiveRestoreClassification, SelectiveRestorePlan } from "./restore-selective.js";
 
+// =============================================================================
+// Two walks, one verdict
+// =============================================================================
+//
+// `findMissingEvidence` is FAIL-FAST and serves the transaction, which is about
+// to refuse anyway: the first unreconstructable path is enough, and walking the
+// rest would be work spent on a decision already made.
+//
+// `collectMissingEvidence` is EXHAUSTIVE and serves the read-only preview,
+// whose job is the opposite. A preview that stopped at the first gap would
+// label every later path from a check that never ran, which is the false
+// promise the preview exists to prevent.
+//
+// They share `evidenceGap`, so the two can differ in how far they walk and
+// never in what counts as missing evidence or how it is described.
+
 /** Evidence semantics only. Oracle lifecycle is the caller's concern. */
 export type OracleEvidenceVerdict =
   | { readonly outcome: "sufficient" }
@@ -174,6 +190,19 @@ function orderedCandidates(plan: SelectiveRestorePlan): readonly SelectiveRestor
 }
 
 /**
+ * The gap between what the contribution asserts and what the checkpoint
+ * reconstructs, or `null` when there is none.
+ *
+ * ONE authority for both the verdict and its wording, so the fail-fast and
+ * exhaustive walks cannot drift on what counts as missing evidence.
+ */
+function evidenceGap(candidate: SelectiveRestoreClassification, state: PathState): string | null {
+  return pathStateEqual(state, candidate.expectedBefore)
+    ? null
+    : `the contribution asserts ${describe(candidate.expectedBefore)}, but the session-start checkpoint reconstructs ${describe(state)}`;
+}
+
+/**
  * Require an already-materialized session-start oracle to reproduce every
  * selected candidate's asserted BEFORE state.
  *
@@ -199,12 +228,50 @@ export async function findMissingEvidence(
   const index: IndexSnapshot = await readIndexSnapshot(oracleWorktree);
   for (const candidate of orderedCandidates(plan)) {
     const { state } = await observePathState(oracleWorktree, candidate.path, index);
-    if (pathStateEqual(state, candidate.expectedBefore)) continue;
-    return {
-      outcome: "missing_evidence",
-      path: candidate.path,
-      detail: `the contribution asserts ${describe(candidate.expectedBefore)}, but the session-start checkpoint reconstructs ${describe(state)}`,
-    };
+    const gap = evidenceGap(candidate, state);
+    if (gap === null) continue;
+    return { outcome: "missing_evidence", path: candidate.path, detail: gap };
   }
   return { outcome: "sufficient" };
+}
+
+/** One selected path whose asserted BEFORE state the checkpoint cannot rebuild. */
+export interface MissingEvidencePath {
+  readonly path: string;
+  /** Carried so a caller joins on the (path, group) PAIR: paths can repeat. */
+  readonly changeGroupId: string;
+  readonly detail: string;
+}
+
+/**
+ * Every selected classification the checkpoint cannot reconstruct.
+ *
+ * Accepts ANY plan, including a mixed or ineligible one, and that is the point.
+ * A planning conflict on one path says nothing about whether another path's
+ * evidence exists, so refusing to look would leave the preview asserting
+ * `restored` for paths it never checked.
+ *
+ * Checks EVERY classification, `already_at_before` included, for the reason
+ * given at the top of this file: exempting a path because the current checkout
+ * happens not to need a write would make evidence validity depend on the live
+ * tree. It also keeps preview and apply aligned, since the transaction's own
+ * check makes no such exemption.
+ *
+ * Ordering is `orderedCandidates`, so the result is deterministic and its first
+ * entry is the one the fail-fast walk would have reported.
+ */
+export async function collectMissingEvidence(
+  oracleWorktree: string,
+  plan: SelectiveRestorePlan,
+): Promise<readonly MissingEvidencePath[]> {
+  const index: IndexSnapshot = await readIndexSnapshot(oracleWorktree);
+  const missing: MissingEvidencePath[] = [];
+  for (const candidate of orderedCandidates(plan)) {
+    const { state } = await observePathState(oracleWorktree, candidate.path, index);
+    const gap = evidenceGap(candidate, state);
+    if (gap !== null) {
+      missing.push({ path: candidate.path, changeGroupId: candidate.changeGroupId, detail: gap });
+    }
+  }
+  return missing;
 }

@@ -197,6 +197,7 @@ export {
   publishRollbackAttempt,
   rollbackInvocationDir,
   rollbackInvocationPaths,
+  selectiveDryRunReceiptPath,
   sessionRollbacksDir,
 } from "./rollback-attempt.js";
 export type {

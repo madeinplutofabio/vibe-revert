@@ -17,7 +17,7 @@
 
 import { lstat, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 import {
   ROLLBACK_ATTEMPT_SCHEMA_VERSION,
@@ -31,6 +31,7 @@ import {
   publishRollbackAttempt,
   rollbackInvocationDir,
   rollbackInvocationPaths,
+  selectiveDryRunReceiptPath,
   sessionRollbacksDir,
 } from "../src/rollback-attempt.js";
 
@@ -555,5 +556,48 @@ describe("selective rollback invocation layout", () => {
     } finally {
       await rm(tmp, { recursive: true, force: true });
     }
+  });
+
+  it("21: the selective dry-run receipt is session-scoped and OUTSIDE rollbacks/", () => {
+    const repoRoot = join("/repo");
+    const sessionId = "sess_01ARZ3NDEKTSV4RRFFQ69G5FAV";
+
+    const path = selectiveDryRunReceiptPath(repoRoot, sessionId);
+
+    // Directly in the session directory.
+    expect(dirname(path)).toBe(join(repoRoot, ".viberevert", "sessions", sessionId));
+    // NOT under rollbacks/. A receipt in an invocation directory with no
+    // sibling attempt marker is what the history scan calls `inconsistent`,
+    // which fails closed: a preview that mutates nothing would then block every
+    // later apply on the session.
+    expect(dirname(path)).not.toBe(sessionRollbacksDir(repoRoot, sessionId));
+    expect(path.startsWith(sessionRollbacksDir(repoRoot, sessionId))).toBe(false);
+  });
+
+  it("22: its filename collides with no other rollback artifact", () => {
+    const name = basename(selectiveDryRunReceiptPath(join("/repo"), SESSION_ID));
+
+    // The two invocation artifacts, whose presence and absence carry meaning.
+    expect(name).not.toBe("attempt.json");
+    expect(name).not.toBe("receipt.json");
+    // The legacy whole-checkpoint receipts are a DIFFERENT schema at sibling
+    // paths in the same directory. Sharing a name would let one be parsed as
+    // the other.
+    expect(name).not.toBe("rollback-dry-run-receipt.json");
+    expect(name).not.toBe("rollback-receipt.json");
+  });
+
+  it("23: it is stable per session and distinct across sessions", () => {
+    const repoRoot = join("/repo");
+    const other = "sess_01ARZ3NDEKTSV4RRFFQ69G5FAW";
+
+    expect(selectiveDryRunReceiptPath(repoRoot, SESSION_ID)).toBe(
+      selectiveDryRunReceiptPath(repoRoot, SESSION_ID),
+    );
+    // Repeated previews overwrite ONE file per session, which is correct for a
+    // regenerable artifact and is why it must not share a path with evidence.
+    expect(selectiveDryRunReceiptPath(repoRoot, SESSION_ID)).not.toBe(
+      selectiveDryRunReceiptPath(repoRoot, other),
+    );
   });
 });

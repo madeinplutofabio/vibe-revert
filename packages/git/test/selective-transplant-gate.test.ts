@@ -650,9 +650,11 @@ describe("source invariant", () => {
       );
     }
 
-    // `runSelectiveRestoreTransaction` is the SOLE public selective-execution
-    // entry point: the transaction is exported, and every part it orders stays
-    // package-internal.
+    // TWO public high-level operational entry points, and only two:
+    // `runSelectiveRestoreTransaction` (mutating) and `previewSelectiveRestore`
+    // (read-only). Planning APIs and types may also be public; what this pins is
+    // that every part EITHER operation orders stays package-internal, so no
+    // caller can assemble a selective execution or preview from the pieces.
     //
     // Asserted on the export SPECIFIER rather than on a bare substring, for two
     // reasons. The barrel's own documentation names several of these modules in
@@ -664,6 +666,7 @@ describe("source invariant", () => {
       new RegExp(`from\\s*["']\\./${module}\\.js["']`).test(barrel);
 
     expect(barrelExports("selective-restore-transaction")).toBe(true);
+    expect(barrelExports("preview-selective")).toBe(true);
     for (const internal of [
       "selective-transplant-gate",
       "transplant-schedule",

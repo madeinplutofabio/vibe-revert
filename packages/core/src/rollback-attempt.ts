@@ -156,6 +156,15 @@ const ROLLBACKS_SUBDIR = "rollbacks";
 const ATTEMPT_FILENAME = "attempt.json";
 /** The sibling whose presence finalizes an invocation (see the header). */
 const RECEIPT_FILENAME = "receipt.json";
+/**
+ * The selective DRY-RUN receipt, one per session.
+ *
+ * Distinct from the legacy `rollback-dry-run-receipt.json`, which is a
+ * different schema, and from both invocation artifacts, which it must never be
+ * confused with. See `selectiveDryRunReceiptPath` for why it lives outside
+ * `rollbacks/` at all.
+ */
+const SELECTIVE_DRY_RUN_RECEIPT_FILENAME = "selective-rollback-dry-run-receipt.json";
 
 /**
  * `<repoRoot>/.viberevert/sessions/<sessionId>/rollbacks`. Pure path-join;
@@ -205,6 +214,29 @@ export function rollbackInvocationPaths(rollbackDir: string): {
     attemptPath: join(rollbackDir, ATTEMPT_FILENAME),
     receiptPath: join(rollbackDir, RECEIPT_FILENAME),
   };
+}
+
+/**
+ * `<repoRoot>/.viberevert/sessions/<sessionId>/<private filename>`. Pure
+ * path-join; existence unchecked.
+ *
+ * Deliberately OUTSIDE `rollbacks/`. A receipt sitting in an invocation
+ * directory with no sibling attempt marker is exactly what
+ * `scanSelectiveRollbackHistory` reports as `inconsistent`, and that fails
+ * closed: a preview, which mutates nothing, would block every later apply on
+ * the session. So the preview is stored beside the session rather than among
+ * the records of mutations that were actually authorized.
+ *
+ * Session-scoped rather than per-invocation because a dry run allocates no
+ * invocation: it publishes no marker and reserves no directory. Repeated
+ * previews overwrite this file, which is correct for a regenerable artifact and
+ * is why it must not share a path with anything that is evidence.
+ *
+ * Mirrors the D68 split, where dry run and apply persist to different files so a
+ * preview can never overwrite an audit record.
+ */
+export function selectiveDryRunReceiptPath(repoRoot: string, sessionId: string): string {
+  return join(sessionDir(repoRoot, sessionId), SELECTIVE_DRY_RUN_RECEIPT_FILENAME);
 }
 
 export interface PublishRollbackAttemptOpts {

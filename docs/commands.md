@@ -146,8 +146,9 @@ cannot inject prompt-section headers.
 
 ### `viberevert rollback`
 
-Restore a session's pre-session captured state (dry-run by default). See the
-[rollback contract](rollback-contract.md) for current guarantees and limitations.
+Restore a session's pre-session captured state, in whole or in part (dry-run by
+default). See the [rollback contract](rollback-contract.md) for current
+guarantees and limitations.
 
 **Arguments**
 
@@ -155,6 +156,10 @@ Restore a session's pre-session captured state (dry-run by default). See the
 
 **Options**
 
+- `--only` — restore only change groups matching this path glob; repeatable (union).
+- `--except` — exclude change groups matching this path glob; repeatable (union), subtracted last.
+- `--finding` — restore the change groups a finding applies to; repeatable (union).
+- `--risk` — restore change groups at or above this risk level (`low`, `medium`, `high`, `critical`).
 - `--apply` — actually apply the rollback (mutates the working tree); omitted, it is a dry-run _(default: dry-run)_.
 - `--force` — bypass a subset of pre-rollback safety checks; requires `--apply` _(default: off)_.
 - `--json` — render the result as JSON.
@@ -164,6 +169,13 @@ Restore a session's pre-session captured state (dry-run by default). See the
 
 - `--force` bypasses only the HEAD-mismatch, un-ended-session, and dirty-working-tree checks. It never bypasses the active-session or already-applied guards.
 - `--json` and `--markdown` are mutually exclusive.
+- With no selector, this restores the whole session exactly as it always has. Supplying any selector, including `--except` on its own, restores only the change groups it resolves to and leaves every other managed path untouched.
+- `--only` and `--except` match a renamed file through its whole alias set, so `--only 'payments/**'` still matches a file renamed out of `payments/`.
+- `--risk` is an at-or-above threshold, so `--risk high` covers high and critical. A change group no finding touches has no risk and is not selected at any threshold.
+- Different positive selector families intersect: `--only 'payments/**' --risk critical` means critical changes inside `payments/`, not payments plus unrelated critical files.
+- Exclusion is group-atomic: excluding any path in a rename group excludes the whole group.
+- `--finding` takes full finding ids as printed by `viberevert check --since <session> --json`; short prefixes are not accepted yet.
+- Selective rollback requires the session's durable contribution. Sessions ended before 0.8.0 do not have one, and it refuses rather than guessing.
 
 ## Git hook
 
