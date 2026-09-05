@@ -7,7 +7,7 @@
 - **Checkpoint ID:** `cp_01KDVDNA00HMDCQ95QZSDQBCYC`
 - **Contribution:** `d63f0e12ab083fec8344268af644a47b6dc3014b1338c46630e23486083fbddf`
 - **Mode:** dry_run
-- **Eligibility:** **[ELIGIBLE]**
+- **Eligibility:** eligible
 - **Written at:** `2026-01-01T00:00:00Z`
 
 ## Selectors

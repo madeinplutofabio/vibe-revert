@@ -8,7 +8,7 @@
 - **Contribution:** `5551f3d4e0ffd900a65443f4de00f386f231816a702f7663da2bcd0eaecc9180`
 - **Mode:** apply
 - **Pre-rollback checkpoint:** `cp_01KDVDNA00HMDCQ95QZSDQBCYC`
-- **Outcome:** **[SUCCEEDED]**
+- **Outcome:** succeeded
 - **Written at:** `2026-01-01T00:00:00Z`
 
 ## Selectors
