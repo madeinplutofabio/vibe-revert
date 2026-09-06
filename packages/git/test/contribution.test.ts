@@ -669,6 +669,62 @@ describe("captureContribution: object storage", () => {
       await repo.cleanup();
     }
   });
+
+  it("never enters the injected sink concurrently, however many candidates there are", async () => {
+    // The contract this protects: a caller that hands this package a sink was
+    // entitled to assume one call at a time, because that is how it was invoked
+    // before observation and hashing were parallelized here. Speeding up
+    // observation must not silently widen that into "your sink must be
+    // reentrant", which is a much stronger requirement no existing caller
+    // agreed to.
+    //
+    // This is the END-TO-END proof, through the real capture with a real
+    // injected sink. `fresh-worktree-oracle.test.ts` proves the mechanism
+    // (`serializeCalls` under `mapWithConcurrency`); this proves the mechanism
+    // is actually wired into the path that needs it.
+    const repo = await setupRepo();
+    try {
+      // Enough candidates that the concurrent observation genuinely overlaps.
+      // A one-or-two-file fixture would pass even with the serialization
+      // removed, which would make this test worthless.
+      const count = 40;
+      for (let i = 0; i < count; i += 1) await write(repo, `src/f${i}.txt`, `before ${i}\n`);
+      await git(repo.repoRoot, ["add", "-A"]);
+      await git(repo.repoRoot, ["commit", "-m", "seed"]);
+      await checkpoint(repo);
+
+      for (let i = 0; i < count; i += 1) await write(repo, `src/f${i}.txt`, `after ${i}\n`);
+
+      let inFlight = 0;
+      let maxInFlight = 0;
+      let calls = 0;
+
+      await captureContribution<StableContributionCapture>(repo.repoRoot, repo.checkpointDir, {
+        sessionId: SESSION_ID,
+        checkpointId: CHECKPOINT_ID,
+        additionalObservationPaths: [],
+        storeObject: async (_object: ContributionObject) => {
+          calls += 1;
+          inFlight += 1;
+          maxInFlight = Math.max(maxInFlight, inFlight);
+          // An await inside the sink is what makes a reentrancy bug
+          // observable: without one, a serialization failure could still look
+          // sequential purely because nothing yielded.
+          await new Promise((resolve) => setTimeout(resolve, 1));
+          inFlight -= 1;
+        },
+        publish: async (capture) => capture,
+      });
+
+      // Both assertions matter. `maxInFlight === 1` is the contract; `calls > 1`
+      // proves the contract was actually exercised rather than trivially
+      // satisfied by a capture that stored nothing.
+      expect(calls).toBeGreaterThan(1);
+      expect(maxInFlight).toBe(1);
+    } finally {
+      await repo.cleanup();
+    }
+  });
 });
 
 // =============================================================================

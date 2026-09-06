@@ -592,11 +592,11 @@ export async function restoreCheckpoint(
 // do in `restoreCheckpoint`, and preflight is the same call with the same
 // arguments. This function reconstructs less; it never checks less.
 //
-// One property moved and is worth stating. A path missing from the tracked
-// archive used to fail while being copied out of staging. Now a path matching
-// its captured hash is never copied, so a gap in the archive surfaces at the
-// final hash verification instead. Detection is preserved; only its timing
-// changed.
+// Filtering the extraction does not move any detection later. `loadRestorePreflight`
+// already enforces exact archive-to-manifest entry-set parity, so a missing or
+// extra archive entry is rejected BEFORE any mutation, whether or not the
+// extraction that follows is filtered. See the archive-validation note in this
+// file's header.
 
 export interface FreshWorktreeMaterializeOptions {
   /** The freshly created scratch worktree. Never the user's repository. */
