@@ -576,7 +576,50 @@ jobs:
             rc-bundle/checksums.txt
             rc-bundle/sbom.cdx.json
           body: |
-            VibeRevert ${{ github.ref_name }} beta release.
+            ## Keep the good. Remove the agent work you don't want.
+
+            An AI coding session rarely produces only good changes or only bad
+            ones. VibeRevert ${{ github.ref_name }} introduces selective recovery:
+            choose changes by path, risk level, or finding, preview exactly what
+            will happen, and restore only the unwanted part of the session.
+
+            The rest of the project stays untouched, including the working state
+            that existed before the agent started.
+
+            ### Choose what to remove
+
+            `--only`, `--except`, `--risk` and `--finding` select change groups
+            from the session's recorded contribution. Positive selector families
+            intersect, `--except` subtracts last, exclusion is group-atomic, and
+            `--risk` is an at-or-above threshold. Dry run stays the default.
+
+            ### Refuse unsafe recovery
+
+            A selected path that moved since the session ended is refused rather
+            than guessed at, and `--force` does not override it. Every apply
+            creates an emergency checkpoint first. A selective apply also
+            persists a crash marker before the first mutation, so an interrupted
+            apply fails closed instead of reporting that nothing happened.
+
+            ### Prove what happened
+
+            Selective previews and finalized applies produce receipts that can be
+            rendered in terminal, JSON or Markdown form. Configured verification
+            commands run from the session-start snapshot rather than from config
+            an agent may have edited during its own session, with integrity
+            comparisons on both sides of them.
+
+            ### Also improved
+
+            End-of-session capture is 67% faster on a 4,000-file repository,
+            24.3 s to 7.9 s on the reference machine. Details in the
+            [performance measurements](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/performance.md).
+
+            Whole-session rollback is unchanged, every new schema field is
+            optional, and existing artifacts stay valid. Sessions ended before
+            0.8.0 have no recorded contribution and cannot use selective
+            recovery; see the
+            [migration guide](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/MIGRATIONS.md).
 
             Published npm packages (dist-tag `beta`, version `${{ needs.publish.outputs.version }}`):
             - `@viberevert/session-format`

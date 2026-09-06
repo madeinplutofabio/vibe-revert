@@ -5,7 +5,7 @@
   "type": "module",
   "license": "Apache-2.0",
   "author": "Fabio Marcello Salvadori <fabio@madeinpluto.com>",
-  "description": "The safety layer for vibe coding and AI coding agents: flag risky changes and restore project files, including uncommitted work, to their pre-session state.",
+  "description": "Project integrity for AI coding: record the working state before an agent starts, flag risky changes deterministically, and selectively remove unwanted agent changes without discarding the rest.",
   "homepage": "https://github.com/madeinplutofabio/vibe-revert#readme",
   "repository": {
     "type": "git",
@@ -18,9 +18,12 @@
   "keywords": [
     "ai",
     "coding",
+    "ai-coding",
+    "project-integrity",
     "safety",
     "checkpoint",
     "rollback",
+    "selective-rollback",
     "claude-code",
     "cursor",
     "codex",

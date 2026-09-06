@@ -1,8 +1,10 @@
 # viberevert
 
-> The safety layer for vibe coding and AI coding agents: flag risky changes and restore project files, including uncommitted work, to their pre-session state.
+> The project-integrity layer for AI coding: record the real working state before an agent starts, flag risky changes deterministically, and remove the agent work you don't want without discarding the rest.
 
-VibeRevert records an AI coding session, flags risky changes with deterministic rules, and can restore your project files to exactly how they were before it started, including work you hadn't committed.
+VibeRevert records an AI coding session and can put your project files back the way they were before it started, in whole or in part. The working state you already had, including staged work, unstaged edits and pre-existing untracked files, is recorded before the session and preserved through recovery.
+
+**An agent changed 80 files. 75 are useful. Remove the 5 you don't.**
 
 **No AI judges the AI:** risk findings are reproducible, explainable, and based on rules you can inspect.
 

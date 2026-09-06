@@ -4,15 +4,21 @@
 
 <h1 align="center">VibeRevert</h1>
 
-<h3 align="center">AI broke your project? Undo the session, not your week.</h3>
+<h3 align="center">Protect the project you're actually working on.</h3>
 
 <p align="center"><strong>Record · Check · Fix · Restore.</strong></p>
 
-VibeRevert records an AI coding session, flags risky changes with deterministic rules, and can restore your project files to exactly how they were before it started, including work you hadn't committed.
+VibeRevert is the project-integrity layer for AI coding. It records the real working state before an agent starts, flags risky changes with deterministic rules, and lets you remove the agent work you don't want without giving up the rest.
+
+**An agent changed 80 files. 75 are useful. Remove the 5 you don't.**
 
 **No AI judges the AI:** risk findings are reproducible, explainable, and based on rules you can inspect.
 
-**Keep using your coding agent.** VibeRevert adds the safety layer around the session — with Claude Code, Cursor, and other coding-agent workflows.
+**The working state you already had is part of the project.** Staged work, unstaged edits and pre-existing untracked files are recorded before the session starts and preserved through recovery. You don't have to package your work into commits before letting an agent help with it.
+
+**Keep using your coding agent.** VibeRevert works alongside Claude Code, Cursor, and other coding-agent workflows. Git worktrees give an agent an isolated checkout; VibeRevert protects and selectively recovers the working state an agent actually changes. They solve different problems and can be used together.
+
+*AI broke your project? Undo the session, not your week.* Whole-session rollback is still one command.
 
 <p align="center">
   <a href="https://www.npmjs.com/package/viberevert">
