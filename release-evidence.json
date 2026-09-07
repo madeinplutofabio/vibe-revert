@@ -1,18 +1,18 @@
 {
   "evidence_schema": "viberevert-release-evidence-1",
   "status": "published",
-  "candidate_version": "0.8.0-beta.0",
-  "tag": "v0.8.0-beta.0",
+  "candidate_version": "0.8.0-beta.1",
+  "tag": "v0.8.0-beta.1",
   "tag_target_commit": {
-    "commit": "9fd4e9d4a30d8135ef29f0215f5971e21c111d45",
-    "annotated_tag_object": "60422cece9e07c0db26a62bdf53ab90a9743d8ac",
+    "commit": "406c9e18bee861fa50e803beb602cbf0efacf233",
+    "annotated_tag_object": "2367f93b63f56b11460c849697168709c8ce0d4b",
     "annotated": true,
     "git_tag_signature": "unsigned",
     "tagger": "Fabio Marcello Salvadori",
-    "tagged_at": "2026-09-06T21:06:57+02:00"
+    "tagged_at": "2026-09-07T13:27:52+02:00"
   },
   "packages": {
-    "version": "0.8.0-beta.0",
+    "version": "0.8.0-beta.1",
     "publish_targets": [
       "@viberevert/session-format",
       "@viberevert/core",
@@ -29,15 +29,15 @@
   },
   "ci": {
     "workflow": "ci.yml",
-    "run_id": 34052429840,
-    "commit": "9fd4e9d4a30d8135ef29f0215f5971e21c111d45",
+    "run_id": 34115245087,
+    "commit": "406c9e18bee861fa50e803beb602cbf0efacf233",
     "conclusion": "success",
     "matrix": "{ubuntu, macos, windows} x {Node 22.23.1, Node 24} + Gates (lint/typecheck/policy/audit)"
   },
   "pre_publish_rehearsal": {
     "workflow": "release.yml (workflow_dispatch)",
-    "run_id": 34053132960,
-    "commit": "9fd4e9d4a30d8135ef29f0215f5971e21c111d45",
+    "run_id": 34116322725,
+    "commit": "406c9e18bee861fa50e803beb602cbf0efacf233",
     "conclusion": "success",
     "verified": [
       "sha256-checksums",
@@ -49,10 +49,17 @@
     "note": "Dispatched against the exact commit later tagged. The rehearsal packs and verifies its own tarballs; the tag-push run packs and publishes its own bytes independently. npm publish, post-publish smoke and GitHub Release creation are disabled for workflow_dispatch."
   },
   "security": {
-    "prod_advisories": 6,
+    "prod_advisories": 0,
     "audit_tool": "pnpm audit --prod",
-    "measured_at_commit": "9fd4e9d4a30d8135ef29f0215f5971e21c111d45",
-    "detail": "2 moderate (qs 6.15.2, patched >=6.16.0) + 4 high (fast-uri 3.1.5, patched >=3.1.6), all reached through @viberevert/mcp > @modelcontextprotocol/sdk. These advisories were published after the M H14 remediation, which pinned fast-uri to 3.1.5 via pnpm.overrides when that version was clean; the override now holds a version with known advisories. Not remediated in this release. Tracked as post-release maintenance.",
+    "measured_at_commit": "406c9e18bee861fa50e803beb602cbf0efacf233",
+    "pinned_overrides": {
+      "hono": "4.12.34",
+      "@hono/node-server": "1.19.15",
+      "ip-address": "10.3.1",
+      "fast-uri": "3.1.7",
+      "qs": "6.16.0"
+    },
+    "note": "Exact overrides freeze a resolved version, so a pin that is clean when chosen can later become vulnerable in place. These are re-audited at each release rather than assumed to hold.",
     "scorecard": {
       "score": 6.9,
       "version": "v5.5.0",
@@ -62,7 +69,7 @@
       "note": "Last measured during M H14. Not re-run against this release."
     }
   },
-  "claim_guard": "green (release-claim-invariants; verified in ci.yml on 9fd4e9d)",
+  "claim_guard": "green (release-claim-invariants; verified in ci.yml on 406c9e1)",
   "license_audit": "up to date",
   "accepted_limitations": [
     "rollback leaves empty directories the AI created (documented limitation #6)",
@@ -74,8 +81,8 @@
     "contribution_sha256 is not comparable across operating systems by design (the executable bit is a real boolean on POSIX and unreportable on Windows)"
   ],
   "publication": {
-    "release_run_id": 34053877747,
-    "release_run_url": "https://github.com/madeinplutofabio/vibe-revert/actions/runs/34053877747",
+    "release_run_id": 34116763336,
+    "release_run_url": "https://github.com/madeinplutofabio/vibe-revert/actions/runs/34116763336",
     "conclusion": "success",
     "jobs": {
       "publish_10_packages_ubuntu": "success",
@@ -83,22 +90,21 @@
       "create_github_release": "success"
     },
     "dist_tags": {
-      "beta": "0.8.0-beta.0",
-      "latest": "0.8.0-beta.0"
+      "beta": "0.8.0-beta.1",
+      "latest": "0.8.0-beta.1"
     },
     "dist_tag_note": "beta is moved by the publish workflow; latest is moved manually after publication, per release policy. Both verified across all 10 publish targets.",
-    "npm_publication": "10/10 publish targets live at 0.8.0-beta.0",
+    "npm_publication": "10/10 publish targets live at 0.8.0-beta.1",
     "github_release": {
-      "tag": "v0.8.0-beta.0",
-      "url": "https://github.com/madeinplutofabio/vibe-revert/releases/tag/v0.8.0-beta.0",
+      "tag": "v0.8.0-beta.1",
+      "url": "https://github.com/madeinplutofabio/vibe-revert/releases/tag/v0.8.0-beta.1",
       "prerelease": true,
-      "published_at": "2026-09-06T19:21:34Z",
-      "assets": ["checksums.txt", "sbom.cdx.json"],
-      "body": "feature-led selective-recovery release notes (Choose what to remove / Refuse unsafe recovery / Prove what happened); performance and migration references pinned to the release tag and verified resolvable"
+      "published_at": "2026-09-07T11:36:09Z",
+      "assets": ["checksums.txt", "sbom.cdx.json"]
     }
   },
   "post_publish_verification": {
-    "verified_at": "2026-09-06",
+    "verified_at": "2026-09-07",
     "result": "healthy",
     "npm_provenance": "10/10 publish targets carry provenance attestations (registry dist.attestations)",
     "npm_audit_signatures": {
@@ -107,12 +113,12 @@
       "verified_attestations": 21
     },
     "published_tarball_sha256_vs_tag_run_rc_bundle": "10/10 byte-identical (each published tarball fetched from the registry and verified against the checksums.txt attached to the GitHub Release)",
-    "functional_smoke": "published viberevert installs from the registry and reports 0.8.0-beta.0; all 9 internal @viberevert/* dependencies resolve at 0.8.0-beta.0",
-    "unqualified_install": "npm install viberevert with no tag resolves to 0.8.0-beta.0 after the latest dist-tag move",
+    "functional_smoke": "published viberevert installs from the registry and reports 0.8.0-beta.1; all 9 internal @viberevert/* dependencies resolve at 0.8.0-beta.1",
+    "unqualified_install": "npm install viberevert with no tag resolves to 0.8.0-beta.1",
     "oidc_token_lockdown": "in force since 2026-08-15: Trusted Publisher = GitHub Actions / release.yml on madeinplutofabio/vibe-revert; no legacy automation or publish tokens; the repository carries zero Actions secrets and release.yml references no token"
   },
   "historical_evidence": {
-    "note": "Recorded during earlier releases and NOT re-performed against 0.8.0-beta.0. Retained for provenance only; do not read as current-release results.",
+    "note": "Recorded during earlier releases and NOT re-performed against 0.8.0-beta.1. Retained for provenance only; do not read as current-release results.",
     "dogfood": {
       "applies_to_version": "0.7.1-beta.3",
       "applies_to_commit": "101e5d293dfcad13471a540ede48c86165cc8cc4",
