@@ -8,6 +8,42 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.0-beta.1] - 2026-09-07
+
+Maintenance release. No feature or contract change: selective recovery,
+whole-session rollback, schemas and receipts are exactly as in 0.8.0-beta.0.
+
+### Security
+
+- `fast-uri` is pinned to 3.1.7 and `qs` to 6.16.0. Both arrive through the MCP
+  SDK's dependency tree. Four high advisories against `fast-uri` 3.1.5 and two
+  moderate against `qs` 6.15.2 were published after the pins in 0.8.0-beta.0
+  were chosen, so the existing override was holding a version that had since
+  become vulnerable. `pnpm audit --prod` is back to zero.
+
+### Fixed
+
+- The object store could fail a concurrent store of identical content on
+  Windows. When two writers race, the loser recovers by re-reading the
+  destination and verifying it, but that re-read tolerated only `ENOENT`. On
+  Windows a rename that is still settling answers with a sharing violation
+  (`EPERM`) instead, so the recovery itself threw and the store reported a
+  failure for content that had in fact been published correctly. The recovery
+  read is now bounded-retried on `EPERM`.
+
+  The store's initial read is deliberately unchanged and still strict, so a
+  genuine permission problem surfaces immediately rather than being retried,
+  and a persistent failure during recovery is still reported rather than
+  swallowed. A corrupt destination is never retried, because that is an answer
+  rather than a timing artifact.
+
+### Changed
+
+- The post-publish smoke test tolerates slower npm propagation, from 80 seconds
+  to 320. The 0.8.0-beta.0 release exhausted the old budget on one package that
+  had not yet propagated, which withheld the GitHub Release even though the
+  publish had succeeded.
+
 ## [0.8.0-beta.0] - 2026-09-05
 
 Surgical recovery. A session stops being an all-or-nothing rollback unit and
@@ -390,7 +426,8 @@ locks.
 - ASCII-only at byte level across MCP source (D99.M.13) and per-tool
   hook scripts (D98.M.4).
 
-[Unreleased]: https://github.com/madeinplutofabio/vibe-revert/compare/v0.8.0-beta.0...HEAD
+[Unreleased]: https://github.com/madeinplutofabio/vibe-revert/compare/v0.8.0-beta.1...HEAD
+[0.8.0-beta.1]: https://github.com/madeinplutofabio/vibe-revert/compare/v0.8.0-beta.0...v0.8.0-beta.1
 [0.8.0-beta.0]: https://github.com/madeinplutofabio/vibe-revert/compare/v0.7.1-beta.4...v0.8.0-beta.0
 [0.7.1-beta.4]: https://github.com/madeinplutofabio/vibe-revert/compare/v0.7.1-beta.3...v0.7.1-beta.4
 [0.7.1-beta.3]: https://github.com/madeinplutofabio/vibe-revert/compare/v0.7.1-beta.1...v0.7.1-beta.3

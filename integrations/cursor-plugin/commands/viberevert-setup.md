@@ -12,7 +12,7 @@ Set up VibeRevert for the repository that is currently open, then confirm it wor
 Run this exact command in the root of the current project:
 
 ```
-npx -y viberevert@0.8.0-beta.0 install --cursor
+npx -y viberevert@0.8.0-beta.1 install --cursor
 ```
 
 On success it prints a line beginning with `[applied: Cursor:`.
@@ -32,7 +32,7 @@ user to:
 
 1. Reload the window (`Developer: Reload Window`) so Cursor picks up the new
    server.
-2. Open **Customize → MCP**, find `viberevert`, and enable it if Cursor shows it
+2. Open **Customize â†’ MCP**, find `viberevert`, and enable it if Cursor shows it
    as disabled.
 
 Once enabled, VibeRevert connects and exposes its 8 tools in this project.

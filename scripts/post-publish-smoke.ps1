@@ -73,9 +73,16 @@ $utf8NoBomMcp = [System.Text.UTF8Encoding]::new($false)
 # Retry config for npm install + version-match (CDN propagation race
 # after publish covers BOTH install failures AND stale dist-tag).
 # Attempts = backoffs.Count + 1 so every backoff value is consumed:
-# 6 attempts produce 5 sleeps totaling 5+10+15+20+30 = 80 seconds of
-# propagation tolerance.
-$installBackoffSeconds = @(5, 10, 15, 20, 30)
+# 11 attempts produce 10 sleeps totaling
+# 5+10+15+20+30+30+45+45+60+60 = 320 seconds of propagation tolerance.
+#
+# The previous budget was 80 seconds and proved too short. The 0.8.0-beta.0
+# release run exhausted it on ETARGET for a single package that had not yet
+# propagated, which skipped GitHub Release creation even though the publish
+# itself had succeeded. The job timeout is 30 minutes, and on the happy path
+# the first attempt succeeds, so a wider budget costs nothing when the
+# registry is quick and rescues the release when it is not.
+$installBackoffSeconds = @(5, 10, 15, 20, 30, 30, 45, 45, 60, 60)
 $installRetries = $installBackoffSeconds.Count + 1
 
 # Locked Cat 2 denial wire-shape text (D99.O + R31 generic message).

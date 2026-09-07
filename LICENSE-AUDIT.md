@@ -8,10 +8,10 @@
 | Input | Value |
 | --- | --- |
 | Generator schema version | `1` |
-| pnpm-lock.yaml SHA-256 | `9e65eeddf38ba7b189f9a1536eb1152f604dfbe61e02a0547df0f3568dc6d081` |
-| Workspace manifests digest (SHA-256) | `867a45f9e39e4c1fd74200c47340970a3474cdf63b2fb34da9cf3105af7b7921` |
+| pnpm-lock.yaml SHA-256 | `dd5f0efce8c6a699db854fcdca2cd3c4bca0e57ca8f123f25aed0bfe4d715ebb` |
+| Workspace manifests digest (SHA-256) | `965174defb811744a39624b83d98c4be2153af2dc5ba217e185e3b59910e7d0c` |
 | license-policy.json SHA-256 | `8f210e8009e477a5339838d18731e9f383c03b918be605377391d76baca972e6` |
-| license-metadata.json SHA-256 | `a92f713bef2d1493b8ef0c63d2582fe4c4ef4101b706ee903b90b7acffcb36ae` |
+| license-metadata.json SHA-256 | `e03e29fa42ae09d515f130bc6d2fc53af123e78e995f9aaba7d523293f3ebacb` |
 | Reachable snapshot instances | `315` |
 | Aggregated package rows | `315` |
 
@@ -203,7 +203,7 @@
 | `extendable-error` | `0.1.7` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `fast-deep-equal` | `3.1.3` | `production` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `fast-glob` | `3.3.3` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
-| `fast-uri` | `3.1.5` | `production` | `allowed-with-obligations` | `BSD-3-Clause` | `include-license-text` | `no` |
+| `fast-uri` | `3.1.7` | `production` | `allowed-with-obligations` | `BSD-3-Clause` | `include-license-text` | `no` |
 | `fastq` | `1.20.1` | `development` | `allowed-with-obligations` | `ISC` | `include-license-text` | `no` |
 | `fdir` | `6.5.0` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `fill-range` | `7.1.1` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
@@ -300,7 +300,7 @@
 | `postcss` | `8.5.22` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `prettier` | `2.8.8` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `proxy-addr` | `2.0.7` | `production` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
-| `qs` | `6.15.2` | `production` | `allowed-with-obligations` | `BSD-3-Clause` | `include-license-text` | `no` |
+| `qs` | `6.16.0` | `production` | `allowed-with-obligations` | `BSD-3-Clause` | `include-license-text` | `no` |
 | `quansync` | `0.2.11` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `queue-microtask` | `1.2.3` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `range-parser` | `1.2.1` | `production` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |

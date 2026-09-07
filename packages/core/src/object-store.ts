@@ -52,7 +52,9 @@
 // verifying it, rather than by inspecting the error code. Switching on errno
 // across platforms is unreliable; re-deriving the truth from the filesystem is
 // not. If the destination is still absent, the original error is rethrown, so a
-// genuine I/O failure is never laundered into success.
+// genuine I/O failure is never laundered into success. That recovery read is
+// itself bounded-retried, because on Windows the rival's rename can still be
+// settling and briefly answer with a sharing violation rather than the bytes.
 //
 // =============================================================================
 // Limits, stated rather than implied
@@ -76,6 +78,7 @@
 import { createHash } from "node:crypto";
 import { mkdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { writeFileAtomic } from "./atomic.js";
 import { viberevertObjectsDir } from "./paths.js";
 
@@ -187,6 +190,56 @@ async function readVerified(path: string, digest: string): Promise<Buffer | unde
 }
 
 /**
+ * The one errno a still-settling concurrent publish is known to produce here.
+ *
+ * On Windows, opening a file while another handle renames over it is a sharing
+ * violation reported as EPERM rather than as ENOENT. POSIX rename semantics
+ * make this effectively unreachable there, which is why the gap stayed hidden:
+ * only the Windows CI leg ever hit it, and only sometimes.
+ *
+ * EACCES and EBUSY are plausible neighbours and are deliberately NOT included.
+ * Only EPERM has actually been observed, and widening permission-error
+ * tolerance without evidence is how a narrow recovery turns into a general
+ * excuse to ignore permission failures.
+ */
+const RACE_TRANSIENT_CODE = "EPERM";
+
+/** Backoffs for the post-race re-read. Five attempts, 150 ms worst case. */
+const RACE_READ_BACKOFF_MS: readonly number[] = [10, 20, 40, 80];
+
+/**
+ * `readVerified` for the ONE case where a rival writer has already won: the
+ * publish below failed, and we are establishing what the winner left behind.
+ *
+ * Retries only `EPERM`, only that many times. It never converts a persistent
+ * failure into a success, and it never retries `ObjectCorruptionError`, which
+ * carries no `code` and so falls through on the first pass. A corrupt
+ * destination is an answer, not a timing artifact.
+ *
+ * WHICH ERROR SURVIVES, precisely: once the attempts are exhausted, the error
+ * this function throws is the LAST RECOVERY-READ error, not the publish error
+ * that sent us here. The publish error is rethrown by the caller instead, and
+ * only when this function returns `undefined`, meaning the destination is
+ * genuinely absent and nobody published anything.
+ *
+ * The strict `readVerified` is still what the fast path uses, so a permission
+ * problem on a quiet filesystem surfaces immediately instead of being retried.
+ */
+async function readVerifiedAfterRace(path: string, digest: string): Promise<Buffer | undefined> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await readVerified(path, digest);
+    } catch (err) {
+      const backoff = RACE_READ_BACKOFF_MS[attempt];
+      if (backoff === undefined || (err as NodeJS.ErrnoException).code !== RACE_TRANSIENT_CODE) {
+        throw err;
+      }
+      await sleep(backoff);
+    }
+  }
+}
+
+/**
  * Store `data` and return its digest.
  *
  * Idempotent: storing content that is already present succeeds without writing.
@@ -205,9 +258,17 @@ export async function putObject(repoRoot: string, data: Buffer): Promise<string>
   } catch (err) {
     // A concurrent writer may have published this digest between the check
     // above and the rename. Re-derive the outcome from the filesystem instead
-    // of interpreting the error, and rethrow if the destination is still
-    // absent.
-    if ((await readVerified(path, digest)) !== undefined) return digest;
+    // of interpreting the error.
+    //
+    // The re-read is bounded-retried because the rival's rename may still be
+    // settling and briefly answer with a sharing violation; see
+    // `readVerifiedAfterRace`. If that read keeps failing, ITS error escapes
+    // from here rather than `err`, which is correct: "I could not determine
+    // what the winner left" is a different and more accurate report than "my
+    // rename failed". `err` below is reached only when the destination is
+    // genuinely absent, meaning nobody published and the publish failure is
+    // the whole story.
+    if ((await readVerifiedAfterRace(path, digest)) !== undefined) return digest;
     throw err;
   }
 
