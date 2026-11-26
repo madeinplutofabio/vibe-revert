@@ -936,5 +936,104 @@ describe("viberevert check", () => {
       // Surfaced through handleKnownError's verbatim arm, not as a crash.
       expect(result.stdout).toBe("");
     });
+
+    // =========================================================================
+    // The report's provenance binding (v0.8.0-beta.2)
+    // =========================================================================
+    //
+    // `source_contribution_sha256` asserts that THIS report's findings were
+    // computed from THAT contribution. `prepareBoundSelectiveRestore` requires it
+    // for `--risk` and `--finding`, and in 0.8.0-beta.0 and 0.8.0-beta.1 nothing
+    // wrote it, so both selectors refused on every normally generated report.
+    //
+    // The positive case is proven end to end in report-binding-selectors.test.ts,
+    // which drives the real commands and follows the digest all the way into the
+    // apply receipt. What belongs HERE is the producer's discrimination: the
+    // binding must appear only when the findings really came from a persisted
+    // contribution, because a binding on a report computed from a live diff would
+    // be a false provenance claim rather than a missing one.
+    describe("report provenance binding", () => {
+      const bindingOf = async (args: readonly string[]): Promise<string | undefined> => {
+        const result = await runCheck([...args, "--json"]);
+        if (result.exitCode !== 0 && result.exitCode !== 2) {
+          throw new Error(`check failed (${result.exitCode}): ${result.stderr}`);
+        }
+        return ReportFileSchema.parse(JSON.parse(result.stdout)).source_contribution_sha256;
+      };
+
+      const recordedDigest = async (sessionId: string): Promise<string | undefined> => {
+        const raw = await readFile(
+          join(tmpRoot, ".viberevert", "sessions", sessionId, "session.json"),
+          "utf8",
+        );
+        return (JSON.parse(raw) as { contribution_sha256?: string }).contribution_sha256;
+      };
+
+      it("is written, and equals session.json's digest, for a contribution-backed check", async () => {
+        const { sessionId } = await makeSession(tmpRoot, {
+          evaluationSnapshot: makeSnapshot({ mode: "auto", detected_at_start: [] }),
+          ended: {
+            endedAt: ENDED_AT,
+            contribution: {
+              entries: async (sid) => [await addedFileEntry(sid, "notes.txt", ["plain"])],
+            },
+          },
+        });
+
+        const digest = await recordedDigest(sessionId);
+        expect(digest).toMatch(/^[0-9a-f]{64}$/);
+        expect(await bindingOf(["--since", sessionId])).toBe(digest);
+      });
+
+      // The four cases that must stay unbound. Each is legitimately unbound, not
+      // degraded: in none of them did the findings come from a contribution.
+
+      it("is absent for an ad-hoc report", async () => {
+        await writeFile(join(tmpRoot, "plain.txt"), "changed\n");
+        // A git-ref base is ad-hoc, so no contribution is consulted at all.
+        expect(await bindingOf(["--since", "HEAD"])).toBeUndefined();
+      });
+
+      it("is absent while the session is still active", async () => {
+        const { sessionId } = await makeSession(tmpRoot, {
+          evaluationSnapshot: makeSnapshot({ mode: "auto", detected_at_start: [] }),
+          markAsActive: true,
+        });
+        // Not ended, so there is no contribution to be bound to yet.
+        expect(await bindingOf(["--since", sessionId])).toBeUndefined();
+      });
+
+      it("is absent for a legacy session with no evaluation snapshot", async () => {
+        const { sessionId } = await makeSession(tmpRoot, {
+          // No evaluationSnapshot, by omission rather than post-hoc stripping.
+          ended: {
+            endedAt: ENDED_AT,
+            contribution: {
+              entries: async (sid) => [await addedFileEntry(sid, "notes.txt", ["plain"])],
+            },
+          },
+        });
+        // A contribution exists on disk, but evaluation cannot use it without the
+        // session-start snapshot, so the findings came from a live diff and the
+        // report must not claim otherwise. This is the case that stays
+        // permanently unbound: re-running check will never bind it.
+        expect(await recordedDigest(sessionId)).toMatch(/^[0-9a-f]{64}$/);
+        expect(await bindingOf(["--since", sessionId])).toBeUndefined();
+      });
+
+      it("is absent for an ended session that has a snapshot but no contribution", async () => {
+        const { sessionId } = await makeSession(tmpRoot, {
+          evaluationSnapshot: makeSnapshot({ mode: "auto", detected_at_start: [] }),
+          ended: { endedAt: ENDED_AT },
+        });
+        // Constructed state rather than a natural journey: the three guards run
+        // in order, so a legacy session is caught by the missing snapshot and
+        // never reaches this one. An ended session that recorded its snapshot
+        // normally and still has no contribution falls back to checkpoint-vs-live,
+        // and this asserts the report reports that honestly.
+        expect(await recordedDigest(sessionId)).toBeUndefined();
+        expect(await bindingOf(["--since", sessionId])).toBeUndefined();
+      });
+    });
   });
 });

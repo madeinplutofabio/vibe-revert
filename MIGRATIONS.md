@@ -49,9 +49,40 @@ afterwards.
 
 | Session | Selective rollback | `--risk` / `--finding` | Verification commands | Whole-session rollback |
 |---|---|---|---|---|
-| Started and ended under 0.8.0 | yes | yes | yes | yes |
+| Started and ended under 0.8.0 | yes | yes, after generating or regenerating the report with 0.8.0-beta.2 or later | yes | yes |
 | Started before 0.8.0, still active at upgrade, ended under 0.8.0 | yes, path selectors only | no | no | yes |
 | Ended before 0.8.0 | no | no | no | **yes, unchanged** |
+
+### Reports written by 0.8.0-beta.0 or 0.8.0-beta.1 need regenerating
+
+`--risk` and `--finding` resolve against a report, and they require that report
+to record which contribution produced its findings, as
+`source_contribution_sha256`. In `0.8.0-beta.0` and `0.8.0-beta.1` nothing wrote
+that field, so every report those versions generated was unbound and both
+selectors refused. Re-running `check` on an affected version reproduced the same
+unbound report, which made the refusal's own advice impossible to follow.
+`0.8.0-beta.2` writes the binding. What this means in practice:
+
+- **Your sessions and contributions are unaffected and remain valid.** The
+  defect was in the report, not in the captured evidence.
+- **Existing unbound reports remain schema-valid.** The field is optional, so
+  nothing is corrupt and nothing fails to parse.
+- **No automatic migration runs, and no artifact is rewritten for you.**
+- **If you hold a contribution-backed report from beta.0 or beta.1, re-run
+  `viberevert check --since <session>`.** The regenerated report carries the
+  binding, after which `--risk` and `--finding` work on that session.
+- **A session with no evaluation snapshot cannot gain these selectors by
+  re-running anything.** Its authoritative session-start configuration was never
+  recorded, so there is nothing for a report to be bound to. Use `--only`,
+  `--except`, or whole-session rollback, as the table above says.
+
+**An absent binding is not by itself a defect.** Several reports are
+legitimately unbound, and always were, because their findings did not come from
+a persisted contribution: ad-hoc reports, reports for a session that is still
+active, reports for a session with no evaluation snapshot, and reports for an
+ended session whose check fell back to a checkpoint-versus-live diff. Only a
+contribution-backed report written by beta.0 or beta.1 is affected by this
+correction.
 
 **A session ended before 0.8.0 cannot be back-filled.** Its after-state is
 physically gone: earlier versions recorded only path sets at `end`, with no

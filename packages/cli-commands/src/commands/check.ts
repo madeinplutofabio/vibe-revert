@@ -165,6 +165,7 @@ import {
   computeRollbackAvailable,
   contributionToRawDiff,
   parseRawDiffToInputs,
+  type ReportEvaluationSource,
 } from "../check-orchestration.js";
 import {
   CheckpointNameNotFoundError,
@@ -211,6 +212,28 @@ function shouldExitWithBlocker(results: readonly CheckResult[], blockOn: RiskLev
 // =============================================================================
 
 /**
+ * A contribution together with the digest that was VERIFIED against its bytes.
+ *
+ * The pair exists so the digest cannot be sourced from anywhere other than the
+ * verification that proved it. `loadVerifiedSessionContribution` validates the
+ * raw bytes against `lifecycle.contribution.sha256`, so once it returns, that
+ * digest is a fact about these bytes. Re-reading it from the lifecycle at the
+ * call site would create a second source for one fact, and two sources can
+ * drift. `prepareBoundSelectiveRestore` applies the same discipline when it
+ * builds its identity from the verified contribution rather than from its
+ * parameters.
+ *
+ * The digest is what `buildReportFile` persists as
+ * `source_contribution_sha256`, which `--risk` and `--finding` require. In
+ * 0.8.0-beta.0 and 0.8.0-beta.1 it was never carried this far and both
+ * selectors refused on every report.
+ */
+interface VerifiedContributionForBase {
+  readonly contribution: SessionContributionFile;
+  readonly sha256: string;
+}
+
+/**
  * Load this base's persisted contribution, ONCE, or `undefined` if the check
  * should not be contribution-backed.
  *
@@ -240,7 +263,7 @@ function shouldExitWithBlocker(results: readonly CheckResult[], blockOn: RiskLev
 async function loadContributionForBase(
   base: ResolvedCheckBase,
   repoRoot: string,
-): Promise<SessionContributionFile | undefined> {
+): Promise<VerifiedContributionForBase | undefined> {
   if (base.mode !== "checkpoint" || base.kind !== "session_bound") {
     return undefined;
   }
@@ -253,9 +276,10 @@ async function loadContributionForBase(
     return undefined;
   }
 
-  return loadVerifiedSessionContribution(repoRoot, {
+  const sha256 = lifecycle.contribution.sha256;
+  const contribution = await loadVerifiedSessionContribution(repoRoot, {
     path: lifecycle.contribution.path,
-    sha256: lifecycle.contribution.sha256,
+    sha256,
     expected: {
       // base.sessionId, never reportId or sinceRef: those equal it today by
       // D31 and by resolution provenance, but only this field MEANS the
@@ -265,6 +289,7 @@ async function loadContributionForBase(
       endedAt: lifecycle.endedAt,
     },
   });
+  return { contribution, sha256 };
 }
 
 /**
@@ -331,7 +356,7 @@ async function loadContributionForBase(
 async function resolveChecksConfigForBase(
   base: ResolvedCheckBase,
   repoRoot: string,
-  verifiedContribution: SessionContributionFile | undefined,
+  verifiedContribution: VerifiedContributionForBase | undefined,
 ): Promise<ResolvedChecksConfig> {
   const snapshot =
     base.mode === "checkpoint" && base.kind === "session_bound"
@@ -345,7 +370,7 @@ async function resolveChecksConfigForBase(
         : normalizeStringArray([
             ...snapshot.frameworks.detected_at_start,
             ...(verifiedContribution !== undefined
-              ? (verifiedContribution.detected_frameworks_at_end ?? [])
+              ? (verifiedContribution.contribution.detected_frameworks_at_end ?? [])
               : await detectFrameworks(repoRoot)),
           ]);
     return {
@@ -640,24 +665,35 @@ Exit codes:
       // warnings are non-fatal and get surfaced to stderr per D29.
       let diff: RawDiff;
       let cleanupWarnings: readonly string[];
+      // The report's evaluation source is chosen in THIS branch, by the same
+      // value that chooses the diff, so the two can never disagree about where
+      // the findings came from. A report is bound exactly when its findings
+      // were computed from a verified persisted contribution.
+      let evaluationSource: ReportEvaluationSource;
       if (verifiedContribution !== undefined) {
         // Snapshot-backed contribution: the changed-file universe is frozen
         // evidence, so getDiffSinceCheckpoint is NOT called and no oracle
         // worktree is built -- hence no cleanup warnings are possible.
-        diff = contributionToRawDiff(verifiedContribution);
+        diff = contributionToRawDiff(verifiedContribution.contribution);
         cleanupWarnings = [];
+        evaluationSource = {
+          kind: "verified_contribution",
+          sha256: verifiedContribution.sha256,
+        };
       } else if (base.mode === "git-ref") {
         const result = await getDiffSinceRef(repoRoot, base.sinceRef, {
           staged: base.stagedOnly,
         });
         diff = result.diff;
         cleanupWarnings = result.cleanupWarnings;
+        evaluationSource = { kind: "live_diff" };
       } else {
         const result = await getDiffSinceCheckpoint(repoRoot, base.checkpointDir, {
           liveExcludePatterns: resolved.rollbackExclude,
         });
         diff = result.diff;
         cleanupWarnings = result.cleanupWarnings;
+        evaluationSource = { kind: "live_diff" };
       }
       for (const w of cleanupWarnings) {
         this.context.stderr.write(`warning: ${w}\n`);
@@ -741,6 +777,7 @@ Exit codes:
         raw: filteredDiff,
         runResult,
         sinceMeta: { ...sinceMetaProvisional, rollbackAvailable },
+        evaluationSource,
       });
 
       // Step 11: atomic persistence (D17b/D26 dispatch on base.kind).

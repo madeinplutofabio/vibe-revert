@@ -447,12 +447,72 @@ describe("computeSummary -- D53", () => {
 
 const FIXED_NOW_ENV = { [VIBEREVERT_TEST_FIXED_NOW]: "2026-01-01T00:00:00Z" };
 
+/**
+ * The default for every case in this file that is not about the binding.
+ *
+ * `evaluationSource` is REQUIRED rather than optional on purpose: an optional
+ * digest is exactly how `source_contribution_sha256` came to be written
+ * nowhere in 0.8.0-beta.0 and 0.8.0-beta.1. Stating `live_diff` here is a
+ * deliberate claim that these fixtures do not evaluate a persisted
+ * contribution, not a way of opting out of the parameter.
+ */
+const LIVE_DIFF = { kind: "live_diff" } as const;
+
+/** A valid lowercase 64-hex digest, shaped like a real contribution digest. */
+const CONTRIBUTION_DIGEST = "a".repeat(64);
+
+describe("buildReportFile: the evaluation source governs the report binding", () => {
+  it("writes source_contribution_sha256 from the verified_contribution arm", () => {
+    const file = buildReportFile({
+      ctx: makeCtx(),
+      raw: { entries: [] },
+      runResult: makeRunResult(),
+      sinceMeta: makeSessionBoundSinceMeta(),
+      evaluationSource: { kind: "verified_contribution", sha256: CONTRIBUTION_DIGEST },
+      env: FIXED_NOW_ENV,
+    });
+    expect(file.source_contribution_sha256).toBe(CONTRIBUTION_DIGEST);
+  });
+
+  it("omits the key entirely on the live_diff arm, rather than writing undefined", () => {
+    const file = buildReportFile({
+      ctx: makeCtx(),
+      raw: { entries: [] },
+      runResult: makeRunResult(),
+      sinceMeta: makeSessionBoundSinceMeta(),
+      evaluationSource: LIVE_DIFF,
+      env: FIXED_NOW_ENV,
+    });
+    // Absent, not present-and-undefined: `exactOptionalPropertyTypes` makes an
+    // explicit undefined a type error, and a serialized `"key": undefined`
+    // would not round-trip through JSON anyway.
+    expect("source_contribution_sha256" in file).toBe(false);
+  });
+
+  it("keeps the binding out of an ad_hoc report, which the schema also refuses", () => {
+    // An ad-hoc report can never be contribution-backed: `check` only reaches
+    // the verified_contribution arm for a session-bound base. Asserted here so
+    // the producer is known not to depend on the schema refine as its guard.
+    const file = buildReportFile({
+      ctx: makeCtx(),
+      raw: { entries: [] },
+      runResult: makeRunResult(),
+      sinceMeta: makeAdHocSinceMeta(),
+      evaluationSource: LIVE_DIFF,
+      env: FIXED_NOW_ENV,
+    });
+    expect(file.kind).toBe("ad_hoc");
+    expect("source_contribution_sha256" in file).toBe(false);
+  });
+});
+
 describe("buildReportFile", () => {
   it("session_bound happy path: report_id === report.session_id === sess_id", () => {
     const file = buildReportFile({
       ctx: makeCtx(),
       raw: { entries: [] },
       runResult: makeRunResult(),
+      evaluationSource: LIVE_DIFF,
       sinceMeta: makeSessionBoundSinceMeta(),
       env: FIXED_NOW_ENV,
     });
@@ -467,6 +527,7 @@ describe("buildReportFile", () => {
       ctx: makeCtx(),
       raw: { entries: [] },
       runResult: makeRunResult(),
+      evaluationSource: LIVE_DIFF,
       sinceMeta: makeAdHocSinceMeta(),
       env: FIXED_NOW_ENV,
     });
@@ -480,6 +541,7 @@ describe("buildReportFile", () => {
       ctx: makeCtx(),
       raw: { entries: [] },
       runResult: makeRunResult(),
+      evaluationSource: LIVE_DIFF,
       sinceMeta: makeAdHocSinceMeta({ stagedOnly: true }),
       env: FIXED_NOW_ENV,
     });
@@ -491,6 +553,7 @@ describe("buildReportFile", () => {
       ctx: makeCtx(),
       raw: { entries: [] },
       runResult: makeRunResult(),
+      evaluationSource: LIVE_DIFF,
       sinceMeta: makeAdHocSinceMeta(),
       env: FIXED_NOW_ENV,
     });
@@ -503,6 +566,7 @@ describe("buildReportFile", () => {
         ctx: makeCtx(),
         raw: { entries: [] },
         runResult: makeRunResult(),
+        evaluationSource: LIVE_DIFF,
         sinceMeta: makeSessionBoundSinceMeta({ stagedOnly: true }),
         env: FIXED_NOW_ENV,
       }),
@@ -514,6 +578,7 @@ describe("buildReportFile", () => {
       ctx: makeCtx(),
       raw: { entries: [] },
       runResult: makeRunResult(),
+      evaluationSource: LIVE_DIFF,
       sinceMeta: makeAdHocSinceMeta({ sinceResolvedSha: VALID_SHA }),
       env: {
         ...FIXED_NOW_ENV,
@@ -528,6 +593,7 @@ describe("buildReportFile", () => {
       ctx: makeCtx(),
       raw: { entries: [] },
       runResult: makeRunResult(),
+      evaluationSource: LIVE_DIFF,
       sinceMeta: makeAdHocSinceMeta(),
       env: { [VIBEREVERT_TEST_FIXED_NOW]: "2026-06-15T12:00:00Z" },
     });
@@ -540,6 +606,7 @@ describe("buildReportFile", () => {
       ctx: makeCtx({ task: "do the thing" }),
       raw: { entries: [] },
       runResult: makeRunResult(),
+      evaluationSource: LIVE_DIFF,
       sinceMeta: makeAdHocSinceMeta({ task: "do the thing" }),
       env: FIXED_NOW_ENV,
     });
@@ -552,6 +619,7 @@ describe("buildReportFile", () => {
         ctx: makeCtx({ task: "task A" }),
         raw: { entries: [] },
         runResult: makeRunResult(),
+        evaluationSource: LIVE_DIFF,
         sinceMeta: makeAdHocSinceMeta({ task: "task B" }),
         env: FIXED_NOW_ENV,
       }),
@@ -563,6 +631,7 @@ describe("buildReportFile", () => {
       ctx: makeCtx(),
       raw: { entries: [] },
       runResult: makeRunResult(),
+      evaluationSource: LIVE_DIFF,
       sinceMeta: makeAdHocSinceMeta({ task: "from sinceMeta" }),
       env: FIXED_NOW_ENV,
     });
@@ -574,6 +643,7 @@ describe("buildReportFile", () => {
       ctx: makeCtx({ task: "from ctx" }),
       raw: { entries: [] },
       runResult: makeRunResult(),
+      evaluationSource: LIVE_DIFF,
       sinceMeta: makeAdHocSinceMeta(),
       env: FIXED_NOW_ENV,
     });
@@ -585,6 +655,7 @@ describe("buildReportFile", () => {
       ctx: makeCtx(),
       raw: { entries: [] },
       runResult: makeRunResult(),
+      evaluationSource: LIVE_DIFF,
       sinceMeta: makeAdHocSinceMeta(),
       env: FIXED_NOW_ENV,
     });
@@ -600,6 +671,7 @@ describe("buildReportFile", () => {
       ctx: makeCtx(),
       raw,
       runResult: makeRunResult({ riskTagsByPath }),
+      evaluationSource: LIVE_DIFF,
       sinceMeta: makeAdHocSinceMeta(),
       env: FIXED_NOW_ENV,
     });
@@ -615,6 +687,7 @@ describe("buildReportFile", () => {
       ctx: makeCtx(),
       raw,
       runResult: makeRunResult({ riskLevelByPath }),
+      evaluationSource: LIVE_DIFF,
       sinceMeta: makeAdHocSinceMeta(),
       env: FIXED_NOW_ENV,
     });

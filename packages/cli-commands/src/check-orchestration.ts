@@ -439,11 +439,42 @@ export interface BuildReportSinceMeta {
   readonly agentCommand?: string;
 }
 
+/**
+ * Where the findings in a report came from.
+ *
+ * REQUIRED on `BuildReportFileParams`, and discriminated rather than an
+ * optional digest, because an optional digest is exactly how
+ * `source_contribution_sha256` came to be written nowhere at all in
+ * 0.8.0-beta.0 and 0.8.0-beta.1: `ReportFileSchema` declared it,
+ * `prepareBoundSelectiveRestore` required it for `--risk` and `--finding`, and
+ * no producer ever supplied it. Both selectors therefore refused on every
+ * normally generated report.
+ *
+ * Making the source required and explicit means a future caller cannot omit
+ * the binding by forgetting an argument. Omitting it is a type error, and
+ * stating `live_diff` is a deliberate claim rather than a default.
+ *
+ * `buildReportFile` derives the persisted digest itself, only from the
+ * `verified_contribution` arm. The `live_diff` arm writes no digest, which is
+ * correct and not a degradation: an ad-hoc report, an active session, a legacy
+ * session with no evaluation snapshot, and an ended session evaluated through a
+ * live checkpoint diff are all legitimately unbound, because their findings did
+ * not come from a persisted contribution.
+ */
+export type ReportEvaluationSource =
+  | { readonly kind: "verified_contribution"; readonly sha256: string }
+  | { readonly kind: "live_diff" };
+
 export interface BuildReportFileParams {
   readonly ctx: CheckContext;
   readonly raw: RawDiff;
   readonly runResult: RunChecksResult;
   readonly sinceMeta: BuildReportSinceMeta;
+  /**
+   * Whether these findings came from verified contribution evidence or from a
+   * live diff. Required; see `ReportEvaluationSource`.
+   */
+  readonly evaluationSource: ReportEvaluationSource;
   /** Optional env override for runtime-env resolvers (C.1). */
   readonly env?: NodeJS.ProcessEnv;
 }
@@ -478,7 +509,7 @@ export interface BuildReportFileParams {
  * downgraded to `false`.
  */
 export function buildReportFile(params: BuildReportFileParams): ReportFile {
-  const { ctx, raw, runResult, sinceMeta, env } = params;
+  const { ctx, raw, runResult, sinceMeta, evaluationSource, env } = params;
 
   const writtenAt = resolveNowForCliTimestamp(env);
   const endedAt = writtenAt;
@@ -535,6 +566,13 @@ export function buildReportFile(params: BuildReportFileParams): ReportFile {
     since_kind: sinceMeta.sinceKind,
     since_ref: sinceMeta.sinceRef,
     since_resolved_sha: sinceResolvedSha,
+    // Derived here from the required evaluation source, never taken as a
+    // caller-supplied optional. The schema's `kind === "session_bound"` refine
+    // is a backstop, not the guard: the guard is that findings computed from a
+    // live diff cannot reach the `verified_contribution` arm.
+    ...(evaluationSource.kind === "verified_contribution"
+      ? { source_contribution_sha256: evaluationSource.sha256 }
+      : {}),
     ...(sinceMeta.stagedOnly === true ? { staged_only: true as const } : {}),
     written_at: writtenAt,
     report,

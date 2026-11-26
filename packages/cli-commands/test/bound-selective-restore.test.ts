@@ -306,9 +306,25 @@ describe("prepareBoundSelectiveRestore: the bound object", () => {
 // =============================================================================
 
 describe("prepareBoundSelectiveRestore: report provenance", () => {
+  // These cases prove the CONSUMER refuses. They deliberately construct their
+  // own `ReportFile`, which is why they could not detect that no producer ever
+  // wrote `source_contribution_sha256` in 0.8.0-beta.0 or 0.8.0-beta.1: a test
+  // that builds the artifact under test cannot notice a missing builder. The
+  // producer is asserted in `check-orchestration.test.ts` and
+  // `commands/check.test.ts`, and the full chain in
+  // `report-binding-selectors.test.ts`.
+  //
+  // The middle case changed MEANING at beta.2 without changing behavior. It no
+  // longer describes what every normal report looked like; it now describes a
+  // report written by beta.0 or beta.1, or one of the legitimately unbound
+  // bases (ad-hoc, active session, no evaluation snapshot, live checkpoint
+  // diff). The refusal is the same either way.
   const staleCases: readonly [string, unknown][] = [
     ["no report at all", undefined],
-    ["a valid report with no source digest", reportFile()],
+    [
+      "a report with no source digest, as beta.0 and beta.1 wrote, or a legitimately unbound base",
+      reportFile(),
+    ],
     ["a report bound to another contribution", reportFile(OTHER_SHA)],
   ];
 
