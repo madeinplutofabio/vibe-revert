@@ -31,9 +31,12 @@
 //      entry shapes whose key is NOT in MANIFEST_NON_DEP_KEYS (a
 //      small module-private denylist of well-known top-level non-
 //      dependency keys, INCLUDING install-script lifecycle keys per
-//      the cross-rule overlap note below). Consolidated to ONE
-//      finding per manifest with up to MAX_NEW_DEPENDENCY_EVIDENCE
-//      entries; the rest summarized in the message as "+N more added".
+//      the cross-rule overlap note below) AND whose key does NOT also
+//      appear on a removed line of the same file (M 0.9.0 step 2 --
+//      see the per-file key comparison block in rule 3). Consolidated
+//      to ONE finding per manifest with up to
+//      MAX_NEW_DEPENDENCY_EVIDENCE entries; the rest summarized in the
+//      message as "+N more added".
 //
 // =============================================================================
 // TRANSITIVE MANIFEST/LOCKFILE EXCLUSION (enforced, not just documented)
@@ -567,6 +570,51 @@ export const dependenciesCheck: Check = {
       // the invariant.
       const denylist = MANIFEST_NON_DEP_KEYS[basename] ?? new Set<string>();
 
+      // PER-FILE KEY COMPARISON (M 0.9.0 step 2).
+      //
+      // An added line alone does not establish a NEW dependency. A unified
+      // diff represents any in-place edit as a removal plus an addition, so
+      // matching `addedLines` without consulting `removedLines` reported a
+      // new dependency whenever an existing entry's LINE changed for any
+      // reason at all:
+      //
+      //   -    "zod": "4.4.1"
+      //   +    "zod": "4.4.1",     <- gained a trailing comma, nothing else
+      //
+      // That false positive was observable on ordinary maintenance work. It
+      // fired on this repository's own zod/MCP-SDK upgrade, where shrinking
+      // the `pnpm.overrides` block left the final entry without its comma.
+      //
+      // The rule is therefore: a candidate is new only when its KEY does not
+      // also appear as a key on a removed line of the SAME file. Comparing
+      // keys rather than whole lines is what makes a version change, a
+      // reordering and a comma change all correctly excluded while a genuine
+      // addition is still reported.
+      //
+      // Scoped per file deliberately. Two manifests in one diff are separate
+      // questions, and a key removed from one must not suppress a genuine
+      // addition in the other.
+      //
+      // DECIDED, not incidental: moving a package between `devDependencies`
+      // and `dependencies` yields the key on both a removed and an added
+      // line, so this rule answers "not new" — which is correct for a rule
+      // named `new-dependencies`, because the package is not new to the
+      // manifest. A dev-to-prod promotion is a real signal (it enters the
+      // production closure) but it is a DIFFERENT signal, out of scope here,
+      // and assigned to dependency-aware analysis at 1.4.0. The behavior is
+      // pinned by test so it stays a decision rather than an accident.
+      //
+      // Redaction safety is unaffected: the key is already the only captured
+      // group and no version string is read on either side.
+      const removedKeys = new Set<string>();
+      for (const removedLine of file.removedLines) {
+        const match = JSON_STRING_ENTRY_PATTERN.exec(removedLine.text);
+        if (match === null) continue;
+        const name = match[1];
+        if (name === undefined) continue; // defensive
+        removedKeys.add(name);
+      }
+
       // Collect candidate dependency adds, preserving line order.
       // CandidateDep deliberately does NOT carry the version string —
       // see the file-header REDACTION SAFETY block. The regex verifies
@@ -583,6 +631,7 @@ export const dependenciesCheck: Check = {
         const name = match[1];
         if (name === undefined) continue; // defensive
         if (denylist.has(name)) continue;
+        if (removedKeys.has(name)) continue; // modified in place, not added
         newDeps.push({ name, line: addedLine.line });
       }
 

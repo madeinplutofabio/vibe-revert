@@ -122,6 +122,29 @@ function withAddedLines(
 }
 
 /**
+ * Build a ChangedFileInput carrying BOTH sides of the diff.
+ *
+ * Required by the rule-3 per-file key comparison (M 0.9.0 step 2): a key
+ * present on a removed line is a modification, not an addition, so a test
+ * that only supplies added lines cannot exercise that path at all. The
+ * `withAddedLines` helper above hardcodes `removedLines: []`, which is
+ * exactly why the trailing-comma false positive went unnoticed.
+ */
+function withAddedAndRemovedLines(
+  path: string,
+  addedLines: readonly { line: number; text: string }[],
+  removedLines: readonly { line: number; text: string }[],
+): ChangedFileInput {
+  return {
+    path,
+    status: "modified",
+    addedLines,
+    removedLines,
+    isBinary: false,
+  };
+}
+
+/**
  * Build a CheckContext from a list of ChangedFileInputs. Defaults
  * configChecks to `{ dependencies: true }` so D28 Layer 1 does NOT
  * short-circuit dependenciesCheck. See CRITICAL TEST DISCIPLINE block
@@ -636,6 +659,139 @@ describe("dependenciesCheck — rule 3: new-dependencies", () => {
       ctxFor([withAddedLines("src/config.json", [{ line: 5, text: `    "lodash": "^4.0.0",` }])]),
     );
     expect(result.results).toEqual([]);
+  });
+});
+
+// =============================================================================
+// RULE 3: per-file key comparison (M 0.9.0 step 2)
+// =============================================================================
+//
+// The detector-predictability pattern, established here and reused across every
+// detector at step 13: one POSITIVE control plus the negatives it protects.
+//
+// The positive control is not decoration. Without it, all four negatives pass
+// vacuously against a detector that can no longer emit anything at all, which
+// is precisely the failure shape the beta.2 defect taught: a test that cannot
+// distinguish "correctly silent" from "broken" proves nothing.
+//
+// Every negative supplies BOTH diff sides via withAddedAndRemovedLines. The
+// pre-existing rule-3 cases all used withAddedLines, which hardcodes
+// `removedLines: []`, so none of them could reach this code path. That gap is
+// why the false positive shipped.
+describe("dependenciesCheck — rule 3: per-file key comparison", () => {
+  const newDepsOf = (result: ReturnType<typeof runChecks>) =>
+    result.results.filter((r) => r.id === "dependencies.new-dependencies");
+
+  it("POSITIVE: a genuinely new key is still reported, even alongside an unrelated removal", () => {
+    const result = runChecks(
+      [dependenciesCheck],
+      ctxFor([
+        withAddedAndRemovedLines(
+          "package.json",
+          [{ line: 5, text: `    "lodash": "^4.0.0",` }],
+          [{ line: 5, text: `    "underscore": "^1.0.0",` }],
+        ),
+      ]),
+    );
+    const findings = newDepsOf(result);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]?.evidence).toHaveLength(1);
+    expect(findings[0]?.evidence[0]?.detail).toBe("new-dependency: lodash");
+  });
+
+  it("NEGATIVE: a trailing-comma-only change is not a new dependency", () => {
+    // The exact shape that shipped as a false positive. It fired on this
+    // repository's own zod/MCP-SDK upgrade, where shrinking the
+    // pnpm.overrides block left the final entry without its comma.
+    const result = runChecks(
+      [dependenciesCheck],
+      ctxFor([
+        withAddedAndRemovedLines(
+          "package.json",
+          [{ line: 5, text: `    "zod": "4.4.1",` }],
+          [{ line: 5, text: `    "zod": "4.4.1"` }],
+        ),
+      ]),
+    );
+    expect(newDepsOf(result)).toEqual([]);
+  });
+
+  it("NEGATIVE: a version-only change is not a new dependency", () => {
+    const result = runChecks(
+      [dependenciesCheck],
+      ctxFor([
+        withAddedAndRemovedLines(
+          "package.json",
+          [{ line: 5, text: `    "zod": "4.6.7",` }],
+          [{ line: 5, text: `    "zod": "4.4.1",` }],
+        ),
+      ]),
+    );
+    expect(newDepsOf(result)).toEqual([]);
+  });
+
+  it("NEGATIVE: reordering existing keys adds nothing", () => {
+    const result = runChecks(
+      [dependenciesCheck],
+      ctxFor([
+        withAddedAndRemovedLines(
+          "package.json",
+          [
+            { line: 5, text: `    "axios": "^1.0.0",` },
+            { line: 6, text: `    "lodash": "^4.0.0",` },
+          ],
+          [
+            { line: 5, text: `    "lodash": "^4.0.0",` },
+            { line: 6, text: `    "axios": "^1.0.0",` },
+          ],
+        ),
+      ]),
+    );
+    expect(newDepsOf(result)).toEqual([]);
+  });
+
+  it("DECIDED: moving a package from devDependencies to dependencies is NOT reported as new", () => {
+    // Pinned so this stays a decision rather than an accident of the
+    // implementation. The package is not new to the MANIFEST, and this rule is
+    // named new-dependencies, so "not new" is the correct answer here.
+    //
+    // A dev-to-prod promotion is separately a real signal: it enters the
+    // production dependency closure. That signal is deliberately out of scope
+    // for 0.9 and belongs to dependency-aware analysis at 1.4.0. If a future
+    // rule reports it, it is a NEW rule id, not a widening of this one.
+    const result = runChecks(
+      [dependenciesCheck],
+      ctxFor([
+        withAddedAndRemovedLines(
+          "package.json",
+          [{ line: 12, text: `    "typescript": "^5.0.0",` }],
+          [{ line: 20, text: `    "typescript": "^5.0.0",` }],
+        ),
+      ]),
+    );
+    expect(newDepsOf(result)).toEqual([]);
+  });
+
+  it("key comparison is PER FILE: a key removed from one manifest does not suppress it in another", () => {
+    const result = runChecks(
+      [dependenciesCheck],
+      ctxFor([
+        withAddedAndRemovedLines(
+          "package.json",
+          [{ line: 5, text: `    "lodash": "^4.0.0",` }],
+          [],
+        ),
+        withAddedAndRemovedLines(
+          "apps/web/package.json",
+          [],
+          [{ line: 9, text: `    "lodash": "^4.0.0",` }],
+        ),
+      ]),
+    );
+    const findings = newDepsOf(result);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]?.evidence[0]?.file).toBe("package.json");
+    expect(findings[0]?.evidence[0]?.detail).toBe("new-dependency: lodash");
   });
 });
 
