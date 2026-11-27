@@ -88,6 +88,29 @@ started and did not finalize.
 selected path did, and what the two integrity passes and the project's own
 verification commands found.
 
+**Why the selection was made** is recorded on both artifacts, as
+`selection.source` on the attempt marker and `selection_source` on the receipt.
+It is a discriminated value, not a bare selector object:
+
+| `kind` | Meaning | Also carries |
+|---|---|---|
+| `selectors` | A person asked for these change groups, by `--only`, `--except`, `--risk` or `--finding` | `selectors`, the exact families supplied |
+| `scope_violation` | A policy decision produced the selection; no selectors were typed | nothing further |
+
+The `scope_violation` arm carries only its discriminant on purpose. The
+authority it was judged against, the decision, and the reason codes belong to
+the decision and integrity-event records, and copying them here would duplicate
+state across artifacts that then have to be kept consistent, while still not
+identifying which decision was responsible. The binding that matters is already
+present: `session_id`, `contribution_sha256`, `resolved_change_group_ids` and
+this discriminant.
+
+Both artifacts moved to schema version `1.1` for this field. A reader of the
+current version accepts a `1.0` artifact and normalizes it, since every `1.0`
+selection has selectors and therefore maps unambiguously onto the `selectors`
+arm. A `1.0` reader rejects a `1.1` artifact rather than misreading it, because
+these schemas refuse unknown fields.
+
 **A note on `contribution_sha256` across platforms.** The digest is not stable
 between operating systems, by design. A regular file's executable bit is a real
 boolean on POSIX and unreportable on Windows, where the capture records `null`
@@ -129,8 +152,8 @@ not force a bump in the others. They happen to share the value `1.0` today.
 | Report-file wrapper | `REPORT_FILE_SCHEMA_VERSION` | `1.0` |
 | Rollback receipt | `RECEIPT_FILE_SCHEMA_VERSION` | `1.0` |
 | Session contribution | `CONTRIBUTION_FILE_SCHEMA_VERSION` | `1.0` |
-| Rollback attempt marker | `ROLLBACK_ATTEMPT_SCHEMA_VERSION` | `1.0` |
-| Selective rollback receipt | `SELECTIVE_ROLLBACK_RECEIPT_SCHEMA_VERSION` | `1.0` |
+| Rollback attempt marker | `ROLLBACK_ATTEMPT_SCHEMA_VERSION` | `1.1` |
+| Selective rollback receipt | `SELECTIVE_ROLLBACK_RECEIPT_SCHEMA_VERSION` | `1.1` |
 
 The last three axes are **declared, not yet produced**. Their schemas ship in
 `@viberevert/session-format` so the formats are defined and reviewable ahead of the

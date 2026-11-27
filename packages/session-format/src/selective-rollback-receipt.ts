@@ -67,18 +67,44 @@ import {
   sortedUniquePathArray,
 } from "./atoms.js";
 import { ChangeGroupIdSchema } from "./contribution.js";
-import { RollbackSelectorsSchema } from "./rollback-attempt.js";
+import {
+  type RollbackSelectionSource,
+  RollbackSelectionSourceSchema,
+  RollbackSelectorsSchema,
+} from "./rollback-attempt.js";
 import { ROLLBACK_OUT_OF_SCOPE_NOTICE } from "./schemas.js";
 
 /**
- * Independent schema version for the selective rollback receipt. A SEVENTH
- * axis. Each axis corresponds to one independently evolving persisted artifact;
- * sharing one would couple unrelated evolution, which is the situation these
- * axes exist to prevent.
+ * Independent schema version for the selective rollback receipt. One axis per
+ * independently evolving persisted artifact; sharing one would couple unrelated
+ * evolution, which is the situation these axes exist to prevent.
+ *
+ * ## 1.0 -> 1.1 (M 0.9.0 step 3)
+ *
+ * `selectors` became `selection_source`, the discriminated union defined in
+ * `rollback-attempt.ts` and shared by both artifacts of one rollback operation.
+ * A scope-violation selection has no selectors, so the old shape could not
+ * describe one.
+ *
+ * Both branches moved together. A dry run and an apply answer different
+ * questions but they answer them about the same selection, and letting only one
+ * branch express a scope violation would make the dry-run preview unable to
+ * describe the operation the apply would perform.
+ *
+ * Every branch is `z.strictObject`, so a 1.0 reader rejects a 1.1 receipt on the
+ * unknown key. Readers of HISTORICAL receipts use
+ * `SelectiveRollbackReceiptAnyVersionSchema`; producers and read-backs of our
+ * own fresh write stay strict on 1.1.
  */
-export const SELECTIVE_ROLLBACK_RECEIPT_SCHEMA_VERSION = "1.0" as const;
+export const SELECTIVE_ROLLBACK_RECEIPT_SCHEMA_VERSION = "1.1" as const;
 export type SelectiveRollbackReceiptSchemaVersion =
   typeof SELECTIVE_ROLLBACK_RECEIPT_SCHEMA_VERSION;
+
+/**
+ * The superseded 1.0 version literal, retained ONLY so the any-version reader
+ * can recognize a receipt already on disk. Nothing writes it.
+ */
+const SELECTIVE_ROLLBACK_RECEIPT_SCHEMA_VERSION_1_0 = "1.0" as const;
 
 // =============================================================================
 // Per-path outcomes
@@ -579,7 +605,7 @@ const DryRunBranchSchema = z.strictObject({
   session_id: nonBlankString,
   checkpoint_id: nonBlankString,
   contribution_sha256: z.hash("sha256"),
-  selectors: RollbackSelectorsSchema,
+  selection_source: RollbackSelectionSourceSchema,
   resolved_change_group_ids: ChangeGroupIdSetSchema,
   results: z.array(DryRunPathResultSchema),
   eligibility: DryRunEligibilitySchema,
@@ -595,7 +621,7 @@ const ApplyBranchSchema = z.strictObject({
   checkpoint_id: nonBlankString,
   contribution_sha256: z.hash("sha256"),
   pre_rollback_checkpoint_id: nonBlankString,
-  selectors: RollbackSelectorsSchema,
+  selection_source: RollbackSelectionSourceSchema,
   resolved_change_group_ids: NonEmptyChangeGroupIdSetSchema,
   results: z.array(ApplyPathResultSchema),
   outcome: z.enum(["succeeded", "failed"]),
@@ -859,3 +885,86 @@ export const SelectiveRollbackReceiptSchema = z
     },
   );
 export type SelectiveRollbackReceipt = z.infer<typeof SelectiveRollbackReceiptSchema>;
+
+// =============================================================================
+// Any-version reader (M 0.9.0 step 3)
+// =============================================================================
+
+/**
+ * Lift a 1.0 `selectors` object to the 1.1 discriminated source.
+ *
+ * Total and lossless: every 1.0 receipt carries selectors by construction, so
+ * the discriminant is derived rather than guessed.
+ */
+const liftSelectors1_0 = (
+  selectors: z.infer<typeof RollbackSelectorsSchema>,
+): RollbackSelectionSource => ({ kind: "selectors", selectors });
+
+const DryRunBranchSchema1_0 = z.strictObject({
+  schema_version: z.literal(SELECTIVE_ROLLBACK_RECEIPT_SCHEMA_VERSION_1_0),
+  mode: z.literal("dry_run"),
+  rollback_id: nonBlankString,
+  session_id: nonBlankString,
+  checkpoint_id: nonBlankString,
+  contribution_sha256: z.hash("sha256"),
+  selectors: RollbackSelectorsSchema,
+  resolved_change_group_ids: ChangeGroupIdSetSchema,
+  results: z.array(DryRunPathResultSchema),
+  eligibility: DryRunEligibilitySchema,
+  written_at: z.iso.datetime({ offset: true, precision: 0 }),
+  out_of_scope_notice: z.literal(ROLLBACK_OUT_OF_SCOPE_NOTICE),
+});
+
+const ApplyBranchSchema1_0 = z.strictObject({
+  schema_version: z.literal(SELECTIVE_ROLLBACK_RECEIPT_SCHEMA_VERSION_1_0),
+  mode: z.literal("apply"),
+  rollback_id: nonBlankString,
+  session_id: nonBlankString,
+  checkpoint_id: nonBlankString,
+  contribution_sha256: z.hash("sha256"),
+  pre_rollback_checkpoint_id: nonBlankString,
+  selectors: RollbackSelectorsSchema,
+  resolved_change_group_ids: NonEmptyChangeGroupIdSetSchema,
+  results: z.array(ApplyPathResultSchema),
+  outcome: z.enum(["succeeded", "failed"]),
+  first_verification: FirstVerificationSchema,
+  project_verification: ProjectVerificationSchema,
+  post_command_integrity: PostCommandIntegritySchema,
+  written_at: z.iso.datetime({ offset: true, precision: 0 }),
+  out_of_scope_notice: z.literal(ROLLBACK_OUT_OF_SCOPE_NOTICE),
+});
+
+/**
+ * Reader for a receipt of ANY supported version, normalized to the current one.
+ *
+ * Use this ONLY where the artifact may predate the running VibeRevert, which in
+ * practice means scanning a session's rollback history. Producers, and
+ * read-backs of our own fresh write, must use `SelectiveRollbackReceiptSchema`
+ * and stay strict on 1.1: accepting 1.0 there would let a writer silently emit a
+ * stale shape and nothing would notice.
+ *
+ * The 1.1 union is tried first, so the common case does not pay for the legacy
+ * branch and a valid 1.1 receipt can never be reported as a malformed 1.0 one.
+ *
+ * The cross-field refinements on the 1.1 schema are deliberately NOT duplicated
+ * onto the 1.0 branches. A 1.0 receipt on disk already satisfied them when it
+ * was written, and restating them here would create a second copy of rules that
+ * could drift from the first.
+ */
+export const SelectiveRollbackReceiptAnyVersionSchema = z.union([
+  SelectiveRollbackReceiptSchema,
+  DryRunBranchSchema1_0.transform(
+    ({ selectors, ...rest }): SelectiveRollbackReceipt => ({
+      ...rest,
+      schema_version: SELECTIVE_ROLLBACK_RECEIPT_SCHEMA_VERSION,
+      selection_source: liftSelectors1_0(selectors),
+    }),
+  ),
+  ApplyBranchSchema1_0.transform(
+    ({ selectors, ...rest }): SelectiveRollbackReceipt => ({
+      ...rest,
+      schema_version: SELECTIVE_ROLLBACK_RECEIPT_SCHEMA_VERSION,
+      selection_source: liftSelectors1_0(selectors),
+    }),
+  ),
+]);

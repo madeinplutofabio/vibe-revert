@@ -699,7 +699,10 @@ function mapInternal(args: MapSelectiveReceiptArgs): ReceiptMapping {
     checkpoint_id: checkpointId,
     contribution_sha256: attempt.contribution_sha256,
     pre_rollback_checkpoint_id: attempt.pre_rollback_checkpoint_id,
-    selectors: attempt.selection.selectors,
+    // Taken from the ATTEMPT, never re-derived, so the two artifacts of one
+    // operation cannot disagree about why it happened. rollback-history.ts
+    // enforces that correspondence on read.
+    selection_source: attempt.selection.source,
     resolved_change_group_ids: [...attempt.selection.resolved_change_group_ids],
     results: parts.results,
     outcome: succeeded ? "succeeded" : "failed",

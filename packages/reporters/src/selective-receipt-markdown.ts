@@ -51,7 +51,7 @@ import type {
   FirstVerification,
   PostCommandIntegrity,
   ProjectVerification,
-  RollbackSelectors,
+  RollbackSelectionSource,
   SelectiveRollbackReceipt,
   VerifyCommandRecord,
 } from "@viberevert/session-format";
@@ -66,7 +66,17 @@ const failureBullets = (failure: FailureSummary): readonly string[] => [
   bullet("Message", inlineMarkdown(failure.message)),
 ];
 
-function selectorBullets(selectors: RollbackSelectors): readonly string[] {
+/**
+ * Why the selection exists. See the terminal renderer's twin for the rationale:
+ * a scope-violation selection has no selectors and must say so rather than
+ * render an empty list, because a reader most needs to know that a person did
+ * not type these groups, a policy decision produced them.
+ */
+function selectionSourceBullets(source: RollbackSelectionSource): readonly string[] {
+  if (source.kind === "scope_violation") {
+    return ["- Selected by: scope violation (no selectors)"];
+  }
+  const selectors = source.selectors;
   const lines: string[] = [];
   for (const value of selectors.only ?? []) lines.push(`- \`--only\` ${inlineCode(value)}`);
   for (const value of selectors.except ?? []) lines.push(`- \`--except\` ${inlineCode(value)}`);
@@ -312,7 +322,7 @@ export function renderSelectiveReceiptMarkdown(input: SelectiveReceiptRenderInpu
     "",
     "## Selectors",
     "",
-    ...selectorBullets(file.selectors),
+    ...selectionSourceBullets(file.selection_source),
     "",
     `## Resolved Change Groups (${file.resolved_change_group_ids.length})`,
     "",

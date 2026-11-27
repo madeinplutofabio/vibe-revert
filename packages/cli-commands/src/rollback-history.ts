@@ -36,10 +36,11 @@ import {
 } from "@viberevert/core";
 import {
   type RollbackAttempt,
-  RollbackAttemptSchema,
+  RollbackAttemptAnyVersionSchema,
   type RollbackSelection,
+  type RollbackSelectionSource,
   type SelectiveRollbackReceipt,
-  SelectiveRollbackReceiptSchema,
+  SelectiveRollbackReceiptAnyVersionSchema,
 } from "@viberevert/session-format";
 
 /** `rb_` followed by a 26-character Crockford ULID. */
@@ -130,9 +131,8 @@ async function readOptional(path: string): Promise<string | null> {
   }
 }
 
-function selectionsEqual(a: RollbackSelection, b: RollbackSelection): boolean {
-  const left = a.resolved_change_group_ids;
-  const right = b.resolved_change_group_ids;
+/** Element-wise, order-sensitive. Both sides are canonically ordered. */
+function sameStringList(left: readonly string[], right: readonly string[]): boolean {
   if (left.length !== right.length) {
     return false;
   }
@@ -141,7 +141,64 @@ function selectionsEqual(a: RollbackSelection, b: RollbackSelection): boolean {
       return false;
     }
   }
-  return JSON.stringify(a.selectors) === JSON.stringify(b.selectors);
+  return true;
+}
+
+/**
+ * Compare two selection sources by MEANING, field by field.
+ *
+ * This replaced `JSON.stringify(a.selectors) === JSON.stringify(b.selectors)` in
+ * M 0.9.0 step 3. **The old form was not a live defect, and the reason is worth
+ * recording so nobody "simplifies" it back.** Stringify equality is key-order
+ * sensitive in general, but both operands here have been through
+ * `RollbackAttemptAnyVersionSchema` / `SelectiveRollbackReceiptAnyVersionSchema`
+ * first, and zod rebuilds a parsed object in SCHEMA-DECLARATION order rather
+ * than input order. On-disk key order is therefore already normalized away
+ * before this function sees it, which is why the old comparison held.
+ *
+ * It is replaced anyway, for two reasons that are about robustness rather than
+ * a bug:
+ *
+ *   - It depended on that zod behavior implicitly, without saying so. A future
+ *     caller comparing values that had NOT been parsed, or a parser change,
+ *     would break it silently.
+ *   - The discriminated union makes the correct comparison obvious to state and
+ *     cheap to read, where a stringify leaves the reader to work out whether
+ *     order matters.
+ *
+ * What it guards is worth the care: this is the enforcement point for
+ * attempt-to-receipt correspondence, and an unequal result means "this receipt
+ * was copied from another invocation", so a false negative would report a
+ * healthy pair as forged and block an apply over a tree that is actually fine.
+ *
+ * `undefined` and an absent key are deliberately the same thing here, which is
+ * also what the persisted schema means: every selector field is `.optional()`.
+ */
+function selectionSourcesEqual(a: RollbackSelectionSource, b: RollbackSelectionSource): boolean {
+  if (a.kind !== b.kind) {
+    return false;
+  }
+  if (a.kind === "scope_violation" || b.kind === "scope_violation") {
+    // The arm carries only its discriminant, so matching kinds ARE equality.
+    // Not an omission: the authority and the reason codes live in the decision
+    // and integrity-event records, never copied into a rollback selection.
+    return true;
+  }
+  const left = a.selectors;
+  const right = b.selectors;
+  return (
+    sameStringList(left.only ?? [], right.only ?? []) &&
+    sameStringList(left.except ?? [], right.except ?? []) &&
+    sameStringList(left.finding ?? [], right.finding ?? []) &&
+    (left.risk ?? null) === (right.risk ?? null)
+  );
+}
+
+function selectionsEqual(a: RollbackSelection, b: RollbackSelection): boolean {
+  return (
+    sameStringList(a.resolved_change_group_ids, b.resolved_change_group_ids) &&
+    selectionSourcesEqual(a.source, b.source)
+  );
 }
 
 function selectionMatches(attempt: RollbackAttempt, receipt: SelectiveRollbackReceipt): boolean {
@@ -149,7 +206,7 @@ function selectionMatches(attempt: RollbackAttempt, receipt: SelectiveRollbackRe
     return false;
   }
   return selectionsEqual(attempt.selection, {
-    selectors: receipt.selectors,
+    source: receipt.selection_source,
     resolved_change_group_ids: receipt.resolved_change_group_ids,
   });
 }
@@ -219,7 +276,7 @@ async function scanOne(
 
   let attempt: RollbackAttempt;
   try {
-    attempt = RollbackAttemptSchema.parse(JSON.parse(attemptRaw));
+    attempt = RollbackAttemptAnyVersionSchema.parse(JSON.parse(attemptRaw));
   } catch (err) {
     return { outcome: "unreadable", path: attemptPath, detail: messageOf(err) };
   }
@@ -250,7 +307,7 @@ async function scanOne(
 
   let receipt: SelectiveRollbackReceipt;
   try {
-    receipt = SelectiveRollbackReceiptSchema.parse(JSON.parse(receiptRaw));
+    receipt = SelectiveRollbackReceiptAnyVersionSchema.parse(JSON.parse(receiptRaw));
   } catch (err) {
     return { outcome: "unreadable", path: receiptPath, detail: messageOf(err) };
   }
@@ -427,7 +484,7 @@ export async function inspectPublication(
 
   let attempt: RollbackAttempt;
   try {
-    attempt = RollbackAttemptSchema.parse(JSON.parse(attemptRaw));
+    attempt = RollbackAttemptAnyVersionSchema.parse(JSON.parse(attemptRaw));
   } catch (err) {
     return { outcome: "indeterminate", rollbackDir, path: attemptPath, detail: messageOf(err) };
   }

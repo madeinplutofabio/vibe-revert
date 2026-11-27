@@ -1,15 +1,18 @@
 {
-  "schema_version": "1.0",
+  "schema_version": "1.1",
   "mode": "apply",
   "rollback_id": "rb_01KDVDNA009CEYQ0QAVTDW0T7S",
   "session_id": "sess_01KDVDNA00BZYA8KS027KPF7N4",
   "checkpoint_id": "cp_01KDVDNA00HMDCQ95QZSDQBCYC",
   "contribution_sha256": "<contribution-sha256>",
   "pre_rollback_checkpoint_id": "cp_01KDVDNA00HMDCQ95QZSDQBCYC",
-  "selectors": {
-    "only": [
-      "src/**"
-    ]
+  "selection_source": {
+    "kind": "selectors",
+    "selectors": {
+      "only": [
+        "src/**"
+      ]
+    }
   },
   "resolved_change_group_ids": [
     "cg_dde7d3811aa00255a8713f64a763fa320d4c23d261e49a68b2114f94689ab619"

@@ -151,6 +151,43 @@ start fresh.
 
 ---
 
+## 0.9.0: the rollback artifacts record WHY a selection was made
+
+Two artifacts moved from schema version `1.0` to `1.1`:
+
+| Artifact | Field | Was | Is |
+|---|---|---|---|
+| `rollbacks/<rb>/attempt.json` | `selection` | `selectors` | `source` |
+| `rollbacks/<rb>/receipt.json` | top level | `selectors` | `selection_source` |
+
+`source` and `selection_source` are the same discriminated value: either
+`{ kind: "selectors", selectors: { ... } }`, or `{ kind: "scope_violation" }` when
+a policy decision produced the selection rather than a person typing one.
+
+**Nothing to do.** 0.9.0 reads a `1.0` attempt marker or receipt and normalizes
+it on the way in. Every `1.0` selection carries selectors by construction, so it
+maps onto the `selectors` arm unambiguously; nothing is guessed and nothing is
+lost. Existing sessions, contributions and reports are untouched by this change.
+
+**Why the version moved at all.** These schemas reject unknown fields rather than
+ignoring them, so a 0.8.x reader handed a 0.9.0 artifact refuses it instead of
+misreading it. The bump is what makes that refusal explicit rather than
+accidental.
+
+**Downgrading.** A 0.8.x VibeRevert cannot read a `1.1` attempt marker or
+receipt. Rollback invocations recorded by 0.9.0 will be reported as unreadable
+by the older version. Sessions, contributions and reports stay readable. If you
+need to downgrade, do it on a repository whose rollbacks were all performed by
+the older version.
+
+**Why the shape changed.** The old `selectors` field was required, and a
+selection produced by a scope violation has no selectors at all, so the mandatory
+pre-mutation marker could not be written for one. Without this change the 0.9.0
+bridge from a detected scope violation into selective recovery could not run,
+because the mutation could not legally begin.
+
+---
+
 ## Format-version reference
 
 Each persisted artifact carries its own independent schema version, so one

@@ -39,13 +39,13 @@ const FINDINGS = [FINDING_A, FINDING_B].sort();
 
 function attempt(overrides: Record<string, unknown> = {}) {
   return {
-    schema_version: "1.0",
+    schema_version: "1.1",
     rollback_id: ROLLBACK,
     session_id: SESSION,
     contribution_sha256: DIGEST,
     pre_rollback_checkpoint_id: CHECKPOINT,
     selection: {
-      selectors: { only: ["src/**"] },
+      source: { kind: "selectors", selectors: { only: ["src/**"] } },
       resolved_change_group_ids: [GROUP_A],
     },
     state: "mutation_may_have_started",
@@ -55,7 +55,10 @@ function attempt(overrides: Record<string, unknown> = {}) {
 }
 
 function selection(selectors: Record<string, unknown>, groups: string[] = [GROUP_A]) {
-  return { selectors, resolved_change_group_ids: groups };
+  return {
+    source: { kind: "selectors", selectors },
+    resolved_change_group_ids: groups,
+  };
 }
 
 // =============================================================================

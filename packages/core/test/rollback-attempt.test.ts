@@ -45,7 +45,7 @@ const CONTRIBUTION_SHA = "a".repeat(64);
 const CHANGE_GROUP = `cg_${"0".repeat(63)}1`;
 
 const SELECTION: RollbackSelection = {
-  selectors: { only: ["src/**"] },
+  source: { kind: "selectors", selectors: { only: ["src/**"] } },
   resolved_change_group_ids: [CHANGE_GROUP],
 };
 
@@ -267,7 +267,10 @@ describe("publishRollbackAttempt: caller-field validation", () => {
       await expect(
         publishRollbackAttempt({
           ...validOpts(fx),
-          selection: { selectors: {}, resolved_change_group_ids: [CHANGE_GROUP] },
+          selection: {
+            source: { kind: "selectors", selectors: {} },
+            resolved_change_group_ids: [CHANGE_GROUP],
+          },
         }),
       ).rejects.toThrow();
 
@@ -275,7 +278,10 @@ describe("publishRollbackAttempt: caller-field validation", () => {
       await expect(
         publishRollbackAttempt({
           ...validOpts(fx),
-          selection: { selectors: { only: ["src/**"] }, resolved_change_group_ids: [] },
+          selection: {
+            source: { kind: "selectors", selectors: { only: ["src/**"] } },
+            resolved_change_group_ids: [],
+          },
         }),
       ).rejects.toThrow();
 
@@ -543,7 +549,7 @@ describe("selective rollback invocation layout", () => {
         contributionSha256: "a".repeat(64),
         preRollbackCheckpointId: "cp_01ARZ3NDEKTSV4RRFFQ69G5FAV",
         selection: {
-          selectors: { only: ["**"] },
+          source: { kind: "selectors", selectors: { only: ["**"] } },
           resolved_change_group_ids: [`cg_${"0".repeat(63)}1`],
         } satisfies RollbackSelection,
       });

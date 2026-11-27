@@ -41,6 +41,7 @@ import {
 import { describe, expect, it } from "vitest";
 
 import {
+  resolveChangeGroupSelection,
   resolveSelection,
   type SelectionResolution,
   type SelectionSelectors,
@@ -494,5 +495,112 @@ describe("resolveSelection -- algebra", () => {
     // than treat this as a short resolved list. Dry-run and --apply diverge
     // here.
     expect("changeGroupIds" in result).toBe(false);
+  });
+});
+
+// =============================================================================
+// resolveChangeGroupSelection: the M 0.9.0 scope-violation bridge
+// =============================================================================
+//
+// Every refusal here is a PRODUCER bug, not user error: a violation naming a
+// group outside the bound contribution means the evaluator and the contribution
+// disagree. So the assertions below are about failing loudly rather than about
+// helpful messages.
+
+describe("resolveChangeGroupSelection", () => {
+  it("resolves a known group set, reordered into canonical order", () => {
+    // Asked for in src-then-pkg order and returned in pkg-then-src order,
+    // because `entries` is path-sorted and `pkg/one.ts` precedes `src/a.ts`.
+    // The reordering is the contract, not an accident: see the canonical-order
+    // test below for why the caller's order must not survive.
+    const result = resolveChangeGroupSelection({
+      contribution: WORLD,
+      changeGroupIds: [GROUP_A, GROUP_PKG],
+    });
+    expect(result).toEqual({
+      mode: "selective",
+      outcome: "resolved",
+      changeGroupIds: [GROUP_PKG, GROUP_A],
+    });
+  });
+
+  it("returns CANONICAL order, not the caller's", () => {
+    // A violation detector has no reason to know the contribution's entry
+    // order, and returning its order would make the receipt's group list depend
+    // on who asked. Both of these must produce the same list.
+    const forward = resolveChangeGroupSelection({
+      contribution: WORLD,
+      changeGroupIds: [GROUP_A, GROUP_B, GROUP_RENAME],
+    });
+    const shuffled = resolveChangeGroupSelection({
+      contribution: WORLD,
+      changeGroupIds: [GROUP_RENAME, GROUP_A, GROUP_B],
+    });
+    expect(resolvedIds(shuffled)).toEqual(resolvedIds(forward));
+  });
+
+  it("shares the universe order with selector-driven resolution", () => {
+    // The two entry points must agree about membership and order, or the bridge
+    // becomes a second selection authority. Selecting everything by glob and
+    // selecting every id must be indistinguishable.
+    const byGlob = resolveSelection({ contribution: WORLD, selectors: sel({ only: ["**"] }) });
+    const byIds = resolveChangeGroupSelection({
+      contribution: WORLD,
+      changeGroupIds: [...resolvedIds(byGlob)].reverse(),
+    });
+    expect(resolvedIds(byIds)).toEqual(resolvedIds(byGlob));
+  });
+
+  it("never returns full mode, even for a single group", () => {
+    // A scope violation is selective by construction. Falling back to full
+    // rollback would be an authorization widening.
+    const result = resolveChangeGroupSelection({
+      contribution: WORLD,
+      changeGroupIds: [GROUP_A],
+    });
+    expect(result.mode).toBe("selective");
+  });
+
+  it("refuses an empty set rather than reporting empty", () => {
+    // Unlike selectors, which may legitimately match nothing, a violation
+    // naming no group is incoherent: there would be no violation.
+    expect(resolveChangeGroupSelection({ contribution: WORLD, changeGroupIds: [] })).toEqual({
+      mode: "selective",
+      outcome: "invalid",
+      reason: { code: "EMPTY_CHANGE_GROUP_SELECTION" },
+    });
+  });
+
+  it("refuses an id absent from the bound contribution", () => {
+    const alien = `cg_${"e".repeat(64)}`;
+    expect(
+      resolveChangeGroupSelection({ contribution: WORLD, changeGroupIds: [GROUP_A, alien] }),
+    ).toEqual({
+      mode: "selective",
+      outcome: "invalid",
+      reason: { code: "UNKNOWN_CHANGE_GROUP", changeGroupId: alien },
+    });
+  });
+
+  it("refuses a repeated id rather than silently deduping", () => {
+    // Deduping would make the resolved count differ from the requested count,
+    // which is the one failure the bridge must never produce silently.
+    expect(
+      resolveChangeGroupSelection({ contribution: WORLD, changeGroupIds: [GROUP_A, GROUP_A] }),
+    ).toEqual({
+      mode: "selective",
+      outcome: "invalid",
+      reason: { code: "DUPLICATE_CHANGE_GROUP", changeGroupId: GROUP_A },
+    });
+  });
+
+  it("a rename group is selectable by its id, exactly like any other", () => {
+    // The group owns both aliases. Selecting it by id must not depend on which
+    // path the caller happened to know.
+    expect(
+      resolvedIds(
+        resolveChangeGroupSelection({ contribution: WORLD, changeGroupIds: [GROUP_RENAME] }),
+      ),
+    ).toEqual([GROUP_RENAME]);
   });
 });

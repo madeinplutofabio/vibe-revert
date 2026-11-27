@@ -188,14 +188,17 @@ export type {
   RollbackAttemptSchemaVersion,
   RollbackAttemptState,
   RollbackSelection,
+  RollbackSelectionSource,
   RollbackSelectors,
 } from "./rollback-attempt.js";
 // Runtime zod schema values.
 export {
   ROLLBACK_ATTEMPT_SCHEMA_VERSION,
+  RollbackAttemptAnyVersionSchema,
   RollbackAttemptSchema,
   RollbackAttemptStateSchema,
   RollbackSelectionSchema,
+  RollbackSelectionSourceSchema,
   RollbackSelectorsSchema,
 } from "./rollback-attempt.js";
 
@@ -238,6 +241,7 @@ export {
   projectVerificationPassed,
   ResolvedTargetKindSchema,
   SELECTIVE_ROLLBACK_RECEIPT_SCHEMA_VERSION,
+  SelectiveRollbackReceiptAnyVersionSchema,
   SelectiveRollbackReceiptSchema,
   summarizeFailure,
   VerifyCommandRecordSchema,

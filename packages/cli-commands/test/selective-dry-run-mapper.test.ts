@@ -98,7 +98,7 @@ function args(
     sessionId: SESSION_ID,
     checkpointId: CHECKPOINT_ID,
     contributionSha256: DIGEST,
-    selectors: { only: ["src/**"] },
+    selectionSource: { kind: "selectors", selectors: { only: ["src/**"] } },
     rollbackId: ROLLBACK_ID,
     writtenAt: WRITTEN_AT,
     ...overrides,
@@ -224,7 +224,7 @@ describe("mapEmptySelectiveDryRunReceipt: a selection that resolved to nothing",
     sessionId: SESSION_ID,
     checkpointId: CHECKPOINT_ID,
     contributionSha256: DIGEST,
-    selectors: { only: ["nothing/matches/**"] },
+    selectionSource: { kind: "selectors", selectors: { only: ["nothing/matches/**"] } },
     rollbackId: ROLLBACK_ID,
     writtenAt: WRITTEN_AT,
   };
@@ -249,7 +249,10 @@ describe("mapEmptySelectiveDryRunReceipt: a selection that resolved to nothing",
     // A receipt saying "nothing matched" is only meaningful beside what was
     // asked for and what it was asked of.
     const receipt = emptyReceipt();
-    expect(receipt.selectors).toEqual({ only: ["nothing/matches/**"] });
+    expect(receipt.selection_source).toEqual({
+      kind: "selectors",
+      selectors: { only: ["nothing/matches/**"] },
+    });
     expect(receipt.session_id).toBe(SESSION_ID);
     expect(receipt.checkpoint_id).toBe(CHECKPOINT_ID);
     expect(receipt.contribution_sha256).toBe(DIGEST);

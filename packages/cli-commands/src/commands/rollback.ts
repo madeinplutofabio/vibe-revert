@@ -464,6 +464,28 @@ function describeSelectionInvalid(reason: BoundSelectionInvalidReason): string {
         "Re-run `viberevert check --since <session>` to produce one bound to the current\n" +
         "contribution, then re-run this rollback.\n"
       );
+    // The three below are reachable only through the M 0.9.0 scope-violation
+    // bridge, which no CLI flag reaches. Each means the evaluator and the bound
+    // contribution disagree, so each is an internal defect rather than something
+    // the user did wrong, and the wording says so instead of offering advice the
+    // user cannot act on.
+    case "EMPTY_CHANGE_GROUP_SELECTION":
+      return (
+        "Internal error: a scope-violation selection named no change group.\n" +
+        "Nothing was changed. Please report this with the session id.\n"
+      );
+    case "UNKNOWN_CHANGE_GROUP":
+      return (
+        `Internal error: a scope-violation selection named change group ${reason.changeGroupId},\n` +
+        "which is not part of this session's recorded contribution.\n" +
+        "Nothing was changed. Please report this with the session id.\n"
+      );
+    case "DUPLICATE_CHANGE_GROUP":
+      return (
+        `Internal error: a scope-violation selection named change group ${reason.changeGroupId}\n` +
+        "more than once.\n" +
+        "Nothing was changed. Please report this with the session id.\n"
+      );
     default: {
       const unhandled: never = reason;
       return unhandled;

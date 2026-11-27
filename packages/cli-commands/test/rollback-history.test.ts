@@ -40,7 +40,10 @@ const RB_EARLY_ID = "rb_01ARZ3NDEKTSV4RRFFQ69G5FA1";
 const RB_LATE_ID = "rb_01ARZ3NDEKTSV4RRFFQ69G5FA9";
 
 const SELECTORS = { only: ["src/**"] };
-const SELECTION = { selectors: SELECTORS, resolved_change_group_ids: [GROUP] };
+const SELECTION = {
+  source: { kind: "selectors" as const, selectors: SELECTORS },
+  resolved_change_group_ids: [GROUP],
+};
 
 interface AttemptOverrides {
   readonly rollback_id?: string;
@@ -71,7 +74,7 @@ interface ReceiptOverrides {
   readonly contribution_sha256?: string;
   readonly pre_rollback_checkpoint_id?: string;
   readonly outcome?: "succeeded" | "failed";
-  readonly selectors?: unknown;
+  readonly selection_source?: unknown;
   readonly resolved_change_group_ids?: readonly string[];
   readonly results?: readonly unknown[];
 }
@@ -85,7 +88,7 @@ function receipt(overrides: ReceiptOverrides = {}): Record<string, unknown> {
     checkpoint_id: CHECKPOINT,
     contribution_sha256: DIGEST,
     pre_rollback_checkpoint_id: EMERGENCY_A,
-    selectors: SELECTORS,
+    selection_source: { kind: "selectors", selectors: SELECTORS },
     resolved_change_group_ids: [GROUP],
     results: [{ path: "src/a.ts", change_group_id: GROUP, outcome: "restored" }],
     outcome: "succeeded",
@@ -263,6 +266,54 @@ describe("scanSelectiveRollbackHistory cross-artifact binding", () => {
     }
   });
 
+  it("finalizes when the two artifacts' selection sources differ only in ON-DISK KEY ORDER", async () => {
+    // CHARACTERIZATION, stated honestly: this test would also pass against the
+    // `JSON.stringify` comparison it replaced, and that was verified by
+    // temporarily reverting the comparator and re-running it.
+    //
+    // The reason is the fact worth pinning: both artifacts are parsed by the
+    // any-version schemas before they are compared, and zod rebuilds a parsed
+    // object in SCHEMA-DECLARATION order rather than input order. On-disk key
+    // order is normalized away before the comparator runs.
+    //
+    // So this is not a regression guard for a bug that existed. It documents the
+    // property the comparator is allowed to rely on. If a future change compares
+    // unparsed values, or zod stops normalizing, the explicit field-by-field
+    // comparator keeps working and this test keeps describing why order is
+    // irrelevant here.
+    //
+    // What it does guard against is a real hazard: an unequal result means "this
+    // receipt was copied from another invocation", so a false negative would
+    // report a healthy pair as forged and block an apply over a sound tree.
+    const f = await setupFixture();
+    try {
+      const dir = await f.invocation(RB_EARLY_ID);
+      await writeJson(join(dir, "attempt.json"), attempt());
+      await writeJson(
+        join(dir, "receipt.json"),
+        receipt({
+          // Same meaning, keys emitted in the opposite order, and the selector
+          // families reordered within the inner object too.
+          selection_source: {
+            selectors: { risk: undefined, only: SELECTORS.only },
+            kind: "selectors",
+          },
+        } as unknown as ReceiptOverrides),
+      );
+
+      const scan = await scanSelectiveRollbackHistory(f.repoRoot, SESSION);
+
+      if (scan.outcome !== "readable") throw new Error(`expected readable, got ${scan.outcome}`);
+      expect(scan.report.invocations[0]).toMatchObject({
+        kind: "finalized",
+        rollbackId: RB_EARLY_ID,
+      });
+      expect(scan.report.blocking).toEqual([]);
+    } finally {
+      await f.cleanup();
+    }
+  });
+
   it.each([
     ["rollback_id", { rollback_id: RB_LATE_ID }],
     ["session_id", { session_id: OTHER_SESSION }],
@@ -279,7 +330,10 @@ describe("scanSelectiveRollbackHistory cross-artifact binding", () => {
         ],
       },
     ],
-    ["the selectors", { selectors: { only: ["other/**"] } }],
+    [
+      "the selection source",
+      { selection_source: { kind: "selectors", selectors: { only: ["other/**"] } } },
+    ],
   ])("refuses to finalize when the receipt disagrees on %s", async (_label, overrides) => {
     const f = await setupFixture();
     try {

@@ -51,14 +51,14 @@ function receipt(candidate: unknown): SelectiveRollbackReceipt {
 
 const applyReceipt = (overrides: Record<string, unknown>): SelectiveRollbackReceipt =>
   receipt({
-    schema_version: "1.0",
+    schema_version: "1.1",
     mode: "apply",
     rollback_id: ROLLBACK_ID,
     session_id: SESSION_ID,
     checkpoint_id: CHECKPOINT_ID,
     contribution_sha256: DIGEST,
     pre_rollback_checkpoint_id: RECOVERY_ID,
-    selectors: { only: ["src/**"] },
+    selection_source: { kind: "selectors", selectors: { only: ["src/**"] } },
     resolved_change_group_ids: [GROUP],
     results: [{ path: "src/a.ts", change_group_id: GROUP, outcome: "restored" }],
     outcome: "succeeded",
@@ -80,13 +80,13 @@ const applyReceipt = (overrides: Record<string, unknown>): SelectiveRollbackRece
 
 const dryRunReceipt = (overrides: Record<string, unknown>): SelectiveRollbackReceipt =>
   receipt({
-    schema_version: "1.0",
+    schema_version: "1.1",
     mode: "dry_run",
     rollback_id: ROLLBACK_ID,
     session_id: SESSION_ID,
     checkpoint_id: CHECKPOINT_ID,
     contribution_sha256: DIGEST,
-    selectors: { only: ["src/**"] },
+    selection_source: { kind: "selectors", selectors: { only: ["src/**"] } },
     resolved_change_group_ids: [GROUP],
     results: [{ path: "src/a.ts", change_group_id: GROUP, outcome: "restored" }],
     eligibility: "eligible",
@@ -429,11 +429,14 @@ describe("dry-run rendering", () => {
 describe("selectors", () => {
   it.each(humanFormats)("%s renders every supplied family in flag form", (format) => {
     const file = dryRunReceipt({
-      selectors: {
-        only: ["src/**"],
-        except: ["tests/**"],
-        risk: "high",
-        finding: [`fnd_${"b".repeat(64)}`],
+      selection_source: {
+        kind: "selectors",
+        selectors: {
+          only: ["src/**"],
+          except: ["tests/**"],
+          risk: "high",
+          finding: [`fnd_${"b".repeat(64)}`],
+        },
       },
     });
     const text = renderHuman(file, format);
@@ -447,7 +450,11 @@ describe("selectors", () => {
     // `*` and `_` are emphasis characters, and a glob is full of them. The
     // code-span helper is what keeps `src/**` from becoming italics.
     const text = renderSelectiveReceipt(
-      input(dryRunReceipt({ selectors: { only: ["src/**/_x_*.ts"] } })),
+      input(
+        dryRunReceipt({
+          selection_source: { kind: "selectors", selectors: { only: ["src/**/_x_*.ts"] } },
+        }),
+      ),
       "markdown",
     );
     expect(text).toContain("`src/**/_x_*.ts`");

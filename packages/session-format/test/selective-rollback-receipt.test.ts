@@ -88,7 +88,7 @@ function dryRun(overrides: Record<string, unknown> = {}) {
     session_id: SESSION,
     checkpoint_id: CHECKPOINT,
     contribution_sha256: DIGEST,
-    selectors: { only: ["src/**"] },
+    selection_source: { kind: "selectors", selectors: { only: ["src/**"] } },
     resolved_change_group_ids: [GROUP_A],
     results: [{ path: "src/a.ts", change_group_id: GROUP_A, outcome: "restored" }],
     eligibility: "eligible",
@@ -161,7 +161,7 @@ function apply(overrides: Record<string, unknown> = {}) {
     checkpoint_id: CHECKPOINT,
     contribution_sha256: DIGEST,
     pre_rollback_checkpoint_id: EMERGENCY,
-    selectors: { only: ["src/**"] },
+    selection_source: { kind: "selectors", selectors: { only: ["src/**"] } },
     resolved_change_group_ids: [GROUP_A],
     results: [{ path: "src/a.ts", change_group_id: GROUP_A, outcome: "restored" }],
     outcome: "succeeded",
@@ -235,7 +235,7 @@ describe("required fields", () => {
     "session_id",
     "checkpoint_id",
     "contribution_sha256",
-    "selectors",
+    "selection_source",
     "resolved_change_group_ids",
     "results",
     "eligibility",
@@ -255,7 +255,7 @@ describe("required fields", () => {
     "checkpoint_id",
     "contribution_sha256",
     "pre_rollback_checkpoint_id",
-    "selectors",
+    "selection_source",
     "resolved_change_group_ids",
     "results",
     "outcome",
@@ -271,7 +271,12 @@ describe("required fields", () => {
   });
 
   it("pins the schema version literal", () => {
-    expect(ok(dryRun({ schema_version: "1.1" }))).toBe(false);
+    expect(ok(dryRun({ schema_version: "1.2" }))).toBe(false);
+    // The superseded 1.0 is rejected by THIS schema, and that rejection is the
+    // substance of the M 0.9.0 step 3 bump rather than a side effect: a writer
+    // must not be able to emit the old shape. Reading a 1.0 receipt already on
+    // disk is the any-version reader's job, asserted in its own block below.
+    expect(ok(dryRun({ schema_version: "1.0" }))).toBe(false);
   });
 
   it("requires the out-of-scope notice verbatim", () => {
@@ -324,21 +329,25 @@ describe("identifier shapes", () => {
 // Selectors, reached through the receipt
 // =============================================================================
 
-describe("selectors", () => {
+describe("selection source", () => {
+  const withSelectors = (selectors: unknown) => ({
+    selection_source: { kind: "selectors", selectors },
+  });
+
   it("rejects an empty selector object", () => {
-    expect(ok(dryRun({ selectors: {} }))).toBe(false);
+    expect(ok(dryRun(withSelectors({})))).toBe(false);
   });
 
   it("requires finding selectors to be FULL finding ids", () => {
     // The CLI resolves an unambiguous short prefix before anything is persisted.
     // A receipt recording `fnd_abc` would be re-resolvable only against the
     // report that produced it, which is exactly the coupling the full id removes.
-    expect(ok(dryRun({ selectors: { finding: ["fnd_abc"] } }))).toBe(false);
-    expect(ok(dryRun({ selectors: { finding: [FINDING] } }))).toBe(true);
+    expect(ok(dryRun(withSelectors({ finding: ["fnd_abc"] })))).toBe(false);
+    expect(ok(dryRun(withSelectors({ finding: [FINDING] })))).toBe(true);
   });
 
   it("accepts --except alone, which is still selective mode", () => {
-    expect(ok(dryRun({ selectors: { except: ["tests/**"] } }))).toBe(true);
+    expect(ok(dryRun(withSelectors({ except: ["tests/**"] })))).toBe(true);
   });
 });
 

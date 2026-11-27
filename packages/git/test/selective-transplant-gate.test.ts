@@ -266,7 +266,7 @@ function attemptFor(
     contribution_sha256: binding.contributionSha256,
     pre_rollback_checkpoint_id: binding.preRollbackCheckpointId,
     selection: {
-      selectors: { only: ["**"] },
+      source: { kind: "selectors", selectors: { only: ["**"] } },
       resolved_change_group_ids: [...binding.resolvedChangeGroupIds],
     },
     state: "mutation_may_have_started",
@@ -410,7 +410,7 @@ describe("runSelectiveTransplantGate: the marker binding", () => {
           "resolved groups",
           {
             selection: {
-              selectors: { only: ["**"] },
+              source: { kind: "selectors", selectors: { only: ["**"] } },
               resolved_change_group_ids: [OTHER_GROUP],
             },
           },

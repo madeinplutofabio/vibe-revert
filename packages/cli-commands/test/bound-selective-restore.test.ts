@@ -199,7 +199,7 @@ describe("prepareBoundSelectiveRestore: mode", () => {
     // contribution at all. A required binding would make this uncallable.
     const result = await prepareBoundSelectiveRestore({
       repoRoot: join(tmpdir(), "viberevert-bound-unused-repo"),
-      selectors: NO_SELECTORS,
+      selection: { kind: "selectors", selectors: NO_SELECTORS },
     });
     expect(result).toEqual({ mode: "full" });
   });
@@ -207,7 +207,7 @@ describe("prepareBoundSelectiveRestore: mode", () => {
   it("2: selective selectors without a binding reuse the resolver's refusal", async () => {
     const result = await prepareBoundSelectiveRestore({
       repoRoot: join(tmpdir(), "viberevert-bound-unused-repo"),
-      selectors: ONLY_SRC,
+      selection: { kind: "selectors", selectors: ONLY_SRC },
     });
     // Step 9's own code, not a composer-invented equivalent.
     expect(result).toEqual({
@@ -229,7 +229,7 @@ describe("prepareBoundSelectiveRestore: the bound object", () => {
       const result = await prepareBoundSelectiveRestore({
         repoRoot: fx.repoRoot,
         contributionBinding: fx.binding,
-        selectors: ONLY_SRC,
+        selection: { kind: "selectors", selectors: ONLY_SRC },
       });
       if (result.mode !== "selective" || result.outcome !== "resolved") {
         throw new Error(`expected resolved, got ${JSON.stringify(result)}`);
@@ -254,13 +254,13 @@ describe("prepareBoundSelectiveRestore: the bound object", () => {
       const result = await prepareBoundSelectiveRestore({
         repoRoot: fx.repoRoot,
         contributionBinding: fx.binding,
-        selectors: ONLY_SRC,
+        selection: { kind: "selectors", selectors: ONLY_SRC },
       });
       if (result.mode !== "selective" || result.outcome !== "resolved") {
         throw new Error("expected resolved");
       }
       // `SelectionResolution` carries only group ids; the receipt needs intent.
-      expect(result.bound.selectors).toEqual(ONLY_SRC);
+      expect(result.bound.source).toEqual({ kind: "selectors", selectors: { only: ["src/**"] } });
     } finally {
       await fx.cleanup();
     }
@@ -272,7 +272,7 @@ describe("prepareBoundSelectiveRestore: the bound object", () => {
       const result = await prepareBoundSelectiveRestore({
         repoRoot: fx.repoRoot,
         contributionBinding: fx.binding,
-        selectors: ONLY_SRC,
+        selection: { kind: "selectors", selectors: ONLY_SRC },
       });
       if (result.mode !== "selective" || result.outcome !== "resolved") {
         throw new Error("expected resolved");
@@ -335,7 +335,7 @@ describe("prepareBoundSelectiveRestore: report provenance", () => {
         const result = await prepareBoundSelectiveRestore({
           repoRoot: fx.repoRoot,
           contributionBinding: fx.binding,
-          selectors: RISK_HIGH,
+          selection: { kind: "selectors", selectors: RISK_HIGH },
           ...(report !== undefined ? { report } : {}),
         });
         if (result.mode !== "selective" || result.outcome !== "invalid") {
@@ -354,7 +354,7 @@ describe("prepareBoundSelectiveRestore: report provenance", () => {
       const result = await prepareBoundSelectiveRestore({
         repoRoot: fx.repoRoot,
         contributionBinding: fx.binding,
-        selectors: RISK_HIGH,
+        selection: { kind: "selectors", selectors: RISK_HIGH },
         report: reportFile(fx.binding.sha256),
       });
       if (result.mode !== "selective" || result.outcome !== "resolved") {
@@ -377,7 +377,7 @@ describe("prepareBoundSelectiveRestore: report provenance", () => {
         prepareBoundSelectiveRestore({
           repoRoot: fx.repoRoot,
           contributionBinding: fx.binding,
-          selectors: RISK_HIGH,
+          selection: { kind: "selectors", selectors: RISK_HIGH },
           report: { not: "a report" },
         }),
       ).rejects.toThrow();
@@ -395,7 +395,7 @@ describe("prepareBoundSelectiveRestore: report provenance", () => {
       const result = await prepareBoundSelectiveRestore({
         repoRoot: fx.repoRoot,
         contributionBinding: fx.binding,
-        selectors: ONLY_SRC,
+        selection: { kind: "selectors", selectors: ONLY_SRC },
         report: { not: "a report" },
       });
       if (result.mode !== "selective") throw new Error("expected selective");
@@ -421,7 +421,7 @@ describe("prepareBoundSelectiveRestore: evidence integrity", () => {
         prepareBoundSelectiveRestore({
           repoRoot: fx.repoRoot,
           contributionBinding: fx.binding,
-          selectors: ONLY_SRC,
+          selection: { kind: "selectors", selectors: ONLY_SRC },
         }),
       ).rejects.toBeInstanceOf(ContributionDigestMismatchError);
     } finally {
@@ -442,7 +442,7 @@ describe("prepareBoundSelectiveRestore: passthrough", () => {
       const result = await prepareBoundSelectiveRestore({
         repoRoot: fx.repoRoot,
         contributionBinding: fx.binding,
-        selectors,
+        selection: { kind: "selectors", selectors },
       });
       // The empty arm carries the VERIFIED identities, because a dry run
       // records this outcome as a receipt and a receipt saying "these
@@ -455,7 +455,11 @@ describe("prepareBoundSelectiveRestore: passthrough", () => {
           contributionSha256: fx.binding.sha256,
           sessionId: SESSION_ID,
           checkpointId: CHECKPOINT_ID,
-          selectors,
+          // The PERSISTED source, so the empty arm records exactly what a
+          // receipt will carry. The empty `except`/`finding` families are
+          // omitted rather than written as `[]`, because the schema forbids an
+          // empty family so that absence is the only spelling of "not used".
+          source: { kind: "selectors", selectors: { only: ["nothing/matches/**"] } },
         },
       });
     } finally {
@@ -473,12 +477,15 @@ describe("prepareBoundSelectiveRestore: passthrough", () => {
       const empty = await prepareBoundSelectiveRestore({
         repoRoot: fx.repoRoot,
         contributionBinding: fx.binding,
-        selectors: { only: ["nothing/matches/**"], except: [], finding: [] },
+        selection: {
+          kind: "selectors",
+          selectors: { only: ["nothing/matches/**"], except: [], finding: [] },
+        },
       });
       const resolved = await prepareBoundSelectiveRestore({
         repoRoot: fx.repoRoot,
         contributionBinding: fx.binding,
-        selectors: { only: ["**"], except: [], finding: [] },
+        selection: { kind: "selectors", selectors: { only: ["**"], except: [], finding: [] } },
       });
 
       if (empty.mode !== "selective" || empty.outcome !== "empty") {

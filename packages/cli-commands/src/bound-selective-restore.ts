@@ -104,11 +104,14 @@ import { loadVerifiedSessionContribution, type SessionContributionBinding } from
 import { planSelectiveRestore, type SelectiveRestorePlan } from "@viberevert/git";
 import {
   ReportFileSchema,
+  type RollbackSelectionSource,
+  type RollbackSelectors,
   type SessionContributionFile,
   type SessionReport,
 } from "@viberevert/session-format";
 
 import {
+  resolveChangeGroupSelection,
   resolveSelection,
   type SelectionInvalidReason,
   type SelectionSelectors,
@@ -134,8 +137,18 @@ export interface VerifiedSelectionIdentity {
   readonly contributionSha256: string;
   readonly sessionId: string;
   readonly checkpointId: string;
-  /** Retained because resolution discards intent and the receipt records it. */
-  readonly selectors: SelectionSelectors;
+  /**
+   * WHY this selection exists, in the exact shape both persisted artifacts
+   * record (M 0.9.0 step 3).
+   *
+   * Retained because resolution discards intent and both the attempt marker and
+   * the receipt record it. Carried as the PERSISTED union rather than the
+   * in-memory selectors so the conversion happens once, here, where the
+   * contribution has just been verified. Converting at each writer instead would
+   * put two copies of one mapping in two files, and the attempt and the receipt
+   * must agree on this field exactly.
+   */
+  readonly source: RollbackSelectionSource;
 }
 
 /**
@@ -186,6 +199,27 @@ export type PrepareBoundSelectiveRestoreResult =
       readonly bound: BoundSelectiveRestore;
     };
 
+/**
+ * What drove this selection, as the caller supplies it (M 0.9.0 step 3).
+ *
+ * Distinct from the persisted `RollbackSelectionSource`: the `scope_violation`
+ * arm carries the change-group ids here because they are the INPUT to
+ * resolution, and carries only its discriminant once persisted because the ids
+ * then live in `resolved_change_group_ids` on the artifact itself. Recording
+ * them twice would create a second copy that could disagree.
+ */
+export type BoundSelectionInput =
+  | { readonly kind: "selectors"; readonly selectors: SelectionSelectors }
+  | {
+      readonly kind: "scope_violation";
+      /**
+       * Validated against the bound contribution before any mutation: every id
+       * must exist, none may repeat, and the resolved set may neither narrow nor
+       * widen. There is no CLI flag that reaches this arm.
+       */
+      readonly changeGroupIds: readonly string[];
+    };
+
 export interface PrepareBoundSelectiveRestoreOptions {
   readonly repoRoot: string;
   /**
@@ -195,9 +229,37 @@ export interface PrepareBoundSelectiveRestoreOptions {
    * has no contribution at all.
    */
   readonly contributionBinding?: SessionContributionBinding;
-  readonly selectors: SelectionSelectors;
+  readonly selection: BoundSelectionInput;
   /** UNTRUSTED. Parsed here, and only when the selectors consult it. */
   readonly report?: unknown;
+}
+
+/**
+ * Convert the in-memory selectors into the persisted selector object.
+ *
+ * Sets are sorted and deduped because repeating a flag unions its values, and an
+ * empty family is OMITTED rather than written as `[]`: the schema rejects an
+ * empty array precisely so an artifact cannot claim a selector it does not
+ * carry.
+ *
+ * Lives here, beside the one place the identity is built, so exactly one mapping
+ * from in-memory to persisted exists.
+ */
+function persistedSelectorsOf(selectors: SelectionSelectors): RollbackSelectors {
+  const set = (values: readonly string[]): string[] => [...new Set(values)].sort();
+  return {
+    ...(selectors.only.length > 0 ? { only: set(selectors.only) } : {}),
+    ...(selectors.except.length > 0 ? { except: set(selectors.except) } : {}),
+    ...(selectors.finding.length > 0 ? { finding: set(selectors.finding) } : {}),
+    ...(selectors.risk !== undefined ? { risk: selectors.risk } : {}),
+  };
+}
+
+/** The persisted source for a given input. One mapping, one place. */
+function persistedSourceOf(selection: BoundSelectionInput): RollbackSelectionSource {
+  return selection.kind === "selectors"
+    ? { kind: "selectors", selectors: persistedSelectorsOf(selection.selectors) }
+    : { kind: "scope_violation" };
 }
 
 const staleReport = (detail: string): PrepareBoundSelectiveRestoreResult => ({
@@ -209,30 +271,48 @@ const staleReport = (detail: string): PrepareBoundSelectiveRestoreResult => ({
 export async function prepareBoundSelectiveRestore(
   opts: PrepareBoundSelectiveRestoreOptions,
 ): Promise<PrepareBoundSelectiveRestoreResult> {
-  const { repoRoot, contributionBinding, selectors } = opts;
+  const { repoRoot, contributionBinding, selection } = opts;
 
-  // Mode first, on selectors alone: a legacy full rollback must not depend on
-  // the health, or even the existence, of a contribution it never reads.
-  const probe = resolveSelection({ selectors });
-  if (probe.mode === "full") return { mode: "full" };
+  // Mode first, on the selectors alone: a legacy full rollback must not depend
+  // on the health, or even the existence, of a contribution it never reads.
+  //
+  // A scope-violation selection skips the probe because it is selective by
+  // construction. There is no "no violation" input that should silently become
+  // a full rollback; an empty violation set is refused by the resolver instead.
+  if (selection.kind === "selectors") {
+    const probe = resolveSelection({ selectors: selection.selectors });
+    if (probe.mode === "full") return { mode: "full" };
 
-  if (contributionBinding === undefined) {
-    // With no contribution supplied, the probe can only be
-    // `invalid / CONTRIBUTION_REQUIRED`. Step 9 already owns that refusal, so
-    // it is reused rather than restated as a new composer-level error.
-    if (probe.outcome !== "invalid") {
-      throw new Error(
-        `selection resolution without a contribution returned ${probe.outcome}, but only an invalid outcome is reachable there`,
-      );
+    if (contributionBinding === undefined) {
+      // With no contribution supplied, the probe can only be
+      // `invalid / CONTRIBUTION_REQUIRED`. Step 9 already owns that refusal, so
+      // it is reused rather than restated as a new composer-level error.
+      if (probe.outcome !== "invalid") {
+        throw new Error(
+          `selection resolution without a contribution returned ${probe.outcome}, but only an invalid outcome is reachable there`,
+        );
+      }
+      return { mode: "selective", outcome: "invalid", reason: probe.reason };
     }
-    return { mode: "selective", outcome: "invalid", reason: probe.reason };
+  } else if (contributionBinding === undefined) {
+    // A violation is computed FROM a contribution, so arriving here without one
+    // is a caller bug rather than a user-visible refusal. Reusing the resolver's
+    // reason keeps one vocabulary for the condition.
+    return {
+      mode: "selective",
+      outcome: "invalid",
+      reason: { code: "CONTRIBUTION_REQUIRED" },
+    };
+  }
+  if (contributionBinding === undefined) {
+    throw new Error("unreachable: contributionBinding absence is handled by both arms above");
   }
 
   // Identity becomes a fact here: digest, schema, session, checkpoint, ended_at.
   const contribution = await loadVerifiedSessionContribution(repoRoot, contributionBinding);
 
   let consulted: SessionReport | undefined;
-  if (selectionRequiresReport(selectors)) {
+  if (selection.kind === "selectors" && selectionRequiresReport(selection.selectors)) {
     if (opts.report === undefined) {
       return staleReport("report-backed selectors require a report; none was supplied");
     }
@@ -262,17 +342,24 @@ export async function prepareBoundSelectiveRestore(
     consulted = reportFile.report;
   }
 
-  const resolution = resolveSelection({
-    contribution,
-    ...(consulted !== undefined ? { report: consulted } : {}),
-    selectors,
-  });
+  const resolution =
+    selection.kind === "selectors"
+      ? resolveSelection({
+          contribution,
+          ...(consulted !== undefined ? { report: consulted } : {}),
+          selectors: selection.selectors,
+        })
+      : resolveChangeGroupSelection({
+          contribution,
+          changeGroupIds: selection.changeGroupIds,
+        });
 
   if (resolution.mode === "full") {
     // The probe already established selective mode from these same immutable
     // selectors, and `resolveSelection` is pure. A disagreement is an internal
     // contradiction, and silently falling back to legacy full rollback would be
-    // an authorization widening.
+    // an authorization widening. `resolveChangeGroupSelection` never returns
+    // full at all.
     throw new Error("selection resolution changed from selective to full for the same selectors");
   }
   // Built from the verified contribution, exactly as the resolved arm's is, so
@@ -281,7 +368,7 @@ export async function prepareBoundSelectiveRestore(
     contributionSha256: contributionBinding.sha256,
     sessionId: contribution.session_id,
     checkpointId: contribution.checkpoint_id,
-    selectors,
+    source: persistedSourceOf(selection),
   };
 
   if (resolution.outcome === "empty") return { mode: "selective", outcome: "empty", identity };

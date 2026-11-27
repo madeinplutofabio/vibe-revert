@@ -51,7 +51,7 @@ const ATTEMPT = RollbackAttemptSchema.parse({
   contribution_sha256: DIGEST,
   pre_rollback_checkpoint_id: RECOVERY_ID,
   selection: {
-    selectors: { only: ["src/**"] },
+    source: { kind: "selectors", selectors: { only: ["src/**"] } },
     resolved_change_group_ids: [GROUP_A],
   },
   state: "mutation_may_have_started",

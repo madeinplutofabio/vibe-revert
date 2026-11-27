@@ -1,0 +1,17 @@
+{
+  "schema_version": "1.0",
+  "rollback_id": "rb_01M8FKQHA6J8J6GDZD3GCFPT81",
+  "session_id": "sess_01M8FKQESX3131T2J2XE89DAGF",
+  "contribution_sha256": "b9fe5053f632c4c5afe929a49d2be260f48560222b62dd07ca97fd1efa4bc92f",
+  "pre_rollback_checkpoint_id": "cp_01M8FKQHD3WEDJSY5SN3ZDA0BF",
+  "selection": {
+    "selectors": {
+      "only": ["src/a.ts"]
+    },
+    "resolved_change_group_ids": [
+      "cg_f2df8067470db1eac4ed98ed00625497f4a837c1de2fb0a1ac04b0f51cc63b78"
+    ]
+  },
+  "state": "mutation_may_have_started",
+  "written_at": "2026-11-27T22:59:01Z"
+}

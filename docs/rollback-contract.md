@@ -245,6 +245,17 @@ The preview receipt deliberately lives OUTSIDE `rollbacks/`. A receipt sitting i
 
 **An empty selection still writes a dry-run receipt**, with `eligibility: "empty_selection"` and empty results. Under `--apply` an empty selection refuses instead, with no marker and no receipt: there is nothing to authorize, and the attempt marker cannot express a selection resolving to no change group.
 
+**Both artifacts record why the selection was made**, as `selection_source` on the receipt and `selection.source` on the attempt marker. Added in 0.9.0, which moved both to schema version `1.1`:
+
+| `kind` | Meaning |
+|---|---|
+| `selectors` | You asked for these change groups. Carries the exact `--only` / `--except` / `--risk` / `--finding` families supplied |
+| `scope_violation` | A policy decision produced the selection. No selectors were typed, and none are recorded |
+
+The two artifacts must agree on this field exactly, along with `resolved_change_group_ids`. The history scan enforces that agreement on read: a receipt that disagrees with its attempt marker is treated as copied from another invocation, which fails closed rather than laundering an unfinalized attempt into a finalized one.
+
+A `1.0` artifact already on disk is read and normalized, since every `1.0` selection has selectors. See [MIGRATIONS.md](../MIGRATIONS.md) for the downgrade consequence.
+
 ### The attempt marker and the crash gap
 
 Before the first worktree or index mutation, a selective apply publishes an immutable marker at:

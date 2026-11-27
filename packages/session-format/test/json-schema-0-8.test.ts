@@ -70,8 +70,23 @@ const required = (schema: unknown): readonly string[] => node(schema).required ?
  */
 const prop = (schema: unknown, name: string): SchemaNode | undefined => props(schema)[name];
 
-/** The `selectors` node inside the attempt marker's selection. */
-const SELECTORS = node(prop(prop(RollbackAttemptJsonSchema, "selection"), "selectors"));
+/**
+ * The `selectors` node inside the attempt marker's selection.
+ *
+ * M 0.9.0 step 3 moved it one level deeper: `selection.source` is now a
+ * discriminated union, emitted as `oneOf` with a `selectors` branch and a
+ * discriminant-only `scope_violation` branch. The branch is located by its
+ * `kind` const rather than by index, so reordering the union cannot silently
+ * point these assertions at the wrong arm.
+ */
+const SOURCE_BRANCHES =
+  node(prop(prop(RollbackAttemptJsonSchema, "selection"), "source")).oneOf ?? [];
+const SELECTORS_BRANCH = (() => {
+  const found = SOURCE_BRANCHES.find((b) => prop(b, "kind")?.const === "selectors");
+  if (found === undefined) throw new Error('no selection-source branch with kind "selectors"');
+  return found;
+})();
+const SELECTORS = node(prop(SELECTORS_BRANCH, "selectors"));
 
 /** The receipt roots as a union; find a branch by its `mode` const. */
 function branchFor(mode: string): SchemaNode {
@@ -133,7 +148,7 @@ describe("root shape", () => {
         "results",
         "rollback_id",
         "schema_version",
-        "selectors",
+        "selection_source",
         "session_id",
         "written_at",
       ].sort(),
@@ -154,7 +169,7 @@ describe("root shape", () => {
         "results",
         "rollback_id",
         "schema_version",
-        "selectors",
+        "selection_source",
         "session_id",
         "written_at",
       ].sort(),

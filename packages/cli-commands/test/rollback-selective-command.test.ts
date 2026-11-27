@@ -526,7 +526,10 @@ describe("a selection that resolves to nothing", () => {
     // Bound to the digest of the exact bytes the loader verified, so the
     // receipt says which contribution produced this answer.
     expect(receipt.contribution_sha256).toBe(contributionSha256);
-    expect(receipt.selectors).toEqual({ only: ["nothing/matches/**"], except: ["b/**"] });
+    expect(receipt.selection_source).toEqual({
+      kind: "selectors",
+      selectors: { only: ["nothing/matches/**"], except: ["b/**"] },
+    });
     expect(receipt.rollback_id).toMatch(/^rb_[0-9A-HJKMNP-TV-Z]{26}$/);
   });
 

@@ -89,7 +89,6 @@ import {
   type ReceiptFile,
   ReceiptFileSchema,
   type RollbackSelection,
-  type RollbackSelectors,
   type SelectiveRollbackReceipt,
   type SessionState,
   type VerifyCommand,
@@ -460,24 +459,6 @@ async function loadReportArtifact(repoRoot: string, sessionId: string): Promise<
   return JSON.parse(await readFile(reportPath, "utf8"));
 }
 
-/**
- * The CLI's selectors in the shape the marker and the receipt persist.
- *
- * Empty families become ABSENT, which is the only on-disk spelling of "this
- * family was not used": the schema rejects an empty array precisely so a marker
- * cannot claim a selector it does not carry. Sets are sorted and deduped, as
- * repeating a flag unions its values.
- */
-function persistedSelectorsOf(selectors: SelectionSelectors): RollbackSelectors {
-  const set = (values: readonly string[]): string[] => [...new Set(values)].sort();
-  return {
-    ...(selectors.only.length > 0 ? { only: set(selectors.only) } : {}),
-    ...(selectors.except.length > 0 ? { except: set(selectors.except) } : {}),
-    ...(selectors.finding.length > 0 ? { finding: set(selectors.finding) } : {}),
-    ...(selectors.risk !== undefined ? { risk: selectors.risk } : {}),
-  };
-}
-
 // =============================================================================
 // The four cells
 // =============================================================================
@@ -601,7 +582,7 @@ async function recordEmptySelectivePreview(
       sessionId: identity.sessionId,
       checkpointId: identity.checkpointId,
       contributionSha256: identity.contributionSha256,
-      selectors: persistedSelectorsOf(identity.selectors),
+      selectionSource: identity.source,
       rollbackId: generateRollbackId(),
       writtenAt: input.clock(),
     }),
@@ -641,7 +622,7 @@ async function runSelectivePreview(
       sessionId: bound.sessionId,
       checkpointId: bound.checkpointId,
       contributionSha256: bound.contributionSha256,
-      selectors: persistedSelectorsOf(bound.selectors),
+      selectionSource: bound.source,
       rollbackId: generateRollbackId(),
       writtenAt: input.clock(),
     }),
@@ -668,7 +649,7 @@ async function runSelectiveApply(
 
   const rollbackId = generateRollbackId();
   const selection: RollbackSelection = {
-    selectors: persistedSelectorsOf(bound.selectors),
+    source: bound.source,
     resolved_change_group_ids: [...bound.plan.selectedChangeGroupIds],
   };
 
@@ -720,7 +701,7 @@ async function runSelectiveApply(
         contributionSha256: binding.contributionSha256,
         preRollbackCheckpointId: binding.preRollbackCheckpointId,
         selection: {
-          selectors: selection.selectors,
+          source: selection.source,
           resolved_change_group_ids: [...binding.resolvedChangeGroupIds],
         },
       }),
@@ -887,7 +868,7 @@ export async function runLockedRollbackPhase(
   const prepared = await prepareBoundSelectiveRestore({
     repoRoot,
     ...(contributionBinding !== undefined ? { contributionBinding } : {}),
-    selectors,
+    selection: { kind: "selectors", selectors },
     ...(selectionRequiresReport(selectors)
       ? { report: await loadReportArtifact(repoRoot, sessionId) }
       : {}),

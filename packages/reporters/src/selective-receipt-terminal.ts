@@ -106,7 +106,7 @@ import type {
   FirstVerification,
   PostCommandIntegrity,
   ProjectVerification,
-  RollbackSelectors,
+  RollbackSelectionSource,
   SelectiveRollbackReceipt,
   VerifyCommandRecord,
 } from "@viberevert/session-format";
@@ -130,13 +130,24 @@ const failureLine = (failure: FailureSummary): string =>
   `${token(failure.error_code)} ${failure.message}`;
 
 /**
- * The selectors, one per supplied value, in the flag form the user typed.
+ * Why the selection exists, in the user's own vocabulary.
  *
- * Absent families are omitted rather than shown empty: the schema forbids an
- * empty family precisely so absence is the only spelling of "not used", and
- * printing `--only (none)` would contradict that.
+ * For a selector-driven rollback: the selectors, one per supplied value, in the
+ * flag form the user typed. Absent families are omitted rather than shown empty,
+ * because the schema forbids an empty family precisely so absence is the only
+ * spelling of "not used", and printing `--only (none)` would contradict that.
+ *
+ * For a scope-violation rollback (M 0.9.0 step 3) there are no selectors and
+ * never will be, so the line states what drove the selection instead of
+ * rendering an empty selector list. Printing nothing would leave the receipt
+ * silent about the one thing a reader most needs: that a person did not type
+ * these groups, a policy decision produced them.
  */
-function selectorLines(selectors: RollbackSelectors): readonly string[] {
+function selectionSourceLines(source: RollbackSelectionSource): readonly string[] {
+  if (source.kind === "scope_violation") {
+    return ["Selected by: scope violation (no selectors)"];
+  }
+  const selectors = source.selectors;
   const lines: string[] = [];
   for (const value of selectors.only ?? []) lines.push(`--only ${value}`);
   for (const value of selectors.except ?? []) lines.push(`--except ${value}`);
@@ -371,7 +382,7 @@ function identityLines(file: SelectiveRollbackReceipt): readonly string[] {
  */
 export function renderSelectiveReceiptTerminal(input: SelectiveReceiptRenderInput): string {
   const file = input.file;
-  const selectors = selectorLines(file.selectors);
+  const selectors = selectionSourceLines(file.selection_source);
 
   const lines: string[] = [
     RULE_HEAVY,

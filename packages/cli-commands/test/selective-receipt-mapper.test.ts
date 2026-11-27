@@ -68,7 +68,10 @@ const ATTEMPT = RollbackAttemptSchema.parse({
   session_id: SESSION_ID,
   contribution_sha256: DIGEST,
   pre_rollback_checkpoint_id: RECOVERY_ID,
-  selection: { selectors: SELECTORS, resolved_change_group_ids: [GROUP_A] },
+  selection: {
+    source: { kind: "selectors", selectors: SELECTORS },
+    resolved_change_group_ids: [GROUP_A],
+  },
   state: "mutation_may_have_started",
   written_at: ATTEMPT_WRITTEN_AT,
 });
@@ -80,7 +83,10 @@ const ATTEMPT_AB = RollbackAttemptSchema.parse({
   session_id: SESSION_ID,
   contribution_sha256: DIGEST,
   pre_rollback_checkpoint_id: RECOVERY_ID,
-  selection: { selectors: SELECTORS, resolved_change_group_ids: [GROUP_A, GROUP_B] },
+  selection: {
+    source: { kind: "selectors", selectors: SELECTORS },
+    resolved_change_group_ids: [GROUP_A, GROUP_B],
+  },
   state: "mutation_may_have_started",
   written_at: ATTEMPT_WRITTEN_AT,
 });
@@ -210,7 +216,7 @@ describe("every authorization binding is copied from the attempt", () => {
     expect(receipt.session_id).toBe(SESSION_ID);
     expect(receipt.contribution_sha256).toBe(DIGEST);
     expect(receipt.pre_rollback_checkpoint_id).toBe(RECOVERY_ID);
-    expect(receipt.selectors).toEqual(SELECTORS);
+    expect(receipt.selection_source).toEqual({ kind: "selectors", selectors: SELECTORS });
     expect(receipt.resolved_change_group_ids).toEqual([GROUP_A]);
   });
 
