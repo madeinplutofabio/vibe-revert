@@ -7,7 +7,7 @@
 // own verification commands ran, exactly three things can have happened that
 // the transaction must distinguish:
 //
-//   - the ignore RULES moved, in which case the two protected-domain
+//   - the ignore RULES moved, in which case the two restore-mutation-domain
 //     observations do not describe the same domain and comparing them proves
 //     nothing;
 //   - the domain itself moved, meaning a command changed managed worktree or
@@ -37,20 +37,20 @@
 
 import { type ExclusionBasisFingerprint, exclusionBasisChanged } from "./exclusion-basis.js";
 import {
-  compareProtectedDomainSnapshots,
-  type ProtectedDomainDifference,
-  type ProtectedDomainSnapshot,
-  protectedDomainUnchanged,
-} from "./protected-domain.js";
+  compareRestoreMutationDomainSnapshots,
+  type RestoreMutationDomainDifference,
+  type RestoreMutationDomainSnapshot,
+  restoreMutationDomainUnchanged,
+} from "./restore-mutation-domain.js";
 
 /**
  * One coherent observation of everything the comparison needs.
  *
  * CALLER OBLIGATION: both domains must be COMPLETE captures via
- * `captureProtectedDomain`, taken with IDENTICAL plan and session-start
+ * `captureRestoreMutationDomain`, taken with IDENTICAL plan and session-start
  * `rollback.exclude` inputs.
  *
- * Specifically NOT `observeProtectedDomainFromFrozenMembership`. That helper
+ * Specifically NOT `observeRestoreMutationDomainFromFrozenMembership`. That helper
  * exists for the transplant boundary, where the transaction must not move the
  * yardstick it is judged by, and it can only re-observe paths that were already
  * members. Here that would be a hole rather than a safeguard: a managed
@@ -64,7 +64,7 @@ import {
  * signal beside it.
  */
 export interface PostCommandObservation {
-  readonly domain: ProtectedDomainSnapshot;
+  readonly domain: RestoreMutationDomainSnapshot;
   readonly basis: ExclusionBasisFingerprint;
   /** Canonical 40-character lowercase commit SHA. */
   readonly headSha: string;
@@ -79,7 +79,7 @@ export type PostCommandIntegrity =
     }
   | {
       readonly outcome: "project_mutated";
-      readonly differences: ProtectedDomainDifference;
+      readonly differences: RestoreMutationDomainDifference;
       readonly headMoved: boolean;
     };
 
@@ -111,9 +111,9 @@ export function classifyPostCommandIntegrity(
     return { outcome: "basis_changed", before: before.basis, after: after.basis };
   }
 
-  const differences = compareProtectedDomainSnapshots(before.domain, after.domain);
+  const differences = compareRestoreMutationDomainSnapshots(before.domain, after.domain);
   const headMoved = before.headSha !== after.headSha;
-  if (protectedDomainUnchanged(differences) && !headMoved) {
+  if (restoreMutationDomainUnchanged(differences) && !headMoved) {
     return { outcome: "clean" };
   }
   return { outcome: "project_mutated", differences, headMoved };

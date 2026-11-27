@@ -28,7 +28,7 @@ import {
   resolveObservationSample,
   sampleObservation,
 } from "../src/integrity-observation.js";
-import type { ProtectedDomainSnapshot } from "../src/protected-domain.js";
+import type { RestoreMutationDomainSnapshot } from "../src/restore-mutation-domain.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -55,7 +55,7 @@ const BASIS: ExclusionBasisFingerprint = {
 };
 const BASIS_MOVED: ExclusionBasisFingerprint = { ...BASIS, ignoreCase: true };
 
-function domainOf(states: Readonly<Record<string, PathState>>): ProtectedDomainSnapshot {
+function domainOf(states: Readonly<Record<string, PathState>>): RestoreMutationDomainSnapshot {
   return { states: new Map(Object.entries(states)), topologyWatches: new Map() };
 }
 

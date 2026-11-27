@@ -7,7 +7,7 @@
 //
 //     prepareSelectiveTransplant          all validation, all derivation
 //     createTransplantProgress            allocate + project, still pre-marker
-//     finalProtectedDomainFence           last protected-domain + HEAD look
+//     finalRestoreMutationDomainFence           last restore-mutation-domain + HEAD look
 //     publishAttempt                      the marker, injected by the caller
 //     executePreparedSelectiveTransplant  the first mutation
 //
@@ -168,8 +168,11 @@
 
 import { type RollbackAttempt, RollbackAttemptSchema } from "@viberevert/session-format";
 
-import { type FinalProtectedDomainFenceResult, finalProtectedDomainFence } from "./final-fence.js";
-import type { ProtectedDomainSnapshot } from "./protected-domain.js";
+import {
+  type FinalRestoreMutationDomainFenceResult,
+  finalRestoreMutationDomainFence,
+} from "./final-fence.js";
+import type { RestoreMutationDomainSnapshot } from "./restore-mutation-domain.js";
 import type { SelectiveRestorePlan } from "./restore-selective.js";
 import {
   createTransplantProgress,
@@ -220,7 +223,7 @@ export interface SelectiveTransplantGateOptions {
   /** SESSION-START patterns, matching how the frozen snapshot was captured. */
   readonly rollbackExcludePatterns: readonly string[];
   /** `S`, frozen before the emergency checkpoint was created. */
-  readonly frozenSnapshot: ProtectedDomainSnapshot;
+  readonly frozenSnapshot: RestoreMutationDomainSnapshot;
   /** HEAD as observed when `S` was captured. Not the checkpoint's manifest HEAD. */
   readonly expectedHeadSha: string;
   readonly sessionId: string;
@@ -238,7 +241,7 @@ export interface SelectiveTransplantGateOptions {
 
 /** Reused from the fence so the two cannot drift apart. */
 type FencePreconditionChanged = Extract<
-  FinalProtectedDomainFenceResult,
+  FinalRestoreMutationDomainFenceResult,
   { outcome: "precondition_changed" }
 >;
 
@@ -326,7 +329,7 @@ export async function runSelectiveTransplantGate(
   // executor never receives an accumulator this function did not construct.
   const progress = createTransplantProgress(prepared.obligations, prepared.candidates);
 
-  const fence = await finalProtectedDomainFence({
+  const fence = await finalRestoreMutationDomainFence({
     repoRoot,
     plan,
     rollbackExcludePatterns: opts.rollbackExcludePatterns,

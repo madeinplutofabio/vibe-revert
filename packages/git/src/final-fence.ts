@@ -25,7 +25,7 @@
 // captured artifact like `validateRecoveryHandle`. Both of those answer
 // timeless questions about values. This one asserts something about WHEN:
 //
-//     observe the protected domain as late as possible
+//     observe the restore mutation domain as late as possible
 //     compare it against frozen S
 //     only if equal may the marker be published
 //
@@ -34,13 +34,13 @@
 // guarantee its type does not hold. Taking only the frozen baseline and owning
 // the live capture makes that guarantee structural.
 //
-// The options interface EXTENDS `ProtectedDomainCaptureOptions`, and the
+// The options interface EXTENDS `RestoreMutationDomainCaptureOptions`, and the
 // re-capture forwards the rest object rather than a rebuilt literal, so a
 // capture option added later cannot be silently dropped at this call site and
 // leave the two observations incomparable.
 //
 // =============================================================================
-// HEAD is fence evidence, not protected-domain membership
+// HEAD is fence evidence, not restore-mutation-domain membership
 // =============================================================================
 //
 // `S` provably cannot see a commit. Verified directly:
@@ -51,7 +51,7 @@
 //
 // Same mode, same oid, same stage, worktree untouched. So both axes of every
 // `PathState` are unchanged, every topology watch has identical membership, and
-// `compareProtectedDomainSnapshots` reports an empty difference while HEAD has
+// `compareRestoreMutationDomainSnapshots` reports an empty difference while HEAD has
 // moved underneath the transaction.
 //
 // That is a real transactional hole rather than a tidiness point:
@@ -66,12 +66,12 @@
 // commit is at risk of being swept into the rollback event even though it landed
 // before our marker.
 //
-// So HEAD is carried SEPARATELY rather than widening `ProtectedDomainSnapshot`,
+// So HEAD is carried SEPARATELY rather than widening `RestoreMutationDomainSnapshot`,
 // which plan stabilization also consumes and which has no business holding a
 // commit id:
 //
-//     ProtectedDomainSnapshot   filesystem and index protection domain only
-//     final fence               protected-domain equality + HEAD continuity
+//     RestoreMutationDomainSnapshot   filesystem and index protection domain only
+//     final fence               restore-mutation-domain equality + HEAD continuity
 //
 // The expected value is the HEAD captured WITH `S`, never E's manifest HEAD.
 // Normally they agree, but S's HEAD is what preserves the actual transactional
@@ -113,7 +113,7 @@
 // =============================================================================
 //
 // `stabilizeSelectiveRestorePlan` is pure over `(plan, snapshot)`, and the
-// fields `compareProtectedDomainSnapshots` compares are exactly the fields the
+// fields `compareRestoreMutationDomainSnapshots` compares are exactly the fields the
 // stabilizer reads. An empty difference therefore means the live domain is
 // value-equal to `S` on every input that function consumes, so re-running it
 // would recompute a known answer.
@@ -138,31 +138,32 @@
 // Both difference kinds are reported together rather than short-circuited. They
 // are independent evidence about different failures, neither derives from the
 // other, both observations have already been paid for, and an operator deciding
-// how to recover wants both facts. Order is fixed: protected domain, then HEAD.
+// how to recover wants both facts. Order is fixed: restore mutation domain, then HEAD.
 //
 // The result is a MODULE-LOCAL structured union, matching every sibling phase
 // module (`plan-stabilization.ts`, `recovery-handle.ts`, `oracle-evidence.ts`)
-// and `protected-domain.ts`'s rule that these modules return structured
+// and `restore-mutation-domain.ts`'s rule that these modules return structured
 // differences while callers name the failure. 10F owns the single mapping onto
 // the orchestration taxonomy, where this becomes `PRECONDITION_CHANGED`.
 
 import { getHeadSha } from "./git-cli.js";
 import {
-  captureProtectedDomain,
-  compareProtectedDomainSnapshots,
-  type ProtectedDomainCaptureOptions,
-  type ProtectedDomainDifference,
-  type ProtectedDomainSnapshot,
-  protectedDomainUnchanged,
-} from "./protected-domain.js";
+  captureRestoreMutationDomain,
+  compareRestoreMutationDomainSnapshots,
+  type RestoreMutationDomainCaptureOptions,
+  type RestoreMutationDomainDifference,
+  type RestoreMutationDomainSnapshot,
+  restoreMutationDomainUnchanged,
+} from "./restore-mutation-domain.js";
 
 // =============================================================================
 // Types
 // =============================================================================
 
-export interface FinalProtectedDomainFenceOptions extends ProtectedDomainCaptureOptions {
+export interface FinalRestoreMutationDomainFenceOptions
+  extends RestoreMutationDomainCaptureOptions {
   /** `S`, frozen before E was created. The caller supplies it and nothing else. */
-  readonly frozenSnapshot: ProtectedDomainSnapshot;
+  readonly frozenSnapshot: RestoreMutationDomainSnapshot;
   /**
    * HEAD as observed when `S` was captured.
    *
@@ -176,7 +177,7 @@ export interface FinalProtectedDomainFenceOptions extends ProtectedDomainCapture
 export type FinalFenceDifference =
   | {
       readonly kind: "protected_domain";
-      readonly difference: ProtectedDomainDifference;
+      readonly difference: RestoreMutationDomainDifference;
     }
   | {
       /**
@@ -189,7 +190,7 @@ export type FinalFenceDifference =
       readonly observedHeadSha: string;
     };
 
-export type FinalProtectedDomainFenceResult =
+export type FinalRestoreMutationDomainFenceResult =
   | { readonly outcome: "stable" }
   | {
       /**
@@ -211,19 +212,19 @@ export type FinalProtectedDomainFenceResult =
  * watches, and HEAD. Any difference is a refusal; nothing here is advisory, and
  * there is no force path.
  */
-export async function finalProtectedDomainFence(
-  opts: FinalProtectedDomainFenceOptions,
-): Promise<FinalProtectedDomainFenceResult> {
+export async function finalRestoreMutationDomainFence(
+  opts: FinalRestoreMutationDomainFenceOptions,
+): Promise<FinalRestoreMutationDomainFenceResult> {
   const { frozenSnapshot, expectedHeadSha, ...captureOptions } = opts;
 
   // Domain first, HEAD second: see the ordering note in this file's header.
-  const current = await captureProtectedDomain(captureOptions);
+  const current = await captureRestoreMutationDomain(captureOptions);
   const observedHeadSha = await getHeadSha(captureOptions.repoRoot);
 
   const differences: FinalFenceDifference[] = [];
 
-  const difference = compareProtectedDomainSnapshots(frozenSnapshot, current);
-  if (!protectedDomainUnchanged(difference)) {
+  const difference = compareRestoreMutationDomainSnapshots(frozenSnapshot, current);
+  if (!restoreMutationDomainUnchanged(difference)) {
     differences.push({ kind: "protected_domain", difference });
   }
   if (observedHeadSha !== expectedHeadSha) {

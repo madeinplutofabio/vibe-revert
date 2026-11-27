@@ -4,7 +4,7 @@
 // Plan stabilization (M 0.8.0 step 10B, §10).
 //
 // PURE AND SYNCHRONOUS. No git, no filesystem, no config, no `await`. It
-// receives the already-approved plan and the already-captured protected-domain
+// receives the already-approved plan and the already-captured restore-mutation-domain
 // snapshot `S`, and answers one phase-bound question:
 //
 //     does the approved plan still describe THIS repository snapshot?
@@ -82,7 +82,7 @@
 import type { PathState } from "@viberevert/session-format";
 
 import { pathStateEqual } from "./path-state.js";
-import type { ProtectedDomainSnapshot } from "./protected-domain.js";
+import type { RestoreMutationDomainSnapshot } from "./restore-mutation-domain.js";
 import {
   deriveSelectiveTopology,
   type SelectiveRestoreConflict,
@@ -186,13 +186,13 @@ const projectionsByPath = (
 // Invariant accessors
 // =============================================================================
 
-function requireState(snapshot: ProtectedDomainSnapshot, path: string): PathState {
+function requireState(snapshot: RestoreMutationDomainSnapshot, path: string): PathState {
   const state = snapshot.states.get(path);
   if (state === undefined) {
     // `S` was captured from this very plan, so absence is a construction error
     // in the caller's sequence, never evidence that the path is gone. Real
     // absence is `worktree.kind === "absent"`.
-    throw new Error(`protected domain has no observed state for ${JSON.stringify(path)}`);
+    throw new Error(`restore mutation domain has no observed state for ${JSON.stringify(path)}`);
   }
   return state;
 }
@@ -203,7 +203,7 @@ function requireState(snapshot: ProtectedDomainSnapshot, path: string): PathStat
 
 export function stabilizeSelectiveRestorePlan(
   plan: SelectiveRestorePlan,
-  snapshot: ProtectedDomainSnapshot,
+  snapshot: RestoreMutationDomainSnapshot,
 ): PlanStabilizationResult {
   if (plan.outcome !== "eligible") {
     throw new Error(
@@ -243,7 +243,9 @@ export function stabilizeSelectiveRestorePlan(
     descendantsOf: (path) => {
       const watch = snapshot.topologyWatches.get(path);
       if (watch === undefined) {
-        throw new Error(`protected domain has no topology watch for ${JSON.stringify(path)}`);
+        throw new Error(
+          `restore mutation domain has no topology watch for ${JSON.stringify(path)}`,
+        );
       }
       if (watch.kind !== "recursive") {
         throw new Error(

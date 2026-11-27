@@ -575,7 +575,7 @@ describe("collectMissingEvidence", () => {
 // =============================================================================
 
 describe("source invariant", () => {
-  it("9: the evidence module has no lifecycle, protected-domain, or object-store input", async () => {
+  it("9: the evidence module has no lifecycle, restore-mutation-domain, or object-store input", async () => {
     const source = await readFile(new URL("../src/oracle-evidence.ts", import.meta.url), "utf8");
 
     // Scoped to the IMPORT BLOCK: the file header names several of these
@@ -589,7 +589,7 @@ describe("source invariant", () => {
     const imports = source.slice(start, end);
 
     for (const forbidden of [
-      "./protected-domain.js",
+      "./restore-mutation-domain.js",
       "./recovery-handle.js",
       "./fs-topology.js",
       // F1: this module must never materialize an oracle again. Evidence has to

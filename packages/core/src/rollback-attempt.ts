@@ -8,7 +8,7 @@
 // whose existence means "mutation may have started".
 //
 // This module allocates the rollback id and publishes the artifact. It performs
-// NO git-state validation and NO repository mutation. The final protected-domain
+// NO git-state validation and NO repository mutation. The final restore-mutation-domain
 // fence lives in `@viberevert/git`, and the mutation schedule is step 10F's.
 // Returning successfully from here is the capability token 10F requires before
 // any repository mutation becomes reachable.

@@ -9,7 +9,7 @@
 // only once the receipt is written.
 //
 // M 0.8.0 step 10F's selective transaction needs the same boundary for a
-// stronger reason. Its protected region spans the protected-domain snapshot `S`,
+// stronger reason. Its protected region spans the restore-mutation-domain snapshot `S`,
 // the emergency checkpoint `E`, the proof that `E` reproduces `S`, the
 // session-start oracle, evidence validation, the final fence, marker
 // publication, and the mutation. Releasing the lock anywhere inside that

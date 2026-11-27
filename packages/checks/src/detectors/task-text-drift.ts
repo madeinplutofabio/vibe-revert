@@ -238,12 +238,28 @@ function tokenizePath(path: string): Set<string> {
 // =============================================================================
 
 /**
- * The scope-expansion check. Toggleable via `checks.scope_expansion`
- * in `.viberevert.yml` (which maps to category "scope-expansion"
- * per CHECKS_TOGGLE_MAP — note the underscore-vs-hyphen split). Emits
- * findings under per-category ids `scope-expansion.<category>` per
- * D40's identity-based dedup convention. Pure synchronous, no I/O,
- * no async per D29/D48.
+ * The TASK-TEXT DRIFT check: a token-overlap heuristic over the task
+ * string. It is NOT the M 0.9.0 scope contract and makes no claim about
+ * authorized scope. It reports that a risky file has little textual
+ * overlap with what the user said they were doing, which is a precursor
+ * signal, not a scope decision.
+ *
+ * Renamed from `scopeExpansionCheck` in M 0.9.0 step 1 so the name stops
+ * colliding with the first-class recorded scope-expansion operation.
+ *
+ * The toggle key, category and rule ids are DELIBERATELY unchanged, and
+ * must stay unchanged: `scope_expansion` is a required persisted field of
+ * `ResolvedChecksSchema` inside every `session.json`, and `deriveFindingId`
+ * hashes the rule id, so renaming `scope-expansion.<category>` would change
+ * every finding id and break `--finding` values recorded in existing
+ * receipts. Both also appear in `docs/config.md` and `docs/risk-taxonomy.md`
+ * under bidirectional exact doc invariants.
+ *
+ * Toggleable via `checks.scope_expansion` in `.viberevert.yml` (which maps
+ * to category "scope-expansion" per CHECKS_TOGGLE_MAP — note the
+ * underscore-vs-hyphen split). Emits findings under per-category ids
+ * `scope-expansion.<category>` per D40's identity-based dedup convention.
+ * Pure synchronous, no I/O, no async per D29/D48.
  *
  * Scope: files classified into RISKY_CATEGORIES (auth / payments /
  * database / infra / deployment) AND with task-path token overlap
@@ -256,7 +272,7 @@ function tokenizePath(path: string): Set<string> {
  * to ALL of those category findings — its own evidence appears
  * under each affected category.
  */
-export const scopeExpansionCheck: Check = {
+export const taskTextDriftCheck: Check = {
   id: "scope-expansion",
   category: "scope-expansion",
   run: (ctx: CheckContext): readonly DetectorResult[] => {

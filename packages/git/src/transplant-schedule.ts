@@ -18,7 +18,7 @@
 //
 //     oracle evidence
 //     prepareSelectiveTransplant          <- all validation, all derivation
-//     finalProtectedDomainFence           <- last protected-domain + HEAD
+//     finalRestoreMutationDomainFence     <- last restore-mutation-domain + HEAD
 //                                            observation before the marker
 //     publishRollbackAttempt              <- marker
 //     executePreparedSelectiveTransplant  <- first mutation

@@ -1,12 +1,38 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Fabio Marcello Salvadori
 
-// Policy resolution -- applies M C defaults to a loaded Config and
+// CHECK-POLICY resolution -- applies M C defaults to a loaded Config and
 // returns a fully-concrete ResolvedChecksConfig. Promoted from
 // @viberevert/cli-commands/src/check-orchestration.ts as part of
 // M G1a Step 3.5a so consumers other than the CLI's
 // `viberevert check` can reach the resolver through
 // @viberevert/core's public surface.
+//
+// =============================================================================
+// This is CHECK policy, NOT project policy (M 0.9.0 naming lock)
+// =============================================================================
+//
+// "Policy" here means exactly one thing: the resolved check toggles, risk
+// thresholds, framework set and rollback-exclude list derived from
+// `.viberevert.yml` defaults. It is configuration resolution.
+//
+// M 0.9.0 introduces a SEPARATE concept called PROJECT POLICY: a declarative
+// rule surface returning ALLOW / WARN / REQUIRE_APPROVAL / DENY decisions with
+// reason codes, evaluated against a session's authorized scope. The two are
+// unrelated, and this module must never be extended to carry project-policy
+// decisions. If it needs project policy, it is the wrong module.
+//
+// The filename and the exported names are deliberately NOT renamed. Both are
+// load-bearing: `packages/cli/test/architectural-invariants.test.ts` pins
+// `packages/core/src/policy-resolve.ts` as the sole D57 owner of the four
+// DEFAULT_* constants, and `mergeChecksConfig` / `ResolvedChecksConfig` /
+// `DEFAULT_*` are consumed across cli-commands and mcp under the D99.M
+// allowed-import assertions. The qualification is in this header and in the
+// local naming, not in the public surface.
+//
+// The MCP tool `get_policy` keeps its locked name and in M 0.9.0 extends its
+// result ADDITIVELY to distinguish current project policy, an active session's
+// bound authority, and these existing check-policy fields.
 //
 // Consumers in v0.7.0-beta:
 //   - @viberevert/cli-commands/src/commands/check.ts (production CLI)
@@ -65,11 +91,15 @@ export const DEFAULT_CHECKS_CONFIG: Readonly<Record<ChecksToggleKey, boolean>> =
 };
 
 /**
- * Sentinel that documents the default-frameworks policy per D42 / D57:
- * when `config.frameworks` is omitted or empty, `mergeChecksConfig`
- * invokes `detectFrameworks(repoRoot)`. The const is exported for
- * discoverability; the merge function does not branch on its value
- * (the branch is on `config.frameworks` being non-empty).
+ * Sentinel that documents the default-frameworks CHECK-POLICY rule per
+ * D42 / D57: when `config.frameworks` is omitted or empty,
+ * `mergeChecksConfig` invokes `detectFrameworks(repoRoot)`. The const is
+ * exported for discoverability; the merge function does not branch on its
+ * value (the branch is on `config.frameworks` being non-empty).
+ *
+ * "POLICY" in this name predates M 0.9.0 project policy and means a
+ * configuration-resolution rule, not a decision. The name is kept because it
+ * is exported and D57-pinned; see this file's header.
  */
 export const DEFAULT_FRAMEWORKS_POLICY = "auto-detect" as const;
 

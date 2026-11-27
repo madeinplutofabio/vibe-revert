@@ -22,7 +22,10 @@ import {
   classifyPostCommandIntegrity,
   type PostCommandObservation,
 } from "../src/post-command-integrity.js";
-import type { ProtectedDomainSnapshot, TopologyWatch } from "../src/protected-domain.js";
+import type {
+  RestoreMutationDomainSnapshot,
+  TopologyWatch,
+} from "../src/restore-mutation-domain.js";
 
 const ABSENT: PathState = { worktree: { kind: "absent" }, index: { kind: "absent" } };
 const PRESENT: PathState = {
@@ -52,7 +55,7 @@ const BASIS_MOVED: ExclusionBasisFingerprint = { ...BASIS, ignoreCase: true };
 function domainOf(
   states: Readonly<Record<string, PathState>>,
   watches: readonly TopologyWatch[] = [],
-): ProtectedDomainSnapshot {
+): RestoreMutationDomainSnapshot {
   return {
     states: new Map(Object.entries(states)),
     topologyWatches: new Map(watches.map((watch) => [watch.path, watch])),
@@ -60,7 +63,7 @@ function domainOf(
 }
 
 function observationOf(
-  domain: ProtectedDomainSnapshot,
+  domain: RestoreMutationDomainSnapshot,
   basis: ExclusionBasisFingerprint,
   headSha: string,
 ): PostCommandObservation {

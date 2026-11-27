@@ -9,7 +9,7 @@
 // which is that E genuinely reproduces S rather than merely claiming to.
 //
 // Checkpoint directories live OUTSIDE the repository, so they never become
-// untracked content that the protected-domain capture would observe.
+// untracked content that the restore-mutation-domain capture would observe.
 
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -23,11 +23,11 @@ import { describe, expect, it } from "vitest";
 import { createCheckpoint } from "../src/checkpoint.js";
 import { CheckpointNotFoundError } from "../src/errors.js";
 import { getHeadSha } from "../src/git-cli.js";
+import { type RecoveryHandleDifference, validateRecoveryHandle } from "../src/recovery-handle.js";
 import {
   captureProtectedStateMap,
   type ProtectedStateDifference,
-} from "../src/protected-domain.js";
-import { type RecoveryHandleDifference, validateRecoveryHandle } from "../src/recovery-handle.js";
+} from "../src/restore-mutation-domain.js";
 import {
   ABSENT_PATH_STATE,
   type SelectiveRestoreClassification,
@@ -504,7 +504,7 @@ describe("source invariant", () => {
     const source = await readFile(new URL("../src/recovery-handle.ts", import.meta.url), "utf8");
 
     // Scoped to the IMPORT BLOCK on purpose: the file header discusses
-    // `captureProtectedDomain` and `ProtectedDomainSnapshot` by name, precisely
+    // `captureRestoreMutationDomain` and `RestoreMutationDomainSnapshot` by name, precisely
     // to explain why neither is used. A whole-file scan would fail on its own
     // documentation.
     const start = source.indexOf("import type { PathState }");
@@ -514,16 +514,16 @@ describe("source invariant", () => {
     const imports = source.slice(start, end);
 
     for (const forbidden of [
-      "captureProtectedDomain",
-      "compareProtectedDomainSnapshots",
-      "ProtectedDomainSnapshot",
-      "protectedDomainUnchanged",
+      "captureRestoreMutationDomain",
+      "compareRestoreMutationDomainSnapshots",
+      "RestoreMutationDomainSnapshot",
+      "restoreMutationDomainUnchanged",
       "./fs-topology.js",
     ]) {
       expect(imports).not.toContain(forbidden);
     }
 
     // And no call anywhere in the body.
-    expect(source).not.toContain("captureProtectedDomain(");
+    expect(source).not.toContain("captureRestoreMutationDomain(");
   });
 });

@@ -18,7 +18,7 @@
 // WHY BRACKETING SCALARS IS NOT ENOUGH. The obvious design samples the basis
 // and HEAD on both sides of the domain capture. It is insufficient, and the
 // reason is specific: a TRACKED `.gitignore` is deliberately absent from
-// `ExclusionBasisFingerprint`, because the protected domain already covers
+// `ExclusionBasisFingerprint`, because the restore mutation domain already covers
 // tracked paths. If such a file changes mid-capture, both basis samples agree,
 // both HEAD samples agree, and membership was still derived under changing
 // rules. The same applies to any file changing during the walk.
@@ -27,8 +27,8 @@
 // compare equal are what licenses the word "coherent":
 //
 //     basisBefore, headBefore
-//     domainBefore = captureProtectedDomain(...)
-//     domainAfter  = captureProtectedDomain(...)
+//     domainBefore = captureRestoreMutationDomain(...)
+//     domainAfter  = captureRestoreMutationDomain(...)
 //     headAfter, basisAfter
 //
 // COST. Two full domain captures per observation, so four per transaction. That
@@ -48,12 +48,12 @@ import {
 import { getHeadSha } from "./git-cli.js";
 import type { PostCommandObservation } from "./post-command-integrity.js";
 import {
-  captureProtectedDomain,
-  compareProtectedDomainSnapshots,
-  type ProtectedDomainCaptureOptions,
-  type ProtectedDomainSnapshot,
-  protectedDomainUnchanged,
-} from "./protected-domain.js";
+  captureRestoreMutationDomain,
+  compareRestoreMutationDomainSnapshots,
+  type RestoreMutationDomainCaptureOptions,
+  type RestoreMutationDomainSnapshot,
+  restoreMutationDomainUnchanged,
+} from "./restore-mutation-domain.js";
 
 /** One acquisition attempt, with no verdict attached. */
 export interface ObservationSample {
@@ -61,8 +61,8 @@ export interface ObservationSample {
   readonly basisAfter: ExclusionBasisFingerprint;
   readonly headShaBefore: string;
   readonly headShaAfter: string;
-  readonly domainBefore: ProtectedDomainSnapshot;
-  readonly domainAfter: ProtectedDomainSnapshot;
+  readonly domainBefore: RestoreMutationDomainSnapshot;
+  readonly domainAfter: RestoreMutationDomainSnapshot;
 }
 
 /**
@@ -106,13 +106,13 @@ export type ObservationResolution =
  * different domains.
  */
 export async function sampleObservation(
-  opts: ProtectedDomainCaptureOptions,
+  opts: RestoreMutationDomainCaptureOptions,
 ): Promise<ObservationSample> {
   const { repoRoot } = opts;
   const basisBefore = await captureExclusionBasis(repoRoot);
   const headShaBefore = await getHeadSha(repoRoot);
-  const domainBefore = await captureProtectedDomain(opts);
-  const domainAfter = await captureProtectedDomain(opts);
+  const domainBefore = await captureRestoreMutationDomain(opts);
+  const domainAfter = await captureRestoreMutationDomain(opts);
   const headShaAfter = await getHeadSha(repoRoot);
   const basisAfter = await captureExclusionBasis(repoRoot);
   return { basisBefore, basisAfter, headShaBefore, headShaAfter, domainBefore, domainAfter };
@@ -153,8 +153,8 @@ export function resolveObservationSample(sample: ObservationSample): Observation
     };
   }
 
-  const domainMoved = !protectedDomainUnchanged(
-    compareProtectedDomainSnapshots(sample.domainBefore, sample.domainAfter),
+  const domainMoved = !restoreMutationDomainUnchanged(
+    compareRestoreMutationDomainSnapshots(sample.domainBefore, sample.domainAfter),
   );
 
   if (headMoved || domainMoved) {
@@ -193,7 +193,7 @@ export function resolveObservationSample(sample: ObservationSample): Observation
  * active.
  */
 export async function acquireIntegrityObservation(
-  opts: ProtectedDomainCaptureOptions,
+  opts: RestoreMutationDomainCaptureOptions,
 ): Promise<ObservationResolution> {
   return resolveObservationSample(await sampleObservation(opts));
 }

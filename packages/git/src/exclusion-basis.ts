@@ -2,9 +2,9 @@
 // Copyright 2026 Fabio Marcello Salvadori
 
 // Exclusion-basis fingerprinting: the ignore rules that decide which paths are
-// OUTSIDE the protected domain.
+// OUTSIDE the restore mutation domain.
 //
-// The protected domain `S` is defined by subtraction: tracked paths, plus
+// The restore mutation domain `S` is defined by subtraction: tracked paths, plus
 // untracked-but-not-ignored paths. "Ignored" is therefore not a property of a
 // path, it is a verdict produced by a set of rules. If those rules change
 // between two observations of `S`, the observations are not measuring the same

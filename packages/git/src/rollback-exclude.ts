@@ -44,7 +44,7 @@
 // still states its own surface.
 //
 // The extraction happens now because a third consumer arrives with the step 10
-// protected domain. At two copies, duplication kept the symmetry legible; at
+// restore mutation domain. At two copies, duplication kept the symmetry legible; at
 // three, silent divergence between them is the larger risk.
 //
 // Package-internal. NOT in the barrel: `rollback.exclude` enforcement is a

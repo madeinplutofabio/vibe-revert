@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Fabio Marcello Salvadori
 
-// The protected domain (M 0.8.0 step 10, §9/§10 revision 13).
+// The restore mutation domain (M 0.8.0 step 10, §9/§10 revision 13).
 //
 // READ-ONLY. Captures the frozen artifact `S` describing everything the
 // transaction promises not to disturb, and compares two such artifacts. It
@@ -41,7 +41,7 @@
 // boolean:
 //
 //     captureProtectedStateMap  /  compareProtectedStateMaps
-//     captureProtectedDomain    /  compareProtectedDomainSnapshots
+//     captureRestoreMutationDomain    /  compareRestoreMutationDomainSnapshots
 //
 // The recovery path must not merely IGNORE watches after building them. Raw
 // enumeration can throw, or depend on filesystem state the recovery contract
@@ -193,7 +193,7 @@ export interface TopologyWatch {
   readonly members: readonly CurrentDescendant[];
 }
 
-export interface ProtectedDomainSnapshot {
+export interface RestoreMutationDomainSnapshot {
   /** Exact frozen `PathState` by protected repo-relative POSIX path. */
   readonly states: ReadonlyMap<string, PathState>;
   /** Frozen raw membership, keyed by watch root (`""` is the repository root). */
@@ -220,16 +220,16 @@ export interface ProtectedStateDifference {
 }
 
 /** State differences plus raw-membership differences. */
-export interface ProtectedDomainDifference extends ProtectedStateDifference {
+export interface RestoreMutationDomainDifference extends ProtectedStateDifference {
   readonly topologyWatchDifferences: readonly TopologyWatchDifference[];
 }
 
-export interface ProtectedDomainCaptureOptions {
+export interface RestoreMutationDomainCaptureOptions {
   readonly repoRoot: string;
   readonly plan: SelectiveRestorePlan;
   /**
    * The SESSION-START `rollback.exclude` patterns, never live config. Applied
-   * through the capture/restore matcher so the protected domain interprets
+   * through the capture/restore matcher so the restore mutation domain interprets
    * `rollback.exclude` exactly as the recovery machinery it validates against.
    */
   readonly rollbackExcludePatterns: readonly string[];
@@ -333,12 +333,12 @@ function parentOf(path: string): string {
  * will not happen.
  */
 export async function captureProtectedStateMap(
-  opts: ProtectedDomainCaptureOptions,
+  opts: RestoreMutationDomainCaptureOptions,
 ): Promise<ReadonlyMap<string, PathState>> {
   const { repoRoot, plan } = opts;
   if (plan.outcome !== "eligible") {
     throw new Error(
-      `protected-domain capture requires an eligible plan, received ${JSON.stringify(plan.outcome)}`,
+      `restore-mutation-domain capture requires an eligible plan, received ${JSON.stringify(plan.outcome)}`,
     );
   }
 
@@ -418,16 +418,16 @@ export async function captureProtectedStateMap(
 }
 
 /**
- * Freeze the whole protected domain as `S`: the state map plus raw topology
+ * Freeze the whole restore mutation domain as `S`: the state map plus raw topology
  * watches.
  *
  * Used by plan stabilization and the final fence, which operate against the
  * REAL checkout where raw membership is meaningful evidence. The recovery
  * oracle uses `captureProtectedStateMap` instead and never reaches this.
  */
-export async function captureProtectedDomain(
-  opts: ProtectedDomainCaptureOptions,
-): Promise<ProtectedDomainSnapshot> {
+export async function captureRestoreMutationDomain(
+  opts: RestoreMutationDomainCaptureOptions,
+): Promise<RestoreMutationDomainSnapshot> {
   const { repoRoot, plan } = opts;
   const states = await captureProtectedStateMap(opts);
 
@@ -540,10 +540,10 @@ async function observeWatchMembers(
 }
 
 /**
- * Re-observe the protected domain AFTER mutation, taking every membership
+ * Re-observe the restore mutation domain AFTER mutation, taking every membership
  * decision from the frozen `S`.
  *
- * This is the post-op counterpart of `captureProtectedDomain`, and the ONLY
+ * This is the post-op counterpart of `captureRestoreMutationDomain`, and the ONLY
  * capture-shaped function that is sound once the repository has been mutated.
  * It derives nothing:
  *
@@ -561,14 +561,14 @@ async function observeWatchMembers(
  * That distinction is the whole of F4, so it is worth stating plainly rather
  * than banning index reads outright.
  *
- * Returns a `ProtectedDomainSnapshot` so `compareProtectedDomainSnapshots(S,
+ * Returns a `RestoreMutationDomainSnapshot` so `compareRestoreMutationDomainSnapshots(S,
  * observed)` consumes it directly. A distinct result type would buy nothing
  * under structural typing and would force Step 11 to adapt or cast.
  */
-export async function observeProtectedDomainFromFrozenMembership(
+export async function observeRestoreMutationDomainFromFrozenMembership(
   repoRoot: string,
-  frozen: ProtectedDomainSnapshot,
-): Promise<ProtectedDomainSnapshot> {
+  frozen: RestoreMutationDomainSnapshot,
+): Promise<RestoreMutationDomainSnapshot> {
   const index: IndexSnapshot = await readIndexSnapshot(repoRoot);
 
   const states = new Map<string, PathState>();
@@ -642,7 +642,7 @@ export function compareProtectedStateMaps(
 }
 
 /**
- * Exact comparison of two whole protected domains: the state comparison above
+ * Exact comparison of two whole restore mutation domains: the state comparison above
  * plus raw membership.
  *
  * Used by plan stabilization and the final fence. The caller re-captures
@@ -652,10 +652,10 @@ export function compareProtectedStateMaps(
  * mutation, the frozen snapshot is compared and membership is NEVER re-derived
  * (§10).
  */
-export function compareProtectedDomainSnapshots(
-  expected: ProtectedDomainSnapshot,
-  actual: ProtectedDomainSnapshot,
-): ProtectedDomainDifference {
+export function compareRestoreMutationDomainSnapshots(
+  expected: RestoreMutationDomainSnapshot,
+  actual: RestoreMutationDomainSnapshot,
+): RestoreMutationDomainDifference {
   const stateDifference = compareProtectedStateMaps(expected.states, actual.states);
 
   const topologyWatchDifferences: TopologyWatchDifference[] = [];
@@ -696,7 +696,9 @@ export function protectedStatesUnchanged(difference: ProtectedStateDifference): 
 }
 
 /** `true` iff the difference is empty in every field, watches included. */
-export function protectedDomainUnchanged(difference: ProtectedDomainDifference): boolean {
+export function restoreMutationDomainUnchanged(
+  difference: RestoreMutationDomainDifference,
+): boolean {
   return protectedStatesUnchanged(difference) && difference.topologyWatchDifferences.length === 0;
 }
 

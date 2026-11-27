@@ -92,7 +92,7 @@
 // questions, settled before the oracle opened.
 //
 // Membership is never re-derived either:
-// `observeProtectedDomainFromFrozenMembership` takes `S` as the authority, so no
+// `observeRestoreMutationDomainFromFrozenMembership` takes `S` as the authority, so no
 // protected path can drop out of the comparison because the transaction changed
 // the rules that define membership.
 //
@@ -119,10 +119,10 @@ import {
   readIndexSnapshot,
 } from "./path-state.js";
 import {
-  compareProtectedDomainSnapshots,
-  observeProtectedDomainFromFrozenMembership,
-  type ProtectedDomainSnapshot,
-} from "./protected-domain.js";
+  compareRestoreMutationDomainSnapshots,
+  observeRestoreMutationDomainFromFrozenMembership,
+  type RestoreMutationDomainSnapshot,
+} from "./restore-mutation-domain.js";
 import type { SelectiveRestoreOperation, SelectiveRestorePlan } from "./restore-selective.js";
 import {
   type CandidateExecutionOutcome,
@@ -249,7 +249,7 @@ export interface PostTransplantVerificationOptions {
   /** Recorded by an accumulator during execution; see the header's contract. */
   readonly progress: RecordedTransplantProgress;
   /** `S`, frozen before the emergency checkpoint was created. */
-  readonly frozenSnapshot: ProtectedDomainSnapshot;
+  readonly frozenSnapshot: RestoreMutationDomainSnapshot;
   /** HEAD as observed when `S` was captured. */
   readonly expectedHeadSha: string;
 }
@@ -436,7 +436,7 @@ export async function verifyPostTransplantState(
   }
 
   // ---- One live observation, membership taken from S (F4) ------------------
-  const observed = await observeProtectedDomainFromFrozenMembership(repoRoot, frozenSnapshot);
+  const observed = await observeRestoreMutationDomainFromFrozenMembership(repoRoot, frozenSnapshot);
 
   // ---- Pass 1: exactly one candidate record per selected classification ----
   //
@@ -475,7 +475,7 @@ export async function verifyPostTransplantState(
       continue;
     }
     if (frozenState === undefined) {
-      defect("a selected path is absent from the frozen protected domain");
+      defect("a selected path is absent from the frozen restore mutation domain");
       continue;
     }
     if (observedState === undefined) {
@@ -677,7 +677,7 @@ export async function verifyPostTransplantState(
     }
   };
 
-  for (const difference of compareProtectedDomainSnapshots(frozenSnapshot, observed)
+  for (const difference of compareRestoreMutationDomainSnapshots(frozenSnapshot, observed)
     .topologyWatchDifferences) {
     if (difference.reason !== "membership_changed") {
       // Frozen-membership observation copies S's roots and kinds verbatim, so

@@ -87,7 +87,7 @@
 // What this module deliberately never touches
 // =============================================================================
 //
-// No topology watches. No protected-domain capture or comparison. No
+// No topology watches. No restore-mutation-domain capture or comparison. No
 // recovery-handle validation. No object store: `IndexState.oid` and
 // `content_ref` are COMPARISON EVIDENCE here, never fetch keys. The entire
 // evidence chain is

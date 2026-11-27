@@ -591,7 +591,7 @@ export async function observePathState(
 // Moved here from contribution.ts (M 0.8.0 step 10A) as a literal move: same
 // bodies, same semantics, no renaming. They were private to a CAPTURE module,
 // but selective restore needs the identical notion of equality for plan
-// stabilization, oracle evidence validation, the protected-domain fence, and
+// stabilization, oracle evidence validation, the restore-mutation-domain fence, and
 // post-operation verification. Two independent definitions of "the same
 // PathState" is exactly the drift that would let the contribution fence and the
 // restore fence disagree about whether the world moved.

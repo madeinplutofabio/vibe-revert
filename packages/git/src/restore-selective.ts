@@ -9,7 +9,7 @@
 // writes, and no object-store reads.
 //
 // Deliberately absent per the locked design: transplant, oracle construction,
-// evidence validation, the protected-domain snapshot, the fence, and the
+// evidence validation, the restore-mutation-domain snapshot, the fence, and the
 // attempt marker. Those are 10B/10E/10F. Nothing here is command-reachable.
 //
 // =============================================================================
@@ -24,7 +24,7 @@
 //                            states, then calls the derivation
 //     deriveSelectiveTopology  stages B/C1a/C1b/C2/D over lookup callbacks
 //
-// Plan stabilization (10B) runs the SAME derivation against the protected-domain
+// Plan stabilization (10B) runs the SAME derivation against the restore-mutation-domain
 // snapshot `S`, which is why it exists as a shared function rather than being
 // reimplemented there. Two definitions of selective topology would be exactly
 // the drift the extraction exists to prevent.
@@ -137,7 +137,7 @@ export interface SelectiveRestoreClassification {
   readonly expectedAfter: PathState;
   /**
    * Exact phase-1 observation. Retained for PLAN STABILIZATION against the
-   * protected-domain snapshot (design §10), not merely diagnostic or preview
+   * restore-mutation-domain snapshot (design §10), not merely diagnostic or preview
    * data. Do not remove it as redundant with `expectedAfter`.
    */
   readonly observed: PathState;
@@ -398,7 +398,7 @@ function classify(
  * Derive the executable footprint from FIXED observations.
  *
  * Pure and synchronous. Shared verbatim between phase-1 planning, which feeds it
- * live observations, and plan stabilization, which feeds it the protected-domain
+ * live observations, and plan stabilization, which feeds it the restore-mutation-domain
  * snapshot `S`. Neither owns a private copy of these rules.
  *
  * Stage-A conflicts are NOT re-reported here: the caller already holds them on
@@ -516,7 +516,7 @@ export function deriveSelectiveTopology(
       if (observed.worktree.kind === "directory") {
         // No write, but LOAD-BEARING: if an external process replaces it with a
         // file after planning, the child transplant fails. It joins the
-        // protected domain so the fence covers it.
+        // restore mutation domain so the fence covers it.
         dependencyPaths.add(ancestor);
         continue;
       }

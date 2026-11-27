@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Fabio Marcello Salvadori
 
-// Unit + integration tests for packages/checks/src/detectors/scope-expansion.ts
+// Unit + integration tests for packages/checks/src/detectors/task-text-drift.ts
 // (Step 7b file 3).
 //
 // Coverage strategy:
@@ -77,12 +77,12 @@
 // D31 and works cleanly under exactOptionalPropertyTypes.
 //
 // =============================================================================
-// Test pipeline: isolated `runChecks([scopeExpansionCheck], ctx)` — same
+// Test pipeline: isolated `runChecks([taskTextDriftCheck], ctx)` — same
 // future-detector-brittleness avoidance as Steps 4-7a.
 
 import { describe, expect, it } from "vitest";
 
-import { scopeExpansionCheck } from "../../src/detectors/scope-expansion.js";
+import { taskTextDriftCheck } from "../../src/detectors/task-text-drift.js";
 import type { ChangedFileInput, CheckContext, ChecksToggleConfig } from "../../src/index.js";
 import { runChecks } from "../../src/index.js";
 
@@ -122,7 +122,7 @@ function renamed(path: string, previousPath: string): ChangedFileInput {
  * Build a CheckContext with explicit `detectedFrameworks` and
  * optional `task`. Defaults `configChecks` to
  * `{ scope_expansion: true }` so D28 Layer 1 does NOT short-circuit
- * scopeExpansionCheck. Task is positional-third (more commonly
+ * taskTextDriftCheck. Task is positional-third (more commonly
  * varied than configChecks).
  *
  * Conditional spread on `task`: the returned object OMITS the
@@ -154,10 +154,10 @@ const noFrameworkCtx = (files: readonly ChangedFileInput[], task?: string) =>
 // SECTION 1: trigger gates
 // =============================================================================
 
-describe("scopeExpansionCheck — trigger gates", () => {
+describe("taskTextDriftCheck — trigger gates", () => {
   it("ctx.task undefined → 0 findings (gate a)", () => {
     const result = runChecks(
-      [scopeExpansionCheck],
+      [taskTextDriftCheck],
       laravelCtx([pathOnly("app/Http/Middleware/AuthMiddleware.php")]),
     );
     expect(result.results).toEqual([]);
@@ -165,7 +165,7 @@ describe("scopeExpansionCheck — trigger gates", () => {
 
   it("ctx.task = 'Fix' (length 3 < MIN_TASK_LENGTH) → 0 findings (gate b)", () => {
     const result = runChecks(
-      [scopeExpansionCheck],
+      [taskTextDriftCheck],
       laravelCtx([pathOnly("app/Http/Middleware/AuthMiddleware.php")], "Fix"),
     );
     expect(result.results).toEqual([]);
@@ -177,7 +177,7 @@ describe("scopeExpansionCheck — trigger gates", () => {
     // post-trim, the gate correctly rejects the semantically-short
     // "fix". If a future maintainer removes the trim, this fails.
     const result = runChecks(
-      [scopeExpansionCheck],
+      [taskTextDriftCheck],
       laravelCtx([pathOnly("app/Http/Middleware/AuthMiddleware.php")], "   fix   "),
     );
     expect(result.results).toEqual([]);
@@ -189,7 +189,7 @@ describe("scopeExpansionCheck — trigger gates", () => {
     // non-alphanumeric. The zero-token guard fires before the
     // per-file loop.
     const result = runChecks(
-      [scopeExpansionCheck],
+      [taskTextDriftCheck],
       laravelCtx([pathOnly("app/Http/Middleware/AuthMiddleware.php")], "!!!  !!!"),
     );
     expect(result.results).toEqual([]);
@@ -202,7 +202,7 @@ describe("scopeExpansionCheck — trigger gates", () => {
     // NaN). The valid auth file in the same diff still produces
     // its scope-expansion finding.
     const result = runChecks(
-      [scopeExpansionCheck],
+      [taskTextDriftCheck],
       laravelCtx(
         [pathOnly("_/.x"), pathOnly("app/Http/Middleware/AuthMiddleware.php")],
         "Update homepage styling",
@@ -220,10 +220,10 @@ describe("scopeExpansionCheck — trigger gates", () => {
 // SECTION 2: positive emission per risky category
 // =============================================================================
 
-describe("scopeExpansionCheck — positive emission per risky category", () => {
+describe("taskTextDriftCheck — positive emission per risky category", () => {
   it("auth: Laravel middleware with low-overlap task → emits scope-expansion.auth", () => {
     const result = runChecks(
-      [scopeExpansionCheck],
+      [taskTextDriftCheck],
       laravelCtx([pathOnly("app/Http/Middleware/AuthMiddleware.php")], "Update homepage styling"),
     );
     expect(result.results.some((r) => r.id === "scope-expansion.auth")).toBe(true);
@@ -231,7 +231,7 @@ describe("scopeExpansionCheck — positive emission per risky category", () => {
 
   it("payments: Laravel billing controller with low-overlap task → emits scope-expansion.payments", () => {
     const result = runChecks(
-      [scopeExpansionCheck],
+      [taskTextDriftCheck],
       laravelCtx(
         [pathOnly("app/Http/Controllers/Billing/CheckoutController.php")],
         "Update homepage styling",
@@ -242,7 +242,7 @@ describe("scopeExpansionCheck — positive emission per risky category", () => {
 
   it("database: Rails migration with low-overlap task → emits scope-expansion.database", () => {
     const result = runChecks(
-      [scopeExpansionCheck],
+      [taskTextDriftCheck],
       railsCtx([pathOnly("db/migrate/20260101000000_create_users.rb")], "Update homepage styling"),
     );
     expect(result.results.some((r) => r.id === "scope-expansion.database")).toBe(true);
@@ -252,7 +252,7 @@ describe("scopeExpansionCheck — positive emission per risky category", () => {
     // generic.dockerfile is framework-agnostic — noFrameworkCtx
     // suffices.
     const result = runChecks(
-      [scopeExpansionCheck],
+      [taskTextDriftCheck],
       noFrameworkCtx([pathOnly("Dockerfile")], "Update homepage styling"),
     );
     expect(result.results.some((r) => r.id === "scope-expansion.infra")).toBe(true);
@@ -261,7 +261,7 @@ describe("scopeExpansionCheck — positive emission per risky category", () => {
   it("deployment: GitHub Actions workflow with low-overlap task → emits scope-expansion.deployment", () => {
     // generic.gh-actions is framework-agnostic.
     const result = runChecks(
-      [scopeExpansionCheck],
+      [taskTextDriftCheck],
       noFrameworkCtx([pathOnly(".github/workflows/deploy.yml")], "Update homepage styling"),
     );
     expect(result.results.some((r) => r.id === "scope-expansion.deployment")).toBe(true);
@@ -272,13 +272,13 @@ describe("scopeExpansionCheck — positive emission per risky category", () => {
 // SECTION 3: high-overlap suppression
 // =============================================================================
 
-describe("scopeExpansionCheck — high-overlap suppression (overlap >= 0.1 → no finding)", () => {
+describe("taskTextDriftCheck — high-overlap suppression (overlap >= 0.1 → no finding)", () => {
   it("auth file with task containing 'middleware' → overlap 0.2 → 0 findings", () => {
     // Task tokens: {"fix", "authentication", "middleware"}
     // Path tokens: {"app", "http", "middleware", "authmiddleware", "php"}
     // Intersection: {"middleware"} → 1 / 5 = 0.20 >= 0.10 → suppressed.
     const result = runChecks(
-      [scopeExpansionCheck],
+      [taskTextDriftCheck],
       laravelCtx(
         [pathOnly("app/Http/Middleware/AuthMiddleware.php")],
         "Fix authentication middleware",
@@ -293,7 +293,7 @@ describe("scopeExpansionCheck — high-overlap suppression (overlap >= 0.1 → n
     //               "checkoutcontroller", "php"}
     // Intersection: {"billing"} → 1 / 6 ≈ 0.167 >= 0.10 → suppressed.
     const result = runChecks(
-      [scopeExpansionCheck],
+      [taskTextDriftCheck],
       laravelCtx(
         [pathOnly("app/Http/Controllers/Billing/CheckoutController.php")],
         "Fix billing checkout flow",
@@ -307,13 +307,13 @@ describe("scopeExpansionCheck — high-overlap suppression (overlap >= 0.1 → n
 // SECTION 4: per-category aggregation
 // =============================================================================
 
-describe("scopeExpansionCheck — per-category aggregation", () => {
+describe("taskTextDriftCheck — per-category aggregation", () => {
   it("multiple files in same category → ONE finding with [overlap asc, file asc] evidence ordering", () => {
     // Files passed in NON-alphabetical order to prove the detector
     // sorts internally (not by changedFiles insertion order). All
     // have overlap 0, so file path is the tiebreaker.
     const result = runChecks(
-      [scopeExpansionCheck],
+      [taskTextDriftCheck],
       laravelCtx(
         [
           pathOnly("app/Http/Middleware/CsrfMiddleware.php"),
@@ -345,7 +345,7 @@ describe("scopeExpansionCheck — per-category aggregation", () => {
     // payments — and the engine's final sort by [level, category, id]
     // preserves the same order.
     const result = runChecks(
-      [scopeExpansionCheck],
+      [taskTextDriftCheck],
       laravelCtx(
         [
           pathOnly("app/Http/Middleware/AuthMiddleware.php"),
@@ -369,7 +369,7 @@ describe("scopeExpansionCheck — per-category aggregation", () => {
     // "+2 more" tail in the message. Total count "7 files" appears
     // verbatim in the message.
     const result = runChecks(
-      [scopeExpansionCheck],
+      [taskTextDriftCheck],
       laravelCtx(
         [
           pathOnly("app/Http/Middleware/M1.php"),
@@ -396,13 +396,13 @@ describe("scopeExpansionCheck — per-category aggregation", () => {
 // SECTION 5: non-risky categories don't fire
 // =============================================================================
 
-describe("scopeExpansionCheck — non-risky categories don't fire (RISKY_CATEGORIES lock)", () => {
+describe("taskTextDriftCheck — non-risky categories don't fire (RISKY_CATEGORIES lock)", () => {
   it("secrets file (laravel.env: '.env') with zero overlap → 0 findings (secrets not in RISKY_CATEGORIES)", () => {
     // `.env` matches laravel.env (category "secrets") when Laravel
     // is detected. "secrets" is NOT in RISKY_CATEGORIES per D37 —
     // those are owned by the secrets detector, not scope-expansion.
     const result = runChecks(
-      [scopeExpansionCheck],
+      [taskTextDriftCheck],
       laravelCtx([pathOnly(".env")], "Update homepage styling"),
     );
     expect(result.results).toEqual([]);
@@ -413,7 +413,7 @@ describe("scopeExpansionCheck — non-risky categories don't fire (RISKY_CATEGOR
     // "dependencies", framework-agnostic). "dependencies" is NOT
     // in RISKY_CATEGORIES — owned by the dependencies detector.
     const result = runChecks(
-      [scopeExpansionCheck],
+      [taskTextDriftCheck],
       noFrameworkCtx([pathOnly("package.json")], "Update homepage styling"),
     );
     expect(result.results).toEqual([]);
@@ -424,10 +424,10 @@ describe("scopeExpansionCheck — non-risky categories don't fire (RISKY_CATEGOR
 // SECTION 6: finding shape (locked contract)
 // =============================================================================
 
-describe("scopeExpansionCheck — finding shape (D40 + M B schema enforcement locks)", () => {
+describe("taskTextDriftCheck — finding shape (D40 + M B schema enforcement locks)", () => {
   it("finding has id 'scope-expansion.<category>', category 'scope-expansion', level 'high', confidence 'medium'", () => {
     const result = runChecks(
-      [scopeExpansionCheck],
+      [taskTextDriftCheck],
       laravelCtx([pathOnly("app/Http/Middleware/AuthMiddleware.php")], "Update homepage styling"),
     );
     const finding = result.results.find((r) => r.id === "scope-expansion.auth");
@@ -443,7 +443,7 @@ describe("scopeExpansionCheck — finding shape (D40 + M B schema enforcement lo
     // future maintainer drops "Review the listed files" or "scope
     // expansion", this fails.
     const result = runChecks(
-      [scopeExpansionCheck],
+      [taskTextDriftCheck],
       laravelCtx([pathOnly("app/Http/Middleware/AuthMiddleware.php")], "Update homepage styling"),
     );
     const finding = result.results.find((r) => r.id === "scope-expansion.auth");
@@ -459,7 +459,7 @@ describe("scopeExpansionCheck — finding shape (D40 + M B schema enforcement lo
     // locked format `overlap: ${overlap.toFixed(2)}` produces
     // "overlap: 0.00".
     const result = runChecks(
-      [scopeExpansionCheck],
+      [taskTextDriftCheck],
       laravelCtx([pathOnly("app/Http/Middleware/AuthMiddleware.php")], "Update homepage styling"),
     );
     const finding = result.results.find((r) => r.id === "scope-expansion.auth");
@@ -472,14 +472,14 @@ describe("scopeExpansionCheck — finding shape (D40 + M B schema enforcement lo
 // SECTION 7: path normalization
 // =============================================================================
 
-describe("scopeExpansionCheck — path normalization (Windows backslashes)", () => {
+describe("taskTextDriftCheck — path normalization (Windows backslashes)", () => {
   it("Windows backslash risky path → evidence.file normalized to POSIX (matches CheckResultSchema)", () => {
     // CheckResultSchema's safeStoredRelativePath rejects backslash
     // paths via D28 layer-2 validation. The detector normalizes
     // via the shared normalizePathSeparators helper before BOTH
     // tokenization AND emission.
     const result = runChecks(
-      [scopeExpansionCheck],
+      [taskTextDriftCheck],
       laravelCtx(
         [pathOnly("app\\Http\\Middleware\\AuthMiddleware.php")],
         "Update homepage styling",
@@ -497,13 +497,13 @@ describe("scopeExpansionCheck — path normalization (Windows backslashes)", () 
 // SECTION 8: boundary cases
 // =============================================================================
 
-describe("scopeExpansionCheck — boundary cases", () => {
+describe("taskTextDriftCheck — boundary cases", () => {
   it("trimmed task length exactly 8 ('homepage') → does NOT skip; produces findings", () => {
     // MIN_TASK_LENGTH = 8 and the check is `< MIN_TASK_LENGTH`
     // (strict less-than), so length 8 PASSES. Locks the off-by-one
     // boundary: length 8 fires; length 7 (next test) does not.
     const result = runChecks(
-      [scopeExpansionCheck],
+      [taskTextDriftCheck],
       laravelCtx([pathOnly("app/Http/Middleware/AuthMiddleware.php")], "homepage"),
     );
     expect(result.results.some((r) => r.id === "scope-expansion.auth")).toBe(true);
@@ -513,14 +513,14 @@ describe("scopeExpansionCheck — boundary cases", () => {
     // length 7 < MIN_TASK_LENGTH (8) → gate b fires. Verifies
     // the boundary the previous test relies on.
     const result = runChecks(
-      [scopeExpansionCheck],
+      [taskTextDriftCheck],
       laravelCtx([pathOnly("app/Http/Middleware/AuthMiddleware.php")], "homepag"),
     );
     expect(result.results).toEqual([]);
   });
 });
 
-describe("scopeExpansionCheck — rename aliases (M 0.8.0 step 7)", () => {
+describe("taskTextDriftCheck — rename aliases (M 0.8.0 step 7)", () => {
   const CURRENT = "lib/handler.php";
   const ORIGIN = "app/Http/Controllers/Webhooks/Stripe.php";
 
@@ -531,7 +531,7 @@ describe("scopeExpansionCheck — rename aliases (M 0.8.0 step 7)", () => {
     // would score ~0 and the file the task explicitly names would be reported
     // as unannounced scope expansion.
     const result = runChecks(
-      [scopeExpansionCheck],
+      [taskTextDriftCheck],
       laravelCtx([renamed(CURRENT, ORIGIN)], "fix stripe webhooks"),
     );
     expect(result.results).toEqual([]);
@@ -539,7 +539,7 @@ describe("scopeExpansionCheck — rename aliases (M 0.8.0 step 7)", () => {
 
   it("when NEITHER alias relates to the task, it still fires and names the current path", () => {
     const result = runChecks(
-      [scopeExpansionCheck],
+      [taskTextDriftCheck],
       laravelCtx([renamed(CURRENT, ORIGIN)], "Update homepage styling"),
     );
     const finding = result.results.find((r) => r.id === "scope-expansion.payments");

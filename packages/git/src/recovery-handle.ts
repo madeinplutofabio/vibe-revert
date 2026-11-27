@@ -53,7 +53,7 @@
 // Still states-only against RAW TOPOLOGY (revision 13)
 // =============================================================================
 //
-// This module takes `protectedStates`, never a `ProtectedDomainSnapshot`. Raw
+// This module takes `protectedStates`, never a `RestoreMutationDomainSnapshot`. Raw
 // topology watches deliberately contain gitignored and `rollback.exclude`
 // content, which the checkpoint format never captures. Requiring E to reproduce
 // `node_modules/` would refuse a valid recovery handle in every ordinary Node
@@ -62,7 +62,7 @@
 // "States only" was always a contrast with raw topology enumeration. It never
 // meant "ignore the checkpoint's own identity", and adding the HEAD comparison
 // does not weaken it: with no snapshot in scope there is still no watch to
-// enumerate, and `captureProtectedDomain` is still not imported.
+// enumerate, and `captureRestoreMutationDomain` is still not imported.
 //
 // =============================================================================
 // It does not create E
@@ -125,7 +125,7 @@ import {
   compareProtectedStateMaps,
   type ProtectedStateDifference,
   protectedStatesUnchanged,
-} from "./protected-domain.js";
+} from "./restore-mutation-domain.js";
 import type { SelectiveRestorePlan } from "./restore-selective.js";
 
 /**

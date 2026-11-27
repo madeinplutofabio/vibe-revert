@@ -9,7 +9,7 @@
 //   C. refusals and lookup guards                        (cases 14-16)
 //   D. source invariant                                  (case 17)
 //
-// Section A captures S with the real `captureProtectedDomain`, because the
+// Section A captures S with the real `captureRestoreMutationDomain`, because the
 // interesting stabilization failures are about what the repository did between
 // planning and S. Section B hand-builds snapshots so operation-identity and
 // ordering rules can be exercised in shapes a real capture would not produce.
@@ -35,12 +35,12 @@ import {
   stabilizeSelectiveRestorePlan,
 } from "../src/plan-stabilization.js";
 import {
-  captureProtectedDomain,
+  captureRestoreMutationDomain,
   compareProtectedStateMaps,
-  type ProtectedDomainSnapshot,
   protectedStatesUnchanged,
+  type RestoreMutationDomainSnapshot,
   type TopologyWatch,
-} from "../src/protected-domain.js";
+} from "../src/restore-mutation-domain.js";
 import {
   ABSENT_PATH_STATE,
   type SelectiveRestoreClassification,
@@ -54,7 +54,7 @@ const execFileAsync = promisify(execFile);
 // Fixtures
 // =============================================================================
 //
-// Deliberately duplicated from protected-domain.test.ts rather than shared. That
+// Deliberately duplicated from restore-mutation-domain.test.ts rather than shared. That
 // file is sealed, and a shared helper module would reopen it to test a different
 // module's contract. These builders are fixture plumbing, not semantics.
 
@@ -163,7 +163,7 @@ function eligiblePlan(parts: {
 }
 
 const capture = (repo: TestRepo, plan: SelectiveRestorePlan, excludes: readonly string[] = []) =>
-  captureProtectedDomain({
+  captureRestoreMutationDomain({
     repoRoot: repo.repoRoot,
     plan,
     rollbackExcludePatterns: excludes,
@@ -172,7 +172,7 @@ const capture = (repo: TestRepo, plan: SelectiveRestorePlan, excludes: readonly 
 const snapshotOf = (
   states: ReadonlyArray<readonly [string, PathState]>,
   watches: readonly TopologyWatch[] = [],
-): ProtectedDomainSnapshot => ({
+): RestoreMutationDomainSnapshot => ({
   states: new Map(states),
   topologyWatches: new Map(watches.map((w) => [w.path, w])),
 });

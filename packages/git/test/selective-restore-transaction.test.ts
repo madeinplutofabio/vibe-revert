@@ -104,7 +104,7 @@ function beforeOf(observed: PathState, content: string): PathState {
  * Every ancestor directory of `path`, repo-relative.
  *
  * Restoring a nested path depends on the topology of the directories containing
- * it, and stabilization DERIVES that dependency set from the protected domain
+ * it, and stabilization DERIVES that dependency set from the restore mutation domain
  * and requires the plan to already declare it. A plan that omits them is
  * rejected with `topology_dependency`, which is what a root-level path never
  * triggers.
@@ -581,7 +581,7 @@ describe("runSelectiveRestoreTransaction settled outcomes", () => {
     try {
       const result = await runTransaction(f, {
         runVerificationCommands: async () => {
-          // Self-ignored, so it never enters the protected domain, yet it is a
+          // Self-ignored, so it never enters the restore mutation domain, yet it is a
           // live rule source. Only the exclusion basis moves.
           await write(f.repoRoot, ".gitignore", ".gitignore\n");
           return "done";

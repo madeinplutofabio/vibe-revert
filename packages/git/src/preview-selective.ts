@@ -10,7 +10,7 @@
 //
 // READ ONLY, and structurally so. This module opens a scratch oracle and
 // observes it. It never touches the project's worktree, index, or HEAD: it
-// imports no transplant, no gate, no protected-domain capture and no scheduler,
+// imports no transplant, no gate, no restore-mutation-domain capture and no scheduler,
 // so there is nothing here that could write. Cleanup runs on every path because
 // `withCheckpointOracle` owns the lifecycle.
 //

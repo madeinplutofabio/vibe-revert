@@ -42,12 +42,12 @@ import {
   postTransplantStateConsistent,
   verifyPostTransplantState,
 } from "./post-transplant-verification.js";
-import {
-  captureProtectedDomain,
-  type ProtectedDomainCaptureOptions,
-  type ProtectedDomainSnapshot,
-} from "./protected-domain.js";
 import { type RecoveryHandleValidationResult, validateRecoveryHandle } from "./recovery-handle.js";
+import {
+  captureRestoreMutationDomain,
+  type RestoreMutationDomainCaptureOptions,
+  type RestoreMutationDomainSnapshot,
+} from "./restore-mutation-domain.js";
 import type { SelectiveRestorePlan } from "./restore-selective.js";
 import {
   type AttemptPublicationBinding,
@@ -318,16 +318,16 @@ export async function runSelectiveRestoreTransaction<TCommandResult>(
   // ONE options object, reused for `S` and for both integrity acquisitions, so
   // every comparison in this transaction measures the same domain by
   // construction rather than by convention.
-  const captureOptions: ProtectedDomainCaptureOptions = {
+  const captureOptions: RestoreMutationDomainCaptureOptions = {
     repoRoot,
     plan,
     rollbackExcludePatterns,
   };
 
-  let frozenSnapshot: ProtectedDomainSnapshot;
+  let frozenSnapshot: RestoreMutationDomainSnapshot;
   let expectedHeadSha: string;
   try {
-    frozenSnapshot = await captureProtectedDomain(captureOptions);
+    frozenSnapshot = await captureRestoreMutationDomain(captureOptions);
     expectedHeadSha = await getHeadSha(repoRoot);
   } catch (cause) {
     return { outcome: "failed", phase: "capture_expected_state", cause };

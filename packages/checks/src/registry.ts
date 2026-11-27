@@ -58,8 +58,8 @@
 import { pathClassifierCheck } from "./classifiers/path-classifier-check.js";
 import { dependenciesCheck } from "./detectors/dependencies.js";
 import { migrationsCheck } from "./detectors/migrations.js";
-import { scopeExpansionCheck } from "./detectors/scope-expansion.js";
 import { secretsCheck } from "./detectors/secrets.js";
+import { taskTextDriftCheck } from "./detectors/task-text-drift.js";
 import { testGapCheck } from "./detectors/test-gap.js";
 import type { Check, ChecksToggleConfig } from "./types.js";
 
@@ -167,7 +167,7 @@ import type { Check, ChecksToggleConfig } from "./types.js";
  *     compile to a picomatch matcher exactly ONCE per run()
  *     invocation, reused across every changed file in the diff.
  *
- * Step 7b has landed: `scopeExpansionCheck` at index 5. Single-category
+ * Step 7b has landed: `taskTextDriftCheck` at index 5. Single-category
  * detector with `category: "scope-expansion"` — toggleable-primary case
  * via `checks.scope_expansion` in `.viberevert.yml` (note the
  * underscore-vs-hyphen split between the toggle key `scope_expansion`
@@ -183,7 +183,7 @@ import type { Check, ChecksToggleConfig } from "./types.js";
  *     file-evidence entries (each carrying `overlap: <0.NN>` detail);
  *     remainder surfaced as "+N more" in the message tail. Sort key
  *     `[overlap asc, file asc]` puts the most suspicious files first.
- * Locked trigger gates (see ./detectors/scope-expansion.ts header):
+ * Locked trigger gates (see ./detectors/task-text-drift.ts header):
  *   - `ctx.task` undefined → skip whole check.
  *   - trimmed `ctx.task.length < 8` → skip whole check (padded short
  *     tasks like "   fix   " are rejected by the trim discipline).
@@ -219,7 +219,7 @@ export const BUILTIN_CHECKS: readonly Check[] = [
   dependenciesCheck,
   migrationsCheck,
   testGapCheck,
-  scopeExpansionCheck,
+  taskTextDriftCheck,
 ];
 
 /**

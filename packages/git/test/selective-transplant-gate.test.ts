@@ -34,7 +34,10 @@ import { describe, expect, it } from "vitest";
 
 import { getHeadSha } from "../src/git-cli.js";
 import { observePathState, readIndexSnapshot } from "../src/path-state.js";
-import { captureProtectedDomain, type ProtectedDomainSnapshot } from "../src/protected-domain.js";
+import {
+  captureRestoreMutationDomain,
+  type RestoreMutationDomainSnapshot,
+} from "../src/restore-mutation-domain.js";
 import type {
   SelectiveRestoreClassification,
   SelectiveRestorePlan,
@@ -143,7 +146,7 @@ interface Transaction {
   readonly repo: string;
   readonly oracle: string;
   readonly plan: SelectiveRestorePlan;
-  readonly snapshot: ProtectedDomainSnapshot;
+  readonly snapshot: RestoreMutationDomainSnapshot;
   readonly headSha: string;
   readonly cleanup: () => Promise<void>;
 }
@@ -154,7 +157,7 @@ interface Transaction {
  *
  * `withOracleBytes: false` omits the oracle's copy, which is how case 9 forces
  * the executor to fail: the materializer reads its evidence before touching the
- * destination, and the oracle is outside the protected domain, so the fence
+ * destination, and the oracle is outside the restore mutation domain, so the fence
  * still passes and the executor is genuinely reached.
  */
 async function setupTransaction(opts: { withOracleBytes?: boolean } = {}): Promise<Transaction> {
@@ -178,7 +181,7 @@ async function setupTransaction(opts: { withOracleBytes?: boolean } = {}): Promi
 
   const observed = await currentState(repo, RESTORED);
   const plan = planFor(RESTORED, observed, beforeOf(observed, BEFORE_BYTES));
-  const snapshot = await captureProtectedDomain({
+  const snapshot = await captureRestoreMutationDomain({
     repoRoot: repo,
     plan,
     rollbackExcludePatterns: [],
@@ -210,7 +213,7 @@ async function setupUnbornTransaction(): Promise<Transaction> {
 
   const observed = await currentState(repo, RESTORED);
   const plan = planFor(RESTORED, observed, beforeOf(observed, BEFORE_BYTES));
-  const snapshot = await captureProtectedDomain({
+  const snapshot = await captureRestoreMutationDomain({
     repoRoot: repo,
     plan,
     rollbackExcludePatterns: [],
@@ -329,7 +332,7 @@ describe("runSelectiveTransplantGate: before the marker", () => {
   it("2: an unstable fence refuses BEFORE publishing anything", async () => {
     const t = await setupTransaction();
     try {
-      // Drift the protected domain after S was frozen.
+      // Drift the restore mutation domain after S was frozen.
       await write(t.repo, "docs/appeared.txt", "new\n");
 
       const p = honest();
@@ -520,7 +523,7 @@ describe("runSelectiveTransplantGate: success and failure", () => {
 
   it("9: an executor failure returns mutation_failed carrying the evidence", async () => {
     // The oracle has no copy of the restored path, so the materializer fails
-    // while reading its evidence. The oracle is outside the protected domain,
+    // while reading its evidence. The oracle is outside the restore mutation domain,
     // so the fence still passes and the executor is genuinely reached.
     const t = await setupTransaction({ withOracleBytes: false });
     try {
@@ -679,7 +682,7 @@ describe("source invariant", () => {
       "oracle-evidence",
       "plan-stabilization",
       "recovery-handle",
-      "protected-domain",
+      "restore-mutation-domain",
     ]) {
       expect(barrelExports(internal), `the barrel re-exports ${internal}`).toBe(false);
     }
@@ -743,7 +746,7 @@ describe("source invariant", () => {
     // fence; publication follows the fence; execution follows publication.
     const prepareIdx = source.indexOf("await prepareSelectiveTransplant(");
     const createIdx = source.indexOf("createTransplantProgress(prepared.obligations");
-    const fenceIdx = source.indexOf("await finalProtectedDomainFence(");
+    const fenceIdx = source.indexOf("await finalRestoreMutationDomainFence(");
     const publishIdx = source.indexOf("await opts.publishAttempt(");
     const executeIdx = source.indexOf("await executePreparedSelectiveTransplant(");
     expect(prepareIdx).toBeGreaterThan(-1);

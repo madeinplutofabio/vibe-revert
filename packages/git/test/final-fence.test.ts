@@ -16,7 +16,7 @@
 // nothing but the frozen baseline: if the fence trusted its caller instead of
 // re-capturing, every one of those cases would return `stable`.
 //
-// Plans are hand-built typed literals, following protected-domain.test.ts. The
+// Plans are hand-built typed literals, following restore-mutation-domain.test.ts. The
 // planner is proven in restore-selective.test.ts; here a plan is INPUT, and the
 // only property the fence needs from it is which paths and watches `S` covers.
 
@@ -31,16 +31,16 @@ import { describe, expect, it } from "vitest";
 
 import {
   type FinalFenceDifference,
-  type FinalProtectedDomainFenceResult,
-  finalProtectedDomainFence,
+  type FinalRestoreMutationDomainFenceResult,
+  finalRestoreMutationDomainFence,
 } from "../src/final-fence.js";
 import { getHeadSha } from "../src/git-cli.js";
 import { observePathState, readIndexSnapshot } from "../src/path-state.js";
 import {
-  captureProtectedDomain,
-  type ProtectedDomainDifference,
-  type ProtectedDomainSnapshot,
-} from "../src/protected-domain.js";
+  captureRestoreMutationDomain,
+  type RestoreMutationDomainDifference,
+  type RestoreMutationDomainSnapshot,
+} from "../src/restore-mutation-domain.js";
 import {
   ABSENT_PATH_STATE,
   type SelectiveRestoreClassification,
@@ -162,16 +162,19 @@ async function planForSrcA(repo: TestRepo): Promise<SelectiveRestorePlan> {
 
 // ---- Invoking the fence -----------------------------------------------------
 
-const captureS = (repo: TestRepo, plan: SelectiveRestorePlan): Promise<ProtectedDomainSnapshot> =>
-  captureProtectedDomain({ repoRoot: repo.repoRoot, plan, rollbackExcludePatterns: [] });
+const captureS = (
+  repo: TestRepo,
+  plan: SelectiveRestorePlan,
+): Promise<RestoreMutationDomainSnapshot> =>
+  captureRestoreMutationDomain({ repoRoot: repo.repoRoot, plan, rollbackExcludePatterns: [] });
 
 const fence = (
   repo: TestRepo,
   plan: SelectiveRestorePlan,
-  frozenSnapshot: ProtectedDomainSnapshot,
+  frozenSnapshot: RestoreMutationDomainSnapshot,
   expectedHeadSha: string,
-): Promise<FinalProtectedDomainFenceResult> =>
-  finalProtectedDomainFence({
+): Promise<FinalRestoreMutationDomainFenceResult> =>
+  finalRestoreMutationDomainFence({
     repoRoot: repo.repoRoot,
     plan,
     rollbackExcludePatterns: [],
@@ -179,7 +182,9 @@ const fence = (
     expectedHeadSha,
   });
 
-function differencesOf(result: FinalProtectedDomainFenceResult): readonly FinalFenceDifference[] {
+function differencesOf(
+  result: FinalRestoreMutationDomainFenceResult,
+): readonly FinalFenceDifference[] {
   if (result.outcome !== "precondition_changed") {
     throw new Error(`expected precondition_changed, received ${result.outcome}`);
   }
@@ -188,7 +193,7 @@ function differencesOf(result: FinalProtectedDomainFenceResult): readonly FinalF
 
 function domainDifferenceOf(
   differences: readonly FinalFenceDifference[],
-): ProtectedDomainDifference {
+): RestoreMutationDomainDifference {
   const found = differences.find(
     (d): d is Extract<FinalFenceDifference, { kind: "protected_domain" }> =>
       d.kind === "protected_domain",
@@ -201,7 +206,7 @@ function domainDifferenceOf(
 // Section A: the stable path
 // =============================================================================
 
-describe("finalProtectedDomainFence: stable", () => {
+describe("finalRestoreMutationDomainFence: stable", () => {
   it("1: an untouched repository at the expected HEAD is stable", async () => {
     const repo = await setupRepo();
     try {
@@ -224,7 +229,7 @@ describe("finalProtectedDomainFence: stable", () => {
 // Section B: domain drift
 // =============================================================================
 
-describe("finalProtectedDomainFence: domain drift", () => {
+describe("finalRestoreMutationDomainFence: domain drift", () => {
   it("2: an unselected protected file edited after S is refused", async () => {
     const repo = await setupRepo();
     try {
@@ -336,7 +341,7 @@ describe("finalProtectedDomainFence: domain drift", () => {
 // Section C: HEAD continuity
 // =============================================================================
 
-describe("finalProtectedDomainFence: HEAD continuity", () => {
+describe("finalRestoreMutationDomainFence: HEAD continuity", () => {
   it("6: a commit that leaves the domain identical is still refused", async () => {
     const repo = await setupRepo();
     try {
@@ -356,7 +361,7 @@ describe("finalProtectedDomainFence: HEAD continuity", () => {
       expect(moved).not.toBe(head);
 
       // The whole reason this module exists beyond the domain comparator: the
-      // protected domain is byte-for-byte unchanged and this must still refuse.
+      // restore mutation domain is byte-for-byte unchanged and this must still refuse.
       const differences = differencesOf(await fence(repo, plan, snapshot, head));
       expect(differences).toEqual([
         { kind: "head_moved", expectedHeadSha: head, observedHeadSha: moved },
@@ -400,7 +405,7 @@ describe("finalProtectedDomainFence: HEAD continuity", () => {
 // `precondition_changed` result: that tells an operator the repository moved,
 // when the truth is that we never managed to observe it.
 
-describe("finalProtectedDomainFence: failures propagate", () => {
+describe("finalRestoreMutationDomainFence: failures propagate", () => {
   it("8: a non-eligible plan throws rather than refusing", async () => {
     const repo = await setupRepo();
     try {
@@ -459,7 +464,7 @@ describe("source invariants", () => {
   it("10: the domain is captured before HEAD, with no mutation import or barrel export", async () => {
     const source = await readFile(new URL("../src/final-fence.ts", import.meta.url), "utf8");
 
-    const captureAt = source.indexOf("await captureProtectedDomain(");
+    const captureAt = source.indexOf("await captureRestoreMutationDomain(");
     const headAt = source.indexOf("await getHeadSha(");
     expect(captureAt).toBeGreaterThan(-1);
     expect(headAt).toBeGreaterThan(-1);

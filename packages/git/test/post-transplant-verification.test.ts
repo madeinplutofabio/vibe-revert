@@ -52,7 +52,10 @@ import {
   type VerifiedCandidate,
   verifyPostTransplantState,
 } from "../src/post-transplant-verification.js";
-import { captureProtectedDomain, type ProtectedDomainSnapshot } from "../src/protected-domain.js";
+import {
+  captureRestoreMutationDomain,
+  type RestoreMutationDomainSnapshot,
+} from "../src/restore-mutation-domain.js";
 import {
   ABSENT_PATH_STATE,
   type SelectiveRestoreClassification,
@@ -196,8 +199,8 @@ function planOf(parts: {
   };
 }
 
-const capture = (fx: Fixture, plan: SelectiveRestorePlan): Promise<ProtectedDomainSnapshot> =>
-  captureProtectedDomain({ repoRoot: fx.repo, plan, rollbackExcludePatterns: [] });
+const capture = (fx: Fixture, plan: SelectiveRestorePlan): Promise<RestoreMutationDomainSnapshot> =>
+  captureRestoreMutationDomain({ repoRoot: fx.repo, plan, rollbackExcludePatterns: [] });
 
 // ---- Progress ---------------------------------------------------------------
 
@@ -245,7 +248,7 @@ const stagedProgress = (leaf: ObligationState, index: ObligationState) =>
 
 async function stagedScenario(fx: Fixture): Promise<{
   readonly plan: SelectiveRestorePlan;
-  readonly frozen: ProtectedDomainSnapshot;
+  readonly frozen: RestoreMutationDomainSnapshot;
   readonly head: string;
 }> {
   await seedOracle(fx, "a.txt", BEFORE);
@@ -281,7 +284,7 @@ const verify = (
   fx: Fixture,
   plan: SelectiveRestorePlan,
   progress: RecordedTransplantProgress,
-  frozenSnapshot: ProtectedDomainSnapshot,
+  frozenSnapshot: RestoreMutationDomainSnapshot,
   expectedHeadSha: string,
 ): Promise<PostTransplantVerificationResult> =>
   verifyPostTransplantState({
@@ -483,7 +486,7 @@ describe("verifyPostTransplantState: already_at_before", () => {
 describe("verifyPostTransplantState: synthetic parents", () => {
   async function parentScenario(fx: Fixture): Promise<{
     readonly plan: SelectiveRestorePlan;
-    readonly frozen: ProtectedDomainSnapshot;
+    readonly frozen: RestoreMutationDomainSnapshot;
     readonly head: string;
   }> {
     await write(fx.oracle, "dir/leaf.txt", BEFORE);
@@ -688,7 +691,7 @@ describe("verifyPostTransplantState: domain and HEAD", () => {
 describe("verifyPostTransplantState: topology", () => {
   async function removalScenario(fx: Fixture): Promise<{
     readonly plan: SelectiveRestorePlan;
-    readonly frozen: ProtectedDomainSnapshot;
+    readonly frozen: RestoreMutationDomainSnapshot;
     readonly head: string;
   }> {
     await write(fx.repo, "dir/gone.txt", AFTER);
@@ -918,7 +921,7 @@ describe("verifyPostTransplantState: evidence defects", () => {
       };
 
       /** `S` genuinely captured, then stripped of the selected KEY. */
-      const withoutSelected: ProtectedDomainSnapshot = {
+      const withoutSelected: RestoreMutationDomainSnapshot = {
         states: new Map([...baseSnapshot.states].filter(([path]) => path !== "a.txt")),
         topologyWatches: baseSnapshot.topologyWatches,
       };
@@ -938,7 +941,7 @@ describe("verifyPostTransplantState: evidence defects", () => {
         string,
         SelectiveRestorePlan,
         RecordedTransplantProgress,
-        ProtectedDomainSnapshot,
+        RestoreMutationDomainSnapshot,
       ][] = [
         [
           "a duplicated classification",

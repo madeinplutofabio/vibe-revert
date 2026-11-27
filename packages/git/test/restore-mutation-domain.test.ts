@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Fabio Marcello Salvadori
 
-// Unit tests for the protected domain (M 0.8.0 step 10B, §9/§10 revision 13).
+// Unit tests for the restore mutation domain (M 0.8.0 step 10B, §9/§10 revision 13).
 //
 // Five sections:
 //   A. capture -- the protected path set (REAL repository, hand-built plans)
@@ -16,7 +16,7 @@
 // here the plan is INPUT, and building it directly is the only way to exercise
 // shapes the planner would refuse to emit -- a destructive root that stopped
 // being a directory, a watch parent observed as a regular file, an index-only
-// candidate. A failure here is attributable to the protected domain.
+// candidate. A failure here is attributable to the restore mutation domain.
 //
 // The repository is real because capture OBSERVES reality: readIndexSnapshot,
 // observePathState, gitListUntracked, and raw readdir. Typed literals cannot
@@ -35,15 +35,15 @@ import { describe, expect, it } from "vitest";
 
 import { observePathState, readIndexSnapshot } from "../src/path-state.js";
 import {
-  captureProtectedDomain,
-  compareProtectedDomainSnapshots,
+  captureRestoreMutationDomain,
   compareProtectedStateMaps,
-  observeProtectedDomainFromFrozenMembership,
-  type ProtectedDomainSnapshot,
-  protectedDomainUnchanged,
+  compareRestoreMutationDomainSnapshots,
+  observeRestoreMutationDomainFromFrozenMembership,
   protectedStatesUnchanged,
+  type RestoreMutationDomainSnapshot,
+  restoreMutationDomainUnchanged,
   type TopologyWatch,
-} from "../src/protected-domain.js";
+} from "../src/restore-mutation-domain.js";
 import {
   ABSENT_PATH_STATE,
   type SelectiveRestoreClassification,
@@ -172,13 +172,13 @@ function eligiblePlan(parts: {
 }
 
 const capture = (repo: TestRepo, plan: SelectiveRestorePlan, excludes: readonly string[] = []) =>
-  captureProtectedDomain({
+  captureRestoreMutationDomain({
     repoRoot: repo.repoRoot,
     plan,
     rollbackExcludePatterns: excludes,
   });
 
-const watchAt = (snapshot: ProtectedDomainSnapshot, path: string): TopologyWatch => {
+const watchAt = (snapshot: RestoreMutationDomainSnapshot, path: string): TopologyWatch => {
   const watch = snapshot.topologyWatches.get(path);
   if (watch === undefined) throw new Error(`no topology watch at ${JSON.stringify(path)}`);
   return watch;
@@ -190,7 +190,7 @@ const memberPaths = (watch: TopologyWatch): readonly string[] => watch.members.m
 // Section A: the protected path set
 // =============================================================================
 
-describe("captureProtectedDomain: protected path set", () => {
+describe("captureRestoreMutationDomain: protected path set", () => {
   it("1: both rename aliases of the selected footprint are protected", async () => {
     const repo = await setupRepo();
     try {
@@ -345,7 +345,7 @@ describe("captureProtectedDomain: protected path set", () => {
     const repo = await setupRepo();
     try {
       // Independent hard-exclusion: without it, removing the ignore line would
-      // let the protected domain observe VibeRevert's own store.
+      // let the restore mutation domain observe VibeRevert's own store.
       await write(repo, ".gitignore", "\n");
       await write(repo, ".viberevert/objects/ab/cdef", "internal\n");
 
@@ -494,7 +494,7 @@ describe("captureProtectedDomain: protected path set", () => {
 // Section B: topology watches
 // =============================================================================
 
-describe("captureProtectedDomain: topology watches", () => {
+describe("captureRestoreMutationDomain: topology watches", () => {
   it("17: a destructive root gets a RECURSIVE watch over its full subtree", async () => {
     const repo = await setupRepo();
     try {
@@ -755,7 +755,7 @@ describe("captureProtectedDomain: topology watches", () => {
 // Section C: comparison
 // =============================================================================
 
-describe("protected-domain comparison", () => {
+describe("restore-mutation-domain comparison", () => {
   const stateA = regularState("a\n");
   const stateB = regularState("b\n");
 
@@ -765,7 +765,7 @@ describe("protected-domain comparison", () => {
   const snapshot = (
     states: ReadonlyArray<readonly [string, PathState]>,
     watches: readonly TopologyWatch[] = [],
-  ): ProtectedDomainSnapshot => ({
+  ): RestoreMutationDomainSnapshot => ({
     states: new Map(states),
     topologyWatches: new Map(watches.map((w) => [w.path, w])),
   });
@@ -780,7 +780,7 @@ describe("protected-domain comparison", () => {
     const b = snapshot([["x.ts", stateA]], [immediate("", [leaf("x.ts")])]);
 
     expect(protectedStatesUnchanged(compareProtectedStateMaps(a.states, b.states))).toBe(true);
-    expect(protectedDomainUnchanged(compareProtectedDomainSnapshots(a, b))).toBe(true);
+    expect(restoreMutationDomainUnchanged(compareRestoreMutationDomainSnapshots(a, b))).toBe(true);
   });
 
   it("28: an added, a removed, and a changed path are each reported", () => {
@@ -810,7 +810,7 @@ describe("protected-domain comparison", () => {
       [{ path: "flip", kind: "recursive", members: [] }, immediate("fresh", [])],
     );
 
-    const diff = compareProtectedDomainSnapshots(expected, actual);
+    const diff = compareRestoreMutationDomainSnapshots(expected, actual);
     const byPath = new Map(diff.topologyWatchDifferences.map((d) => [d.path, d.reason]));
     expect(byPath.get("gone")).toBe("watch_removed");
     expect(byPath.get("fresh")).toBe("watch_added");
@@ -821,7 +821,10 @@ describe("protected-domain comparison", () => {
     const expected = snapshot([], [immediate("d", [leaf("d/stays"), leaf("d/vanishes")])]);
     const actual = snapshot([], [immediate("d", [leaf("d/appears"), leaf("d/stays")])]);
 
-    const [difference] = compareProtectedDomainSnapshots(expected, actual).topologyWatchDifferences;
+    const [difference] = compareRestoreMutationDomainSnapshots(
+      expected,
+      actual,
+    ).topologyWatchDifferences;
     expect(difference?.reason).toBe("membership_changed");
     expect(difference?.path).toBe("d");
     expect(difference?.addedMembers).toEqual(["d/appears"]);
@@ -833,7 +836,10 @@ describe("protected-domain comparison", () => {
     const expected = snapshot([], [immediate("d", [dir("d/thing")])]);
     const actual = snapshot([], [immediate("d", [leaf("d/thing")])]);
 
-    const [difference] = compareProtectedDomainSnapshots(expected, actual).topologyWatchDifferences;
+    const [difference] = compareRestoreMutationDomainSnapshots(
+      expected,
+      actual,
+    ).topologyWatchDifferences;
     expect(difference?.changedMembers).toEqual(["d/thing"]);
     expect(difference?.addedMembers).toEqual([]);
     expect(difference?.removedMembers).toEqual([]);
@@ -850,10 +856,12 @@ describe("protected-domain comparison", () => {
     expect(
       protectedStatesUnchanged(compareProtectedStateMaps(expected.states, actual.states)),
     ).toBe(true);
-    expect(protectedDomainUnchanged(compareProtectedDomainSnapshots(expected, actual))).toBe(false);
+    expect(
+      restoreMutationDomainUnchanged(compareRestoreMutationDomainSnapshots(expected, actual)),
+    ).toBe(false);
   });
 
-  it("33: compareProtectedDomainSnapshots reproduces the state fields verbatim", () => {
+  it("33: compareRestoreMutationDomainSnapshots reproduces the state fields verbatim", () => {
     const expected = snapshot([
       ["gone.ts", stateA],
       ["moved.ts", stateA],
@@ -864,7 +872,7 @@ describe("protected-domain comparison", () => {
     ]);
 
     const stateOnly = compareProtectedStateMaps(expected.states, actual.states);
-    const whole = compareProtectedDomainSnapshots(expected, actual);
+    const whole = compareRestoreMutationDomainSnapshots(expected, actual);
     expect(whole.addedPaths).toEqual(stateOnly.addedPaths);
     expect(whole.removedPaths).toEqual(stateOnly.removedPaths);
     expect(whole.changedPaths).toEqual(stateOnly.changedPaths);
@@ -909,7 +917,7 @@ describe("protected-domain comparison", () => {
       [immediate("z-dir", zDir.after), immediate("a-dir", aDir.after)],
     );
 
-    const diff = compareProtectedDomainSnapshots(expected, actual);
+    const diff = compareRestoreMutationDomainSnapshots(expected, actual);
     expect(diff.addedPaths).toEqual(["a-added.ts", "z-added.ts"]);
     expect(diff.removedPaths).toEqual(["a-removed.ts", "z-removed.ts"]);
     expect(diff.changedPaths).toEqual(["a-changed.ts", "z-changed.ts"]);
@@ -936,11 +944,14 @@ describe("protected-domain comparison", () => {
 // produces revision 12's empty membership.
 //
 // Scoped to `captureProtectedStateMap` alone. The same module legitimately
-// calls both enumerators from `captureProtectedDomain`.
+// calls both enumerators from `captureRestoreMutationDomain`.
 
 describe("source invariant", () => {
   it("35: captureProtectedStateMap enumerates no filesystem topology", async () => {
-    const source = await readFile(new URL("../src/protected-domain.ts", import.meta.url), "utf8");
+    const source = await readFile(
+      new URL("../src/restore-mutation-domain.ts", import.meta.url),
+      "utf8",
+    );
 
     const declaration = "export async function captureProtectedStateMap(";
     const start = source.indexOf(declaration);
@@ -955,7 +966,7 @@ describe("source invariant", () => {
       "enumerateDescendants(",
       "enumerateImmediateMembers(",
       "immediateMembership(",
-      "captureProtectedDomain(",
+      "captureRestoreMutationDomain(",
     ]) {
       expect(body).not.toContain(forbidden);
     }
@@ -974,7 +985,7 @@ describe("source invariant", () => {
 // whether that path is still a member, judged by rules the operation may itself
 // have rewritten.
 
-describe("observeProtectedDomainFromFrozenMembership", () => {
+describe("observeRestoreMutationDomainFromFrozenMembership", () => {
   it("36: a DELETED frozen path is still observed, as absent, not dropped", async () => {
     const repo = await setupRepo();
     try {
@@ -992,7 +1003,7 @@ describe("observeProtectedDomainFromFrozenMembership", () => {
       // The violation post-operation verification exists to catch.
       await rm(join(repo.repoRoot, "bystander.txt"));
 
-      const now = await observeProtectedDomainFromFrozenMembership(repo.repoRoot, frozen);
+      const now = await observeRestoreMutationDomainFromFrozenMembership(repo.repoRoot, frozen);
 
       // The key SURVIVES, so the question stays "what happened to this
       // protected path?" rather than "is this path still a member?".
@@ -1001,11 +1012,11 @@ describe("observeProtectedDomainFromFrozenMembership", () => {
       if (bystander === undefined) throw new Error("the frozen path left the observation");
       expect(bystander.worktree.kind).toBe("absent");
 
-      const difference = compareProtectedDomainSnapshots(frozen, now);
+      const difference = compareRestoreMutationDomainSnapshots(frozen, now);
       expect(difference.changedPaths).toContain("bystander.txt");
       expect(difference.removedPaths).toEqual([]);
       expect(difference.addedPaths).toEqual([]);
-      expect(protectedDomainUnchanged(difference)).toBe(false);
+      expect(restoreMutationDomainUnchanged(difference)).toBe(false);
 
       // Re-derivation loses the key entirely, so the same damage arrives as
       // membership churn rather than as a state change on a stable domain.
@@ -1038,8 +1049,8 @@ describe("observeProtectedDomainFromFrozenMembership", () => {
       // yardstick moving rather than of anything happening to the file.
       await write(repo, ".gitignore", ".viberevert/\nlogs/\n");
 
-      const now = await observeProtectedDomainFromFrozenMembership(repo.repoRoot, frozen);
-      const difference = compareProtectedDomainSnapshots(frozen, now);
+      const now = await observeRestoreMutationDomainFromFrozenMembership(repo.repoRoot, frozen);
+      const difference = compareRestoreMutationDomainSnapshots(frozen, now);
 
       // The bystander is still a member, and still unchanged. `.gitignore` is
       // itself a frozen member, so the real edit is reported honestly, and it
@@ -1081,7 +1092,7 @@ describe("observeProtectedDomainFromFrozenMembership", () => {
       await rm(join(repo.repoRoot, "dir", "sibling.txt"));
       await write(repo, "dir/newcomer.txt", "appeared after S\n");
 
-      const now = await observeProtectedDomainFromFrozenMembership(repo.repoRoot, frozen);
+      const now = await observeRestoreMutationDomainFromFrozenMembership(repo.repoRoot, frozen);
 
       // Watch roots are a pure PLAN projection during capture, so the risk here
       // is not that they churn: it is that knowing them would require the plan.
@@ -1094,9 +1105,10 @@ describe("observeProtectedDomainFromFrozenMembership", () => {
       // membership derivation: the roots are frozen, their contents are live.
       expect(memberPaths(watchAt(now, "dir"))).toEqual(["dir/leaf.txt", "dir/newcomer.txt"]);
 
-      const watchDiff = compareProtectedDomainSnapshots(frozen, now).topologyWatchDifferences.find(
-        (d) => d.path === "dir",
-      );
+      const watchDiff = compareRestoreMutationDomainSnapshots(
+        frozen,
+        now,
+      ).topologyWatchDifferences.find((d) => d.path === "dir");
       if (watchDiff === undefined) throw new Error("expected a membership difference at dir");
       expect(watchDiff.addedMembers).toEqual(["dir/newcomer.txt"]);
       expect(watchDiff.removedMembers).toEqual(["dir/sibling.txt"]);
@@ -1106,7 +1118,10 @@ describe("observeProtectedDomainFromFrozenMembership", () => {
   });
 
   it("39: the observation path derives no membership and never sees the plan", async () => {
-    const source = await readFile(new URL("../src/protected-domain.ts", import.meta.url), "utf8");
+    const source = await readFile(
+      new URL("../src/restore-mutation-domain.ts", import.meta.url),
+      "utf8",
+    );
 
     // Function-scoped, not import-scoped: this module legitimately imports the
     // whole derivation machinery for the PRE-mutation capture path. Both
@@ -1123,14 +1138,14 @@ describe("observeProtectedDomainFromFrozenMembership", () => {
 
     const postMutationSurface = [
       functionSource("async function observeWatchMembers("),
-      functionSource("export async function observeProtectedDomainFromFrozenMembership("),
+      functionSource("export async function observeRestoreMutationDomainFromFrozenMembership("),
     ].join("\n");
 
     for (const forbidden of [
       "gitListUntracked",
       "compileExcludeMatcher",
       "captureProtectedStateMap(",
-      "captureProtectedDomain(",
+      "captureRestoreMutationDomain(",
       // The plan must not reach post-operation membership at all, neither as a
       // value nor as a type on either function's signature.
       "plan",

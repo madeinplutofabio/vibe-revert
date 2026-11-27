@@ -1074,7 +1074,7 @@ describe("planSelectiveRestore -- parent synthesis and dependency (C1b, stage D)
       });
       expect(plan.outcome).toBe("eligible");
       // No write, but LOAD-BEARING: it must remain a directory until mutation,
-      // so it joins the protected domain via topologyDependencyPaths.
+      // so it joins the restore mutation domain via topologyDependencyPaths.
       expect(plan.topologyDependencyPaths).toEqual(["foo"]);
       expect(plan.operations.some((o) => o.kind === "create_parent_directory")).toBe(false);
     } finally {

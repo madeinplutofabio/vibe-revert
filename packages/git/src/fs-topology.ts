@@ -20,7 +20,7 @@
 // Both FAIL CLOSED on every enumeration error, with no exceptions and no error
 // code translated into a value. Neither may be handed a path whose kind has not
 // already been established by the caller's observed state. Both are also
-// deterministic. Those properties are load-bearing for the protected domain,
+// deterministic. Those properties are load-bearing for the restore mutation domain,
 // not incidental.
 
 import { readdir } from "node:fs/promises";
