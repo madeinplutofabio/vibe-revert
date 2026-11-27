@@ -8,16 +8,16 @@
 | Input | Value |
 | --- | --- |
 | Generator schema version | `1` |
-| pnpm-lock.yaml SHA-256 | `dd5f0efce8c6a699db854fcdca2cd3c4bca0e57ca8f123f25aed0bfe4d715ebb` |
-| Workspace manifests digest (SHA-256) | `0b8a420a4392a7ca7fe23cf8e37d7ce371033544a4849a0103c7e9b80f8d902d` |
+| pnpm-lock.yaml SHA-256 | `f2acabea964acbc6fca5bc9a12be37dfee0ff7ef4b5b4eb58a475a6103a7289a` |
+| Workspace manifests digest (SHA-256) | `21c0e2993082252444ec4c145d8f7271ce3663e0b4bcefa2a00e1983ba75e544` |
 | license-policy.json SHA-256 | `8f210e8009e477a5339838d18731e9f383c03b918be605377391d76baca972e6` |
-| license-metadata.json SHA-256 | `e03e29fa42ae09d515f130bc6d2fc53af123e78e995f9aaba7d523293f3ebacb` |
-| Reachable snapshot instances | `315` |
-| Aggregated package rows | `315` |
+| license-metadata.json SHA-256 | `3ccbe5f2a179caa082e34e1bfb67758c67235ac4f99563881891ebc08dcaff1d` |
+| Reachable snapshot instances | `316` |
+| Aggregated package rows | `316` |
 
 ## Summary
 
-- Third-party packages: `315`
+- Third-party packages: `316`
 - First-party workspace packages: `9`
 - Unresolved peer obligations: `0`
 
@@ -26,7 +26,7 @@
 | Disposition | Count |
 | --- | --- |
 | `allowed` | `1` |
-| `allowed-with-obligations` | `291` |
+| `allowed-with-obligations` | `292` |
 | `review-required` | `23` |
 | `disallowed` | `0` |
 
@@ -34,7 +34,7 @@
 
 | Posture | Count |
 | --- | --- |
-| `production` | `105` |
+| `production` | `106` |
 | `optional-production` | `2` |
 | `peer` | `0` |
 | `development` | `208` |
@@ -105,13 +105,13 @@
 | `@esbuild/win32-arm64` | `0.28.1` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `@esbuild/win32-ia32` | `0.28.1` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `@esbuild/win32-x64` | `0.28.1` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
-| `@hono/node-server` | `1.19.15` | `production` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
+| `@hono/node-server` | `2.1.11` | `production` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `@inquirer/external-editor` | `1.0.3` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `@isaacs/fs-minipass` | `4.0.1` | `production` | `allowed-with-obligations` | `ISC` | `include-license-text` | `no` |
 | `@jridgewell/sourcemap-codec` | `1.5.5` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `@manypkg/find-root` | `1.1.0` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `@manypkg/get-packages` | `1.1.3` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
-| `@modelcontextprotocol/sdk` | `1.29.0` | `production` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
+| `@modelcontextprotocol/sdk` | `1.32.2` | `production` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `@napi-rs/wasm-runtime` | `1.1.4` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `@nodelib/fs.scandir` | `2.1.5` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `@nodelib/fs.stat` | `2.0.5` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
@@ -159,7 +159,7 @@
 | `array-union` | `2.1.0` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `assertion-error` | `2.0.1` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `better-path-resolve` | `1.0.0` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
-| `body-parser` | `2.3.0` | `production` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
+| `body-parser` | `2.4.0` | `production` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `braces` | `3.0.3` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `bytes` | `3.1.2` | `production` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `call-bind-apply-helpers` | `1.0.2` | `production` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
@@ -171,6 +171,7 @@
 | `content-disposition` | `1.1.0` | `production` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `content-type` | `1.0.5` | `production` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `content-type` | `2.0.0` | `production` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
+| `content-type` | `2.1.0` | `production` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `convert-source-map` | `2.0.0` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `cookie` | `0.7.2` | `production` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `cookie-signature` | `1.2.2` | `production` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
@@ -203,7 +204,7 @@
 | `extendable-error` | `0.1.7` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `fast-deep-equal` | `3.1.3` | `production` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `fast-glob` | `3.3.3` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
-| `fast-uri` | `3.1.7` | `production` | `allowed-with-obligations` | `BSD-3-Clause` | `include-license-text` | `no` |
+| `fast-uri` | `3.1.9` | `production` | `allowed-with-obligations` | `BSD-3-Clause` | `include-license-text` | `no` |
 | `fastq` | `1.20.1` | `development` | `allowed-with-obligations` | `ISC` | `include-license-text` | `no` |
 | `fdir` | `6.5.0` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `fill-range` | `7.1.1` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
@@ -223,13 +224,14 @@
 | `graceful-fs` | `4.2.11` | `development` | `allowed-with-obligations` | `ISC` | `include-license-text` | `no` |
 | `has-symbols` | `1.1.0` | `production` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `hasown` | `2.0.4` | `production` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
-| `hono` | `4.12.34` | `production` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
+| `hono` | `4.13.23` | `production` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `http-errors` | `2.0.1` | `production` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `human-id` | `4.1.3` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `iconv-lite` | `0.7.2` | `production` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
+| `iconv-lite` | `0.7.3` | `production` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `ignore` | `5.3.2` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `inherits` | `2.0.4` | `production` | `allowed-with-obligations` | `ISC` | `include-license-text` | `no` |
-| `ip-address` | `10.3.1` | `production` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
+| `ip-address` | `10.7.6` | `production` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `ipaddr.js` | `1.9.1` | `production` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `is-extglob` | `2.1.1` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `is-glob` | `4.0.3` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
@@ -299,8 +301,8 @@
 | `pkce-challenge` | `5.0.1` | `production` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `postcss` | `8.5.22` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `prettier` | `2.8.8` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
-| `proxy-addr` | `2.0.7` | `production` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
-| `qs` | `6.16.0` | `production` | `allowed-with-obligations` | `BSD-3-Clause` | `include-license-text` | `no` |
+| `proxy-addr` | `2.0.8` | `production` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
+| `qs` | `6.17.1` | `production` | `allowed-with-obligations` | `BSD-3-Clause` | `include-license-text` | `no` |
 | `quansync` | `0.2.11` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `queue-microtask` | `1.2.3` | `development` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `range-parser` | `1.2.1` | `production` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
@@ -360,8 +362,7 @@
 | `wrappy` | `1.0.2` | `production` | `allowed-with-obligations` | `ISC` | `include-license-text` | `no` |
 | `yallist` | `5.0.0` | `production` | `allowed-with-obligations` | `BlueOak-1.0.0` | `include-license-text` | `no` |
 | `yaml` | `2.8.3` | `production` | `allowed-with-obligations` | `ISC` | `include-license-text` | `no` |
-| `zod` | `4.4.1` | `production` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
-| `zod` | `4.4.3` | `production` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
+| `zod` | `4.6.7` | `production` | `allowed-with-obligations` | `MIT` | `include-license-text` | `no` |
 | `zod-to-json-schema` | `3.25.2` | `production` | `allowed-with-obligations` | `ISC` | `include-license-text` | `no` |
 
 ## Details (conflict, review-required, or disallowed)

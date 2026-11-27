@@ -3848,7 +3848,7 @@ describe("Architectural invariants -- M G1a Step 2 D99.M @viberevert/mcp boundar
   // D99.M.11 -- packages/mcp/package.json dependency map (Step 3 surface)
   // ===========================================================================
 
-  it("D99.M.11 (Step 3 surface, post-3.3): packages/mcp/package.json dependencies EXACTLY {@modelcontextprotocol/sdk: 1.29.0, zod: 4.4.3, @viberevert/cli-commands: workspace:*, @viberevert/core: workspace:*, @viberevert/session-format: workspace:*}; forbidden deps absent from all dep sections", () => {
+  it("D99.M.11 (Step 3 surface, post-3.3): packages/mcp/package.json dependencies EXACTLY {@modelcontextprotocol/sdk: 1.32.2, zod: 4.6.7, @viberevert/cli-commands: workspace:*, @viberevert/core: workspace:*, @viberevert/session-format: workspace:*}; forbidden deps absent from all dep sections", () => {
     // Step 3 surface post-3.3: MCP SDK + zod + 3 workspace deps
     // (cli-commands + core + session-format -- the last added in
     // slice 3.3 because check_repo's handler uses ReportFileSchema
@@ -3860,11 +3860,11 @@ describe("Architectural invariants -- M G1a Step 2 D99.M @viberevert/mcp boundar
       pkg.dependencies,
       `${MCP_PACKAGE_JSON_REL} dependencies must EXACTLY match the Step 3 surface (no more, no less).`,
     ).toEqual({
-      "@modelcontextprotocol/sdk": "1.29.0",
+      "@modelcontextprotocol/sdk": "1.32.2",
       "@viberevert/cli-commands": "workspace:*",
       "@viberevert/core": "workspace:*",
       "@viberevert/session-format": "workspace:*",
-      zod: "4.4.3",
+      zod: "4.6.7",
     });
 
     const FORBIDDEN: ReadonlyArray<string> = [

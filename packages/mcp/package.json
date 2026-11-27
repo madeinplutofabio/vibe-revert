@@ -39,11 +39,11 @@
     "access": "public"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.29.0",
+    "@modelcontextprotocol/sdk": "1.32.2",
     "@viberevert/cli-commands": "workspace:*",
     "@viberevert/core": "workspace:*",
     "@viberevert/session-format": "workspace:*",
-    "zod": "4.4.3"
+    "zod": "4.6.7"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",

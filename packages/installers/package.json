@@ -49,6 +49,6 @@
   "dependencies": {
     "@viberevert/adapters": "workspace:*",
     "diff": "9.0.0",
-    "zod": "4.4.3"
+    "zod": "4.6.7"
   }
 }
