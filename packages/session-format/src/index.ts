@@ -252,3 +252,32 @@ export { VIBEREVERT_TEST_FIXED_NOW, VIBEREVERT_TEST_FIXED_ULID_SEED } from "./te
 export { toIsoSecondString } from "./time.js";
 export type { SchemaVersion } from "./version.js";
 export { SCHEMA_VERSION } from "./version.js";
+
+// =============================================================================
+// M 0.9.0 step 0A foundation (step 0B vocabulary is held)
+// =============================================================================
+
+// Inferred TypeScript types.
+export type { DigestDomain } from "./domain-digest.js";
+// Runtime values and zod schemas.
+export {
+  CHANGE_GROUP_DOMAIN,
+  digestDomainTag,
+  domainSeparatedDigest,
+  FINDING_DOMAIN,
+} from "./domain-digest.js";
+export type {
+  EnforcementEffect,
+  PolicyDecision,
+  ResolvedRuleProvenance,
+  RuleLayer,
+  RuleOrigin,
+} from "./policy-decision.js";
+export {
+  EnforcementEffectSchema,
+  PolicyDecisionSchema,
+  PROHIBITED_EFFECT_TERMS,
+  ResolvedRuleProvenanceSchema,
+  RuleLayerSchema,
+  RuleOriginSchema,
+} from "./policy-decision.js";

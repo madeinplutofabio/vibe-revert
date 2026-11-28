@@ -55,16 +55,9 @@
 // been merged: a collision means an engine bug, which is exactly how this
 // package already treats an exceeded noise-budget cap.
 
-import { createHash } from "node:crypto";
 import { z } from "zod";
 import { normalizePathArray } from "./atoms.js";
-
-/**
- * The single NUL separator byte used for domain/field separation in the finding
- * payload. Built programmatically so no literal U+0000 appears in this source
- * file -- a raw 0x00 byte would make git treat the file as binary.
- */
-const NUL_SEPARATOR = new Uint8Array([0]);
+import { domainSeparatedDigest, FINDING_DOMAIN } from "./domain-digest.js";
 
 /**
  * Shape of a `finding_id`. The VALUE is produced exclusively by
@@ -128,13 +121,7 @@ export function deriveFindingId(
     throw new Error("deriveFindingId: ruleId must not be blank");
   }
   const paths = normalizePathArray(affectedPaths);
-  const hash = createHash("sha256");
-  hash.update("viberevert-finding-v1", "utf8");
-  hash.update(NUL_SEPARATOR);
-  hash.update(reportId, "utf8");
-  hash.update(NUL_SEPARATOR);
-  hash.update(ruleId, "utf8");
-  hash.update(NUL_SEPARATOR);
-  hash.update(JSON.stringify(paths), "utf8");
-  return `fnd_${hash.digest("hex")}`;
+  // See the note in deriveChangeGroupId: construction extracted, bytes
+  // unchanged, pinned by this module's own fixed vectors.
+  return `fnd_${domainSeparatedDigest(FINDING_DOMAIN, [reportId, ruleId, JSON.stringify(paths)])}`;
 }

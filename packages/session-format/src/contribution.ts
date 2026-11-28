@@ -42,7 +42,6 @@
 // generated -- and why the derivation is an exported FUNCTION here rather than
 // prose to be reimplemented downstream.
 
-import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
   CHECKPOINT_ID_REGEX,
@@ -54,6 +53,7 @@ import {
   safeStoredRelativePath,
   sortedUniqueStringArray,
 } from "./atoms.js";
+import { CHANGE_GROUP_DOMAIN, domainSeparatedDigest } from "./domain-digest.js";
 import { PathStateSchema } from "./path-state.js";
 
 /**
@@ -74,14 +74,6 @@ export type ContributionFileSchemaVersion = typeof CONTRIBUTION_FILE_SCHEMA_VERS
 // =============================================================================
 // Change-group identity (normative derivation)
 // =============================================================================
-
-/**
- * The single NUL separator byte used for domain/field separation in the
- * change-group payload. Built programmatically so no literal U+0000 ever
- * appears in this source file -- a raw 0x00 byte would make git treat the file
- * as binary.
- */
-const NUL_SEPARATOR = new Uint8Array([0]);
 
 /**
  * Derive a `change_group_id` (v1). THIS FUNCTION IS THE CONTRACT: the
@@ -128,13 +120,10 @@ export function deriveChangeGroupId(sessionId: string, aliases: readonly string[
     throw new Error("deriveChangeGroupId: aliases must contain at least one path");
   }
   const canonical = normalizePathArray(aliases);
-  const hash = createHash("sha256");
-  hash.update("viberevert-change-group-v1", "utf8");
-  hash.update(NUL_SEPARATOR);
-  hash.update(sessionId, "utf8");
-  hash.update(NUL_SEPARATOR);
-  hash.update(JSON.stringify(canonical), "utf8");
-  return `cg_${hash.digest("hex")}`;
+  // Construction lives in domain-digest.ts (M 0.9.0 step 0A). The emitted bytes
+  // are unchanged: the fixed vectors in this module's test file are the proof,
+  // and they would fail if the extraction altered anything.
+  return `cg_${domainSeparatedDigest(CHANGE_GROUP_DOMAIN, [sessionId, JSON.stringify(canonical)])}`;
 }
 
 // =============================================================================
