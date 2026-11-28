@@ -214,7 +214,27 @@ const MISSING_DOWN_RECOMMENDATION =
  * SCOPING block for the rationale.
  */
 export const migrationsCheck: Check = {
-  id: "migrations",
+  // SINGULAR, matching the rule ids this check actually emits:
+  // `migration.missing-down` and `migration.danger-term.<term>`.
+  //
+  // It read `migrations` until M 0.9.0 step 13 preparation, which violated the
+  // rule documented on `Check.id` in types.ts: a multi-rule check namespaces
+  // its emitted ids under its own id. A consumer mapping a finding back to its
+  // detector would have looked for a detector named `migration` and found none,
+  // which matters because `CheckResultBaseSchema` carries no detector field, so
+  // the rule id is the only provenance a finding has.
+  //
+  // Corrected HERE rather than by renaming the emitted ids, and the direction is
+  // forced: `deriveFindingId` hashes the emitted rule id, so touching those
+  // would change every migration finding id in every existing report and break
+  // `--finding` values already recorded in receipts. This field is hashed by
+  // nothing and read by nothing (the engine uses `finding.id` throughout), so
+  // correcting it costs nothing.
+  //
+  // NOT the config toggle key. `checks.migrations` stays plural: it is a
+  // required field of `ResolvedChecksSchema`, persisted in every session.json,
+  // and a documented row in docs/config.md and docs/risk-taxonomy.md.
+  id: "migration",
   category: "database",
   run: (ctx: CheckContext): readonly DetectorResult[] => {
     const results: DetectorResult[] = [];
