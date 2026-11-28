@@ -495,6 +495,28 @@ const DANGER_TERM_SMOKE_CASES: readonly DangerTermSmokeCase[] = [
 // =============================================================================
 
 describe("migrationsCheck — scope gate (database-category files only)", () => {
+  it("CONTROL: the same danger term at a DB-category path DOES fire", () => {
+    // NEAR-MISS POSITIVE CONTROL (M 0.9.0 step 13 preparation).
+    //
+    // Every other case in this block asserts ABSENCE, and absence-only
+    // coverage cannot tell "correctly suppressed" from "this fixture shape
+    // never reached the rule at all". That second failure is what shipped
+    // the step 2 false positive: all of rule 3's negatives used a helper
+    // that hardcoded `removedLines: []`, so none could reach the code path.
+    //
+    // Identical fixture to the negatives below, ONE variable flipped.
+    // Flipped: the path. Same `DROP TABLE` content, same laravel context.
+    const result = runChecks(
+      [migrationsCheck],
+      laravelCtx([
+        withAddedLines("database/migrations/2026_01_01_drop.php", [
+          { line: 1, text: "// DROP TABLE users; -- comment in random file" },
+        ]),
+      ]),
+    );
+    expect(result.results.length).toBeGreaterThan(0);
+  });
+
   it("non-DB file (no path-classifier match) → 0 findings", () => {
     const result = runChecks(
       [migrationsCheck],

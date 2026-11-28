@@ -273,6 +273,24 @@ describe("taskTextDriftCheck — positive emission per risky category", () => {
 // =============================================================================
 
 describe("taskTextDriftCheck — high-overlap suppression (overlap >= 0.1 → no finding)", () => {
+  it("CONTROL: the same auth file with an UNRELATED task DOES fire", () => {
+    // NEAR-MISS POSITIVE CONTROL (M 0.9.0 step 13 preparation).
+    //
+    // Every other case in this block asserts ABSENCE, and absence-only
+    // coverage cannot tell "correctly suppressed" from "this fixture shape
+    // never reached the rule at all". That second failure is what shipped
+    // the step 2 false positive: all of rule 3's negatives used a helper
+    // that hardcoded `removedLines: []`, so none could reach the code path.
+    //
+    // Identical fixture to the negatives below, ONE variable flipped.
+    // Flipped: the task text only, so overlap drops below the threshold.
+    const result = runChecks(
+      [taskTextDriftCheck],
+      laravelCtx([pathOnly("app/Http/Middleware/AuthMiddleware.php")], "update the readme"),
+    );
+    expect(result.results.length).toBeGreaterThan(0);
+  });
+
   it("auth file with task containing 'middleware' → overlap 0.2 → 0 findings", () => {
     // Task tokens: {"fix", "authentication", "middleware"}
     // Path tokens: {"app", "http", "middleware", "authmiddleware", "php"}
@@ -397,6 +415,26 @@ describe("taskTextDriftCheck — per-category aggregation", () => {
 // =============================================================================
 
 describe("taskTextDriftCheck — non-risky categories don't fire (RISKY_CATEGORIES lock)", () => {
+  it("CONTROL: the same zero-overlap task against a RISKY-category path DOES fire", () => {
+    // NEAR-MISS POSITIVE CONTROL (M 0.9.0 step 13 preparation).
+    //
+    // Every other case in this block asserts ABSENCE, and absence-only
+    // coverage cannot tell "correctly suppressed" from "this fixture shape
+    // never reached the rule at all". That second failure is what shipped
+    // the step 2 false positive: all of rule 3's negatives used a helper
+    // that hardcoded `removedLines: []`, so none could reach the code path.
+    //
+    // Identical fixture to the negatives below, ONE variable flipped.
+    // Flipped: the path's CATEGORY only. Same laravel context, same
+    // deliberately unrelated task text as the negatives below, which is
+    // what isolates the category as the reason they stay silent.
+    const result = runChecks(
+      [taskTextDriftCheck],
+      laravelCtx([pathOnly("app/Http/Middleware/AuthMiddleware.php")], "Update homepage styling"),
+    );
+    expect(result.results.length).toBeGreaterThan(0);
+  });
+
   it("secrets file (laravel.env: '.env') with zero overlap → 0 findings (secrets not in RISKY_CATEGORIES)", () => {
     // `.env` matches laravel.env (category "secrets") when Laravel
     // is detected. "secrets" is NOT in RISKY_CATEGORIES per D37 —

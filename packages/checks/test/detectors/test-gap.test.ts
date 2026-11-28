@@ -200,6 +200,24 @@ const noFrameworkCtx = (files: readonly ChangedFileInput[]) => ctxFor(files, [])
 // =============================================================================
 
 describe("testGapCheck — scope gate", () => {
+  it("CONTROL: a path that DOES match a rule with sibling patterns fires", () => {
+    // NEAR-MISS POSITIVE CONTROL (M 0.9.0 step 13 preparation).
+    //
+    // Every other case in this block asserts ABSENCE, and absence-only
+    // coverage cannot tell "correctly suppressed" from "this fixture shape
+    // never reached the rule at all". That second failure is what shipped
+    // the step 2 false positive: all of rule 3's negatives used a helper
+    // that hardcoded `removedLines: []`, so none could reach the code path.
+    //
+    // Identical fixture to the negatives below, ONE variable flipped.
+    // Flipped: the path only. Same helper, same laravel context.
+    const result = runChecks(
+      [testGapCheck],
+      laravelCtx([withAddedLines("app/Http/Middleware/AuthMiddleware.php", [])]),
+    );
+    expect(result.results.length).toBeGreaterThan(0);
+  });
+
   it("empty changedFiles → 0 findings", () => {
     const result = runChecks([testGapCheck], laravelCtx([]));
     expect(result.results).toEqual([]);
@@ -297,6 +315,28 @@ describe("testGapCheck — positive emission (risky file without sibling test fi
 // =============================================================================
 
 describe("testGapCheck — sibling suppression (ANY-status paired test change suppresses)", () => {
+  it("CONTROL: the same risky file WITHOUT its sibling test DOES fire", () => {
+    // NEAR-MISS POSITIVE CONTROL (M 0.9.0 step 13 preparation).
+    //
+    // Every other case in this block asserts ABSENCE, and absence-only
+    // coverage cannot tell "correctly suppressed" from "this fixture shape
+    // never reached the rule at all". That second failure is what shipped
+    // the step 2 false positive: all of rule 3's negatives used a helper
+    // that hardcoded `removedLines: []`, so none could reach the code path.
+    //
+    // Identical fixture to the negatives below, ONE variable flipped.
+    // Flipped: the sibling's presence only.
+    //
+    // This block's negatives were additionally mutation-verified during the
+    // audit: with the sibling search disabled, all five failed, so each one
+    // reaches the suppression rather than skirting it.
+    const result = runChecks(
+      [testGapCheck],
+      laravelCtx([withAddedLines("app/Http/Middleware/AuthMiddleware.php", [])]),
+    );
+    expect(result.results.length).toBeGreaterThan(0);
+  });
+
   it("risky middleware ADDED + sibling test ADDED in same diff → 0 findings", () => {
     const result = runChecks(
       [testGapCheck],

@@ -619,6 +619,22 @@ describe("secretsCheck — per-pattern positive coverage", () => {
 // =============================================================================
 
 describe("secretsCheck — entropy/placeholder suppression (channel A: DROPS entirely)", () => {
+  it("CONTROL: the same assignment with a high-entropy long value DOES fire", () => {
+    // NEAR-MISS POSITIVE CONTROL (M 0.9.0 step 13 preparation).
+    //
+    // Every other case in this block asserts ABSENCE, and absence-only
+    // coverage cannot tell "correctly suppressed" from "this fixture shape
+    // never reached the rule at all". That second failure is what shipped
+    // the step 2 false positive: all of rule 3's negatives used a helper
+    // that hardcoded `removedLines: []`, so none could reach the code path.
+    //
+    // Identical fixture to the negatives below, ONE variable flipped.
+    // Flipped: the VALUE only. Same key, same path, same context.
+    const file = pathOnly("src/config.ts", [{ line: 1, text: `STRIPE_SECRET=${DIVERSE_VALUE}` }]);
+    const result = runChecks([secretsCheck], ctxFor([file]));
+    expect(result.results.length).toBeGreaterThan(0);
+  });
+
   it("STRIPE_SECRET=changeme (placeholder + fails length) → 0 findings", () => {
     const file = pathOnly("src/config.ts", [{ line: 1, text: "STRIPE_SECRET=changeme" }]);
     const result = runChecks([secretsCheck], ctxFor([file]));
